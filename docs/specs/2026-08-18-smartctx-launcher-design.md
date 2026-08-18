@@ -72,8 +72,9 @@ automatically. Rejected.
 ## 4. Components
 
 1. **`smartctx` (entrypoint)** — `smartctx [claude args passthrough…]`. Orchestrates:
-   inventory → goal → rank → compose → `exec claude …`. Unrecognized args pass through to
-   `claude` untouched.
+   inventory → goal → **apply exclusion rules** → rank the undecided → compose →
+   `exec claude …`. Also exposes `smartctx rules` for bulk rule authoring. Unrecognized args
+   pass through to `claude` untouched.
 2. **Inventory adapter (Claude Code)** — reads the resolved config root:
    `enabledPlugins` + plugin manifests (name + description), `mcpServers`
    (`$CLAUDE_CONFIG_DIR/.claude.json` + project `.mcp.json`), standalone skill frontmatter.
@@ -96,15 +97,25 @@ automatically. Rejected.
 6. **`Harness` protocol** — `inventory() -> list[Item]` and `compose(kept) -> (argv, env)`.
    Claude Code implementation ships in v1. The core (goal detection + ranking) is
    harness-independent — the agnosticism lives in the design, not yet in shipped adapters.
+7. **Rules store + evaluator** — persists per-item exclusion rules (id/glob → NL text +
+   compiled predicate) in a config-chain TOML, and deterministically evaluates each predicate
+   against the session context to force-keep or force-drop a candidate, ahead of similarity
+   ranking. Offline, no model. See §12.
+8. **Rule compiler (local instruct model)** — translates an NL rule into a structured predicate
+   at authoring time only (setup command or launch-time elicitation), via a small local instruct
+   LLM (llama.cpp + small GGUF). Never runs at plain launch. See §12.
 
 ## 5. Data flow
 
 ```
-inventory()  -> items
-detect_goal()-> goal (+ confidence; prompt if low)
-rank(goal, items) -> kept  (score >= threshold ∪ always-keep)
+inventory()        -> items
+detect_goal()      -> context (goal string + confidence; prompt if low)
+apply_rules(items, rules, context) -> (forced_keep, forced_drop, undecided)
+    # rule-less drop candidates may trigger elicitation -> compile -> persist
+rank(context, undecided) -> ranked_kept  (score >= threshold ∪ always-keep)
+kept = forced_keep ∪ ranked_kept  (minus forced_drop)
 adapter.compose(kept) -> (argv, env)
-exec(argv, env)   # replaces the smartctx process
+exec(argv, env)   # runs claude as a child; overlays cleaned up after exit
 ```
 
 ## 6. Always-keep set (configurable, never shipped machine-specific)
@@ -136,6 +147,9 @@ the full, unscoped session with a warning to stderr.
   heuristic (degraded ranking) + warn.
 - Goal undetectable AND non-interactive (`-p`/`--print`, no TTY) → keep all + warn.
 - Config unreadable / parse error → keep all + warn.
+- Instruct model missing at authoring time → skip NL compilation; prompt the user for a simple
+  `always keep` / `always drop` / `skip` choice for that item instead + warn. Never blocks launch.
+- Non-interactive launch → no elicitation; only already-compiled rules apply.
 
 ## 8. Testing
 
@@ -158,10 +172,13 @@ The tool is built to be **distributed**, not tied to one machine.
   ids, paths, or alias names. Per-user/per-repo settings live in the config chain (§6):
   `SMARTCTX_ALWAYS_KEEP` env, `.smartctx/config.toml` (repo), `$CLAUDE_CONFIG_DIR/smartctx/config.toml`
   (user). Threshold and model source are overridable in the same chain.
-- **Model provisioning** — the model2vec model is fetched on first run to the standard cache
-  (`~/.cache`), with its source/name overridable via config; offline machines fall back to the
-  keyword heuristic (§7). No model binary is vendored into the package unless a later decision
-  requires fully offline installs.
+- **Model provisioning** — the model2vec embedding model is fetched on first run to the standard
+  cache (`~/.cache`), source/name overridable via config; offline machines fall back to the
+  keyword heuristic (§7). The instruct model for rule compilation (§12) is a **separate, optional**
+  GGUF fetched (or pointed at via `rule_model_path`) only when rule authoring is used; absent →
+  the degrade path in §7 applies. Neither model is vendored into the package.
+- **Optional dependency** — `llama-cpp-python` is an **extra** (`smartctx[rules]`), not a base
+  dependency; core scoping installs and runs without it.
 - **Portability** — POSIX shells + Python ≥ 3.11 (stdlib `tomllib`); no dependency on the author's dotfiles.
 
 ## 10. Out of scope (YAGNI for v1)
@@ -179,3 +196,66 @@ The tool is built to be **distributed**, not tied to one machine.
    opts in by aliasing it to `smartctx`.
 3. **Config format** — TOML.
 4. **Model** — fetch on first run to `~/.cache`; no vendored binary; offline → keyword fallback (§9).
+5. **Exclusion rules** (added 2026-08-18) — elicited both via a `smartctx rules` setup command
+   and as a launch-time fallback for rule-less drop candidates; NL compiled to a deterministic
+   predicate by a small **local instruct** model at authoring time; launch-time evaluation is
+   deterministic and offline. See §12.
+
+## 12. Exclusion rules layer
+
+Beyond similarity, the user attaches **exclusion rules** to items so context-sensitive items
+(e.g. a corporate plugin/skill that must appear only in work-related sessions) are kept or
+dropped by an explicit, deterministic rule rather than by cosine score alone.
+
+### Rule and predicate
+
+A rule binds an item id/glob to NL text and a compiled predicate:
+
+```toml
+# $CLAUDE_CONFIG_DIR/smartctx/rules.toml  (user)  and/or  ./.smartctx/rules.toml (repo)
+[[rule]]
+target = "camunda-*"
+nl = "corporate design-system plugin — only for camunda / bpmn / work sessions"
+[rule.predicate]
+action = "keep_if"          # keep_if | drop_if | always_keep | always_drop
+match = ["camunda", "bpmn", "work", "orchestration"]
+match_mode = "any"          # any | all
+```
+
+**Predicate semantics** (evaluated against `context` = the goal string, case-insensitive
+substring match of each `match` term; `match_mode` combines them):
+
+- `always_keep` → force keep.
+- `always_drop` → force drop.
+- `keep_if` → context matches ⇒ force keep; no match ⇒ **force drop** (item is scoped *only* to
+  those contexts).
+- `drop_if` → context matches ⇒ force drop; no match ⇒ **undecided** (falls through to ranking).
+
+**Precedence:** `always_keep` config set (§6) > rules > similarity threshold (§4). Within rules,
+an exact-id rule wins over a glob rule; if still tied, `always_*` beats conditional.
+
+### Store & precedence
+
+Rules load from the config chain (repo `./.smartctx/rules.toml` overrides
+`$CLAUDE_CONFIG_DIR/smartctx/rules.toml` per `target`). Repo rules are git-ignorable or shareable
+at the user's choice. Unknown targets are ignored silently (distributed-tool reality).
+
+### Elicitation (both modes)
+
+- **Setup — `smartctx rules`**: walks the inventory; for each item without a rule, shows its
+  id/kind/description and prompts for an NL rule (empty = skip, leaves it to pure ranking).
+  Compiles and saves each.
+- **Launch fallback**: when scoping would drop one or more items that have **no** rule, and the
+  session is interactive (TTY, not `-p/--print`), smartctx prompts **once** for all such
+  candidates as a batch (each skippable), compiles, saves, then applies. Non-interactive → no
+  prompt; only pre-compiled rules apply.
+
+### Compiler (local instruct model, authoring-time only)
+
+`compile_rule(nl, item) -> Predicate` calls a small local instruct LLM (llama.cpp + small GGUF,
+e.g. `Qwen2.5-0.5B-Instruct`) with a constrained prompt that must return the predicate JSON above;
+the result is schema-validated (unknown `action` / non-list `match` → rejected, re-prompt once,
+then fall back to the §7 simple-choice degrade). The model is invoked **only** during
+elicitation, never at plain launch, so launches stay deterministic and offline. `rule_model_path`
+in config points at the GGUF; absent → §7 degrade. The compiler takes the model as an injected
+callable so tests never load a real model.
