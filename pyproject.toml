@@ -9,6 +9,7 @@ smartctx = "smartctx.cli:main"
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]
+rules = ["llama-cpp-python>=0.2"]
 
 [build-system]
 requires = ["hatchling"]
