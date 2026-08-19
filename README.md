@@ -56,6 +56,19 @@ alias claude-perso="CLAUDE_CONFIG_DIR=~/.claude-perso smartctx"
 That's it. Run `claude-work` (or whatever you aliased) as you always have — every Claude Code
 argument you pass is forwarded untouched, e.g. `claude-work -p "summarize this repo"`.
 
+### Installing from source
+
+Working from a clone? Install the CLI from the repo instead:
+
+```sh
+make install   # pipx install . --force
+```
+
+Re-run it after any code change — pipx keeps the previously built copy until you reinstall, so
+edits to the source won't reach the `smartctx` on your `PATH` until you `make install` again.
+`make dev` gives you an editable install (`pip install -e ".[dev]"`) if you'd rather skip that
+step while hacking, and `make test` runs the suite.
+
 ## See what it would do — before it does it
 
 Curious, or tuning things? Add `--explain` and smartctx prints its plan and exits **without
