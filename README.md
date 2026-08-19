@@ -146,7 +146,7 @@ each key** (layers don't merge; a list value is overwritten wholesale):
 | `always_keep` | Item ids or glob patterns to never prune. Unknown ids are ignored. | *(empty)* |
 | `threshold` | Cosine cutoff; an item is kept when its relevance score is `>= threshold`. Higher prunes more; lower keeps more. Calibrate with `--explain`. | `0.20` |
 | `model_name` | The embedding model used for ranking. | `minishlab/potion-base-8M` |
-| `rule_model_path` | Absolute path to a local instruct model for compiling natural-language rules (see below). | *(unset)* |
+| `rule_model_path` | Absolute path to a local GGUF instruct model for compiling natural-language rules. **Not bundled — you supply it.** Unset ⇒ natural-language rule authoring is off (you still get the *keep / drop / skip* prompt). See [Exclusion rules](#exclusion-rules). | *(unset)* |
 
 ```toml
 # .smartctx/config.toml
@@ -155,6 +155,8 @@ always_keep = ["superpowers", "remember", "caveman*"]
 
 threshold = 0.20
 
+# Optional: only needed for natural-language rule authoring (see "Exclusion rules").
+# This model is NOT shipped with smartctx — download a GGUF yourself and point here.
 # Use an absolute path — "~" is not expanded.
 rule_model_path = "/Users/you/models/Qwen2.5-0.5B-Instruct.gguf"
 ```
@@ -196,23 +198,31 @@ match_mode = "any"
 
 ### Writing rules the easy way
 
-You rarely need to hand-write the TOML. Two ways to author rules in plain language:
+You rarely need to hand-write the TOML. Two ways to author rules interactively:
 
 - **`smartctx rules`** walks through your tools and asks, for each one without a rule, how you
   want it scoped. Empty answer = skip.
 - **At launch**, if smartctx is about to drop a tool you haven't ruled on (and you're in an
   interactive session), it offers to capture a rule on the spot.
 
-Your plain-language answer is turned into a rule by a small **local instruct model**, enabled by
-installing the optional extra:
+> [!IMPORTANT]
+> **Natural-language rules need setup that isn't included by default.** Out of the box these
+> prompts offer only a fixed *keep always / drop always / skip* choice — plain-English answers
+> like *"only in work sessions"* do **not** work until you add both of the following:
+>
+> 1. **The optional extra** (adds `llama-cpp-python`):
+>    ```sh
+>    pipx install "smartctx[rules]"
+>    ```
+> 2. **A local GGUF instruct model** — download one yourself (e.g. `Qwen2.5-0.5B-Instruct.gguf`;
+>    smartctx does **not** ship it) and set [`rule_model_path`](#configuration) to its absolute path.
+>
+> This is deliberate: a GGUF instruct model is hundreds of MB (vs. the ~29 MB embedding model that
+> *is* bundled), and it runs only while you author rules. **Launches themselves never call any
+> instruct model** — they stay fully deterministic and offline regardless.
 
-```sh
-pipx install "smartctx[rules]"
-```
-
-and pointing `rule_model_path` at a local model file. Without it, rule authoring falls back to a
-simple *keep / drop / skip* prompt — and either way, **launches themselves never call a model;
-they stay fully deterministic and offline.**
+With both in place, your plain-language answer is compiled into a rule by the local model. If a
+particular answer can't be translated, that one item falls back to the *keep / drop / skip* choice.
 
 ## Design guarantees
 

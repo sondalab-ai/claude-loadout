@@ -14,8 +14,8 @@
 | Better guidance once setup is done (how to init) | **Implemented (delivered)** | `6595415` |
 | Review README after shipping the model in-repo | **Verified — README already accurate; two lines added as review outcome** | `a92cf1b` |
 | Review README requirements | **Verified — one clarification line added** | `a92cf1b` |
-| `smartctx --help` triggered the profile picker instead of showing help | **Implemented (delivered)** | `c758237` |
-| Rule elicitation UX unclear (NL rules "didn't work") | **Implemented (delivered)** | `c758237` |
+| `smartctx --help` triggered the profile picker instead of showing help | **Implemented (delivered)** | `37516aa` |
+| Rule elicitation UX unclear (NL rules "didn't work") | **Implemented (delivered)** | `37516aa` |
 
 Legend: **Implemented (delivered)** = merged to the production codebase; **Verified** = checked
 against the build/code, no change needed beyond what the commit shows.
