@@ -17,3 +17,8 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/smartctx"]
+# Ship the vendored default embedding model (non-Python data) inside the wheel.
+artifacts = ["src/smartctx/models/**"]
+
+[tool.hatch.build.targets.sdist]
+artifacts = ["src/smartctx/models/**"]

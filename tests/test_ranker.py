@@ -1,6 +1,14 @@
 import numpy as np
 from smartctx.inventory import Item
-from smartctx.ranker import Ranker, keyword_embed
+from smartctx.ranker import Ranker, keyword_embed, make_model2vec_embed, bundled_model_path
+
+def test_default_model_is_vendored_and_embeds_offline():
+    # The default model ships inside the package: a fresh install ranks with no download.
+    path = bundled_model_path()
+    assert path.is_dir() and (path / "model.safetensors").is_file()
+    embed = make_model2vec_embed("minishlab/potion-base-8M")   # resolves to the vendored copy
+    vecs = embed(["astro imaging", "gmail email"])
+    assert vecs.shape[0] == 2 and vecs.shape[1] > 0
 
 def test_keyword_embed_is_deterministic():
     texts = ["astro sky imaging goal", "Gmail email server"]
