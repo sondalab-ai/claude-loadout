@@ -2,6 +2,7 @@ from __future__ import annotations
 import subprocess, sys
 from fnmatch import fnmatch
 from pathlib import Path
+from typing import NamedTuple
 from smartctx.config import load_config
 from smartctx.inventory import claude_code_inventory, Item
 from smartctx.goal import detect_goal, write_goal_cache
@@ -45,14 +46,14 @@ def _build_compiler(cfg):
         _warn(f"rule model unavailable ({exc}); rule authoring disabled")
         return None
 
-def _resolve_goal(cwd: Path, passthrough: list[str]) -> str:
-    goal = detect_goal(cwd)
+def _resolve_goal(cwd: Path, passthrough: list[str]) -> tuple[str, str, float]:
+    goal = detect_goal(cwd)                          # returns (text, source, confidence)
     if goal.confidence < 0.15 and _interactive(passthrough):
         entered = _ask(f"smartctx: session goal? [{goal.goal}] ").strip()
         if entered:
             write_goal_cache(cwd, entered)         # preflight ruling: persist, don't re-ask
-            return entered
-    return goal.goal
+            return entered, "prompt", 1.0
+    return goal.goal, goal.source, goal.confidence
 
 def _elicit(item: Item, context: str, compile_fn, config_root: Path) -> str:
     nl = _ask(f"smartctx: rule for '{item.id}' ({item.kind})? [enter=skip] ").strip()
@@ -68,12 +69,20 @@ def _elicit(item: Item, context: str, compile_fn, config_root: Path) -> str:
     save_rule(config_root, Rule(target=item.id, nl=nl, predicate=pred))
     return evaluate(pred, context)
 
+class _Scope(NamedTuple):
+    goal: str
+    source: str
+    confidence: float
+    threshold: float
+    kept: list
+    dropped: list
+
 def _scoped_plan(passthrough: list[str], cwd: Path):
     cfg = load_config(cwd=cwd)
     items = claude_code_inventory(cfg.config_root, cwd)
     if not items:
         return None, None
-    context = _resolve_goal(cwd, passthrough)
+    context, gsource, gconf = _resolve_goal(cwd, passthrough)
     rules = load_rules(cfg.config_root, cwd)
     pinned = [i for i in items if any(fnmatch(i.id, g) for g in cfg.always_keep)]
     pinned_ids = {i.id for i in pinned}            # always_keep config wins over rules (spec §12)
@@ -94,7 +103,7 @@ def _scoped_plan(passthrough: list[str], cwd: Path):
                     kept.append(item)
                     dropped = [(i, s) for i, s in dropped if i.id != item.id]
     plan = compose(kept, items, cfg.config_root, passthrough, cwd=cwd)
-    return (kept, dropped), plan
+    return _Scope(context, gsource, gconf, cfg.threshold, kept, dropped), plan
 
 def _cmd_rules(cwd: Path) -> int:
     if not _interactive([]):                        # no TTY -> nothing to elicit; fail-open
@@ -128,10 +137,12 @@ def main(argv: list[str] | None = None) -> int:
         return subprocess.run(["claude", *passthrough]).returncode
     if plan is None:
         return subprocess.run(["claude", *passthrough]).returncode
-    kept, dropped = result
+    scope = result
     if explain:
-        print(f"goal-scoped session\nkept: {[i.id for i in kept]}")
-        print(f"dropped: {[(i.id, round(s, 3) if isinstance(s, float) else s) for i, s in dropped]}")
+        print(f"goal: {scope.goal!r}  (source: {scope.source}, confidence: {scope.confidence:.2f})")
+        print(f"threshold: {scope.threshold}")
+        print(f"kept: {[i.id for i in scope.kept]}")
+        print(f"dropped: {[(i.id, round(s, 3) if isinstance(s, float) else s) for i, s in scope.dropped]}")
         print("argv: " + " ".join(plan.argv))
         _cleanup(plan.tmp_paths)
         return 0
