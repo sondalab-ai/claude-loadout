@@ -117,6 +117,30 @@ def test_launch_elicitation_survives_eof_on_piped_stdin(tmp_path, monkeypatch):
     rc = cli.main([])                                      # must not raise EOFError
     assert rc == 0
 
+def test_doctor_prints_guidance_and_does_not_launch(tmp_path, monkeypatch, capsys):
+    root = _root(tmp_path)                             # one mcp + one plugin
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "make_model2vec_embed", lambda name: cli.keyword_embed)
+    launched = {"ran": False}
+    monkeypatch.setattr(cli.subprocess, "run", lambda *a, **k: launched.__setitem__("ran", True))
+    rc = cli.main(["doctor"])
+    assert rc == 0 and launched["ran"] is False
+    out = capsys.readouterr().out
+    assert "config dir:" in out and "inventory: 1 mcp, 1 plugins" in out
+    assert "--explain" in out and "alias claude=" in out    # init guidance present
+    assert "keyword fallback" in out                        # model state reported
+
+def test_doctor_survives_inventory_error(tmp_path, monkeypatch, capsys):
+    root = _root(tmp_path)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "claude_code_inventory",
+                        lambda root, cwd=None: (_ for _ in ()).throw(RuntimeError("boom")))
+    rc = cli.main(["doctor"])
+    assert rc == 0
+    assert "inventory: unavailable" in capsys.readouterr().out
+
 def _skill_root(tmp_path):
     root = _root(tmp_path)
     skill = root / "skills" / "astro"; skill.mkdir(parents=True)

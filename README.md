@@ -69,6 +69,20 @@ You'll see the goal it detected, which items it would keep, which it would drop 
 the exact command it would run. It's the best way to get a feel for the tool and to calibrate how
 aggressively it prunes.
 
+## Check your setup — and what to do next
+
+Just installed, or unsure whether things are wired up? `smartctx doctor` inspects your
+environment without launching anything and prints the next steps:
+
+```sh
+smartctx doctor
+```
+
+It shows the resolved config dir (from `CLAUDE_CONFIG_DIR`), which config files exist, how many
+MCP servers / plugins / skills it would inventory, which embedding model is in use (bundled,
+external, or keyword fallback), whether a rule model is configured — and then the alias +
+`--explain` + `rules` cheat sheet to get going.
+
 ---
 
 ## How it works

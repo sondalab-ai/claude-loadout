@@ -6,7 +6,7 @@ from typing import NamedTuple
 from smartctx.config import load_config
 from smartctx.inventory import claude_code_inventory, Item
 from smartctx.goal import detect_goal, write_goal_cache
-from smartctx.ranker import Ranker, make_model2vec_embed, keyword_embed
+from smartctx.ranker import Ranker, make_model2vec_embed, keyword_embed, bundled_model_path
 from smartctx.compose import compose
 from smartctx.rules import load_rules, apply_rules, has_rule, save_rule, Rule, Predicate, evaluate
 from smartctx.compiler import compile_rule, make_local_instruct
@@ -123,11 +123,44 @@ def _cmd_rules(cwd: Path) -> int:
     print(f"smartctx: authored {authored} rule(s)")
     return 0
 
+def _cmd_doctor(cwd: Path) -> int:
+    cfg = load_config(cwd=cwd)
+    print("smartctx doctor — setup check")
+    print(f"  config dir: {cfg.config_root}")
+    for label, path in (("user config", cfg.config_root / "smartctx" / "config.toml"),
+                        ("repo config", cwd / ".smartctx" / "config.toml")):
+        print(f"  {label}: {path} ({'present' if path.is_file() else 'absent'})")
+    try:
+        items = claude_code_inventory(cfg.config_root, cwd)
+    except Exception as exc:                       # fail-open: doctor must never crash
+        print(f"  inventory: unavailable ({exc})")
+    else:
+        counts = {k: sum(1 for i in items if i.kind == k) for k in ("mcp", "plugin", "skill")}
+        print(f"  inventory: {counts['mcp']} mcp, {counts['plugin']} plugins, {counts['skill']} skills")
+    bundled = bundled_model_path().is_dir()
+    embed = _build_embed(cfg.model_name)           # warns + falls back on failure
+    model_state = ("keyword fallback" if embed is keyword_embed
+                   else "bundled copy" if bundled else "external")
+    print(f"  embedding model: {cfg.model_name} ({model_state})")
+    print(f"  rule model: {cfg.rule_model_path or 'not configured — rule authoring uses keep/drop/skip prompts'}")
+    print("\nNext steps")
+    print("  1. Point your launch command at smartctx, e.g. add to your shell rc:")
+    print('       alias claude="smartctx"')
+    print('     or wrap a separate profile:')
+    print('       alias claude-work="CLAUDE_CONFIG_DIR=~/.claude-work smartctx"')
+    print("  2. Preview what a session would load, without launching anything:")
+    print("       smartctx --explain")
+    print("  3. Scope tools with plain-language rules:")
+    print("       smartctx rules")
+    return 0
+
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     cwd = Path.cwd()
     if argv and argv[0] == "rules":
         return _cmd_rules(cwd)
+    if argv and argv[0] == "doctor":
+        return _cmd_doctor(cwd)
     explain = "--explain" in argv
     passthrough = [a for a in argv if a != "--explain"]
     try:
