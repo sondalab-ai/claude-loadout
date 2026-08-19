@@ -206,10 +206,11 @@ they stay fully deterministic and offline.**
 
 ## Requirements
 
-- Python ≥ 3.11
+- Python ≥ 3.11 (runtime deps `model2vec` and `numpy` install automatically)
 - Claude Code
 - Optional, for natural-language rule authoring: the `smartctx[rules]` extra
   (`llama-cpp-python`) plus a local GGUF instruct model
+- The uninstall script is bash (the tool itself is platform-independent)
 
 ## Uninstalling
 
