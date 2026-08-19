@@ -125,7 +125,10 @@ threshold = 0.35
 rule_model_path = "/Users/you/models/Qwen2.5-0.5B-Instruct.gguf"
 ```
 
-On first run the embedding model is downloaded once to your standard cache. On an offline machine
+The default embedding model ships **inside the package** (~29 MB, `minishlab/potion-base-8M`,
+MIT-licensed) — a fresh install ranks offline out of the box, with no first-run download. Point
+`model_name` at another model2vec model (a Hub id or a local directory) only if you want to
+override the default; a Hub id is fetched on demand, and if a model can't be loaded at all
 smartctx falls back to a keyword-matching heuristic and warns — it still runs.
 
 ## Exclusion rules
