@@ -6,13 +6,15 @@
 
 **Architecture:** A single console entrypoint orchestrates five pure-ish units — config loader, inventory adapter, goal detector, relevance ranker (local model2vec embeddings), launch composer — then runs `claude` as a child with two ephemeral overlays (`--strict-mcp-config --mcp-config` + `--settings enabledPlugins`) and cleans them up on exit. Everything is discovery-driven and config-driven; nothing is bound to one machine.
 
-**Tech Stack:** Python ≥ 3.11, `model2vec` (static embeddings, no torch), `numpy`, stdlib `tomllib`, `subprocess`. Packaged for `pipx`/`uv`.
+**Tech Stack:** Python ≥ 3.11, `model2vec` (static embeddings, no torch), `numpy`, stdlib `tomllib`, `subprocess`. Optional extra `smartctx[rules]` adds `llama-cpp-python` (small GGUF instruct model) for compiling NL exclusion rules. Packaged for `pipx`/`uv`.
 
 **Spec:** `docs/specs/2026-08-18-smartctx-launcher-design.md`
 
 ## Global Constraints
 
 - Python ≥ 3.11 (stdlib `tomllib`; no `tomli` dependency).
+- All `pytest`/`pip` commands assume the virtualenv is active (`. .venv/bin/activate`); Task 1
+  creates `.venv`. A fresh implementer shell must activate it before running tests.
 - **Fail-open always:** any error → launch the full unscoped `claude` with a stderr warning; never make `claude` unlaunchable.
 - **No global config mutation:** overlays are written to a temp dir and deleted after the child exits.
 - **No hardcoded machine paths / plugin ids / alias names:** config root resolved from `$CLAUDE_CONFIG_DIR`, default `~/.claude`.
@@ -20,6 +22,14 @@
 - Config format is **TOML**. Config precedence (later wins): built-in default → `$CLAUDE_CONFIG_DIR/smartctx/config.toml` → `./.smartctx/config.toml` → env (`SMARTCTX_ALWAYS_KEEP`, `SMARTCTX_THRESHOLD`).
 - Relevance threshold default: absolute cosine cutoff `0.35`.
 - Ranker takes an injected `embed` callable so tests never download a model.
+- Rule compiler takes an injected `compile_fn` callable so tests never load an instruct model.
+- Exclusion rules (spec §12): precedence `always_keep` config > rules > threshold. Predicate
+  actions `always_keep|always_drop|keep_if|drop_if`; `keep_if` no-match ⇒ force drop, `drop_if`
+  no-match ⇒ undecided. Context match = case-insensitive substring of each term, combined by
+  `match_mode` (`any|all`). Rules load from `$CLAUDE_CONFIG_DIR/smartctx/rules.toml` then
+  `./.smartctx/rules.toml` (repo overrides per `target`).
+- Rule compilation runs ONLY at authoring time (setup or launch elicitation), never at plain
+  launch; launches stay deterministic and offline.
 
 ---
 
@@ -37,6 +47,8 @@ smart-context/
     goal.py                      # GoalResult + detect_goal(cwd) + goal cache
     ranker.py                    # Selection + Ranker(embed) + make_model2vec_embed() + keyword_embed
     compose.py                   # LaunchPlan + compose(kept, all_items, config_root, passthrough)
+    rules.py                     # Rule + Predicate + load_rules() + evaluate() + apply_rules()
+    compiler.py                  # compile_rule(nl,item,compile_fn) + make_local_instruct(path)
     harness.py                   # Harness Protocol (inventory, compose)
   tests/
     conftest.py                  # fixtures: fake config root, stub embedder
@@ -45,6 +57,8 @@ smart-context/
     test_goal.py
     test_ranker.py
     test_compose.py
+    test_rules.py
+    test_compiler.py
     test_cli.py
     fixtures/
       config_root/               # sample settings.json + .claude.json
@@ -88,6 +102,30 @@ class LaunchPlan:
     argv: list[str]
     env: dict[str, str]
     tmp_paths: list[Path]        # overlay files to delete after child exits
+
+# rules.py
+@dataclass(frozen=True)
+class Predicate:
+    action: str                  # "keep_if" | "drop_if" | "always_keep" | "always_drop"
+    match: tuple[str, ...]       # context terms (empty for always_*)
+    match_mode: str              # "any" | "all"
+
+@dataclass(frozen=True)
+class Rule:
+    target: str                  # item id or glob
+    nl: str                      # natural-language source
+    predicate: Predicate
+
+# apply_rules(items, rules, context) -> RuleOutcome
+@dataclass(frozen=True)
+class RuleOutcome:
+    forced_keep: tuple[Item, ...]
+    forced_drop: tuple[Item, ...]
+    undecided: tuple[Item, ...]      # no matching decisive rule -> go to ranker
+
+# elicitation targets are computed in the CLI AFTER ranking:
+#   ranked_dropped items for which has_rule(item, rules) is False.
+# rules.py also exposes: has_rule(item, rules) -> bool
 ```
 
 ---
@@ -667,15 +705,323 @@ git commit -m "feat: launch composer writing ephemeral mcp + settings overlays"
 
 ---
 
-## Task 6: CLI orchestration (fail-open, --explain, child run)
+## Task 6: Exclusion rules store + evaluator
+
+**Files:**
+- Create: `src/smartctx/rules.py`
+- Test: `tests/test_rules.py`
+
+**Interfaces:**
+- Consumes: `Item` (Task 2).
+- Produces: `Predicate`, `Rule`, `RuleOutcome`; `load_rules(config_root, cwd) -> list[Rule]`;
+  `evaluate(predicate, context) -> "keep" | "drop" | "undecided"`;
+  `apply_rules(items, rules, context) -> RuleOutcome`; `has_rule(item, rules) -> bool`;
+  `save_rule(config_root, rule) -> None` (writes to `$CLAUDE_CONFIG_DIR/smartctx/rules.toml`).
+  Precedence when several rules target one item: exact id over glob; `always_*` over conditional.
+
+- [ ] **Step 1: Write the failing test**
+
+```python
+# tests/test_rules.py
+from pathlib import Path
+from smartctx.inventory import Item
+from smartctx.rules import Predicate, Rule, evaluate, apply_rules, has_rule, load_rules, save_rule
+
+def _items():
+    return [Item("camunda-ds", "plugin", "camunda-ds", "corporate design system"),
+            Item("astro", "skill", "astro", "astrophotography")]
+
+def test_evaluate_semantics():
+    keep_if = Predicate("keep_if", ("camunda", "bpmn"), "any")
+    assert evaluate(keep_if, "camunda frontend work") == "keep"
+    assert evaluate(keep_if, "astro imaging") == "drop"          # keep_if no-match -> drop
+    drop_if = Predicate("drop_if", ("astro",), "any")
+    assert evaluate(drop_if, "astro imaging") == "drop"
+    assert evaluate(drop_if, "camunda work") == "undecided"      # drop_if no-match -> undecided
+    assert evaluate(Predicate("always_keep", (), "any"), "anything") == "keep"
+
+def test_apply_rules_partitions_items():
+    rules = [Rule("camunda-*", "corp", Predicate("keep_if", ("camunda",), "any"))]
+    out = apply_rules(_items(), rules, context="astro imaging")
+    assert [i.id for i in out.forced_drop] == ["camunda-ds"]     # keep_if no-match -> drop
+    assert [i.id for i in out.undecided] == ["astro"]            # no rule -> undecided
+    assert out.forced_keep == ()
+
+def test_exact_id_beats_glob():
+    rules = [Rule("camunda-*", "g", Predicate("always_drop", (), "any")),
+             Rule("camunda-ds", "e", Predicate("always_keep", (), "any"))]
+    out = apply_rules(_items()[:1], rules, context="x")
+    assert [i.id for i in out.forced_keep] == ["camunda-ds"]
+
+def test_load_and_save_roundtrip(tmp_path: Path):
+    root = tmp_path / "root"; (root / "smartctx").mkdir(parents=True)
+    save_rule(root, Rule("figma*", "design only", Predicate("keep_if", ("design", "ui"), "any")))
+    rules = load_rules(config_root=root, cwd=tmp_path)
+    assert any(r.target == "figma*" and r.predicate.match == ("design", "ui") for r in rules)
+    assert has_rule(Item("figma@x", "plugin", "figma", ""), rules) is True
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `. .venv/bin/activate && pytest tests/test_rules.py -v`
+Expected: FAIL — `ModuleNotFoundError: smartctx.rules`.
+
+- [ ] **Step 3: Write minimal implementation**
+
+```python
+# src/smartctx/rules.py
+from __future__ import annotations
+import tomllib
+from dataclasses import dataclass
+from fnmatch import fnmatch
+from pathlib import Path
+from smartctx.inventory import Item
+
+@dataclass(frozen=True)
+class Predicate:
+    action: str
+    match: tuple[str, ...]
+    match_mode: str
+
+@dataclass(frozen=True)
+class Rule:
+    target: str
+    nl: str
+    predicate: Predicate
+
+@dataclass(frozen=True)
+class RuleOutcome:
+    forced_keep: tuple[Item, ...]
+    forced_drop: tuple[Item, ...]
+    undecided: tuple[Item, ...]
+
+def evaluate(predicate: Predicate, context: str) -> str:
+    if predicate.action == "always_keep":
+        return "keep"
+    if predicate.action == "always_drop":
+        return "drop"
+    ctx = context.lower()
+    hits = [term.lower() in ctx for term in predicate.match]
+    matched = all(hits) if predicate.match_mode == "all" else any(hits)
+    if predicate.action == "keep_if":
+        return "keep" if matched else "drop"
+    if predicate.action == "drop_if":
+        return "drop" if matched else "undecided"
+    return "undecided"
+
+def _rules_for(item: Item, rules: list[Rule]) -> list[Rule]:
+    matches = [r for r in rules if fnmatch(item.id, r.target)]
+    # exact-id rules first, then always_* over conditional
+    matches.sort(key=lambda r: (r.target != item.id,
+                                r.predicate.action not in ("always_keep", "always_drop")))
+    return matches
+
+def has_rule(item: Item, rules: list[Rule]) -> bool:
+    return bool(_rules_for(item, rules))
+
+def apply_rules(items: list[Item], rules: list[Rule], context: str) -> RuleOutcome:
+    keep, drop, undecided = [], [], []
+    for item in items:
+        decision = "undecided"
+        for rule in _rules_for(item, rules):
+            decision = evaluate(rule.predicate, context)
+            if decision != "undecided":
+                break
+        (keep if decision == "keep" else drop if decision == "drop" else undecided).append(item)
+    return RuleOutcome(tuple(keep), tuple(drop), tuple(undecided))
+
+def _rules_file(config_root: Path) -> Path:
+    return config_root / "smartctx" / "rules.toml"
+
+def _parse(path: Path) -> list[Rule]:
+    try:
+        data = tomllib.loads(path.read_text())
+    except (OSError, tomllib.TOMLDecodeError):
+        return []
+    out = []
+    for r in data.get("rule", []):
+        p = r.get("predicate", {})
+        out.append(Rule(target=r["target"], nl=r.get("nl", ""),
+                        predicate=Predicate(action=p.get("action", "always_keep"),
+                                            match=tuple(p.get("match", [])),
+                                            match_mode=p.get("match_mode", "any"))))
+    return out
+
+def load_rules(config_root: Path, cwd: Path) -> list[Rule]:
+    user = {r.target: r for r in _parse(_rules_file(config_root))}
+    repo = {r.target: r for r in _parse(cwd / ".smartctx" / "rules.toml")}
+    return list({**user, **repo}.values())   # repo overrides per target
+
+def _esc(s: str) -> str:
+    return s.replace("\\", "\\\\").replace('"', '\\"')
+
+def save_rule(config_root: Path, rule: Rule) -> None:
+    path = _rules_file(config_root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    p = rule.predicate
+    block = (f'\n[[rule]]\ntarget = "{_esc(rule.target)}"\nnl = "{_esc(rule.nl)}"\n'
+             f'[rule.predicate]\naction = "{p.action}"\n'
+             f'match = [{", ".join(f\'"{_esc(m)}"\' for m in p.match)}]\n'
+             f'match_mode = "{p.match_mode}"\n')
+    with path.open("a") as fh:
+        fh.write(block)
+```
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `. .venv/bin/activate && pytest tests/test_rules.py -v`
+Expected: PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/smartctx/rules.py tests/test_rules.py
+git commit -m "feat: exclusion rules store and deterministic evaluator"
+```
+
+---
+
+## Task 7: Rule compiler (local instruct model, injected)
+
+**Files:**
+- Create: `src/smartctx/compiler.py`
+- Modify: `pyproject.toml` (add `[project.optional-dependencies] rules = ["llama-cpp-python>=0.2"]`)
+- Test: `tests/test_compiler.py`
+
+**Interfaces:**
+- Consumes: `Item` (Task 2), `Predicate` (Task 6).
+- Produces: `compile_rule(nl, item, compile_fn) -> Predicate | None` — builds the constrained
+  prompt, calls `compile_fn(prompt) -> str`, parses/validates JSON into a `Predicate`; invalid →
+  retry once, then return `None` (caller applies the §7 degrade). `make_local_instruct(model_path)
+  -> compile_fn` wraps llama-cpp (imported lazily so the base install works without it).
+  `build_prompt(nl, item) -> str` is separate and pure (tested directly).
+
+- [ ] **Step 1: Write the failing test**
+
+```python
+# tests/test_compiler.py
+import json
+from smartctx.inventory import Item
+from smartctx.compiler import compile_rule, build_prompt
+
+_ITEM = Item("camunda-ds", "plugin", "camunda-ds", "corporate design system")
+
+def test_build_prompt_mentions_item_and_actions():
+    p = build_prompt("corporate, only for camunda work", _ITEM)
+    assert "camunda-ds" in p and "keep_if" in p and "drop_if" in p
+
+def test_compile_rule_parses_valid_json():
+    def fake(_prompt):
+        return json.dumps({"action": "keep_if", "match": ["camunda", "bpmn"], "match_mode": "any"})
+    pred = compile_rule("corporate only for camunda", _ITEM, compile_fn=fake)
+    assert pred.action == "keep_if" and pred.match == ("camunda", "bpmn")
+
+def test_compile_rule_retries_then_gives_up():
+    calls = {"n": 0}
+    def bad(_prompt):
+        calls["n"] += 1
+        return "not json"
+    assert compile_rule("x", _ITEM, compile_fn=bad) is None
+    assert calls["n"] == 2                     # one retry
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `. .venv/bin/activate && pytest tests/test_compiler.py -v`
+Expected: FAIL — `ModuleNotFoundError: smartctx.compiler`.
+
+- [ ] **Step 3: Write minimal implementation**
+
+```python
+# src/smartctx/compiler.py
+from __future__ import annotations
+import json
+from typing import Callable
+from smartctx.inventory import Item
+from smartctx.rules import Predicate
+
+_VALID = {"keep_if", "drop_if", "always_keep", "always_drop"}
+
+def build_prompt(nl: str, item: Item) -> str:
+    return (
+        "Translate the exclusion rule into a JSON predicate. Output ONLY JSON.\n"
+        'Schema: {"action": one of ["keep_if","drop_if","always_keep","always_drop"], '
+        '"match": [strings], "match_mode": "any"|"all"}\n'
+        "keep_if: keep the item only when the session context matches; "
+        "drop_if: drop only when it matches.\n"
+        f"Item id: {item.id}\nItem kind: {item.kind}\nItem description: {item.description}\n"
+        f"Rule (natural language): {nl}\nJSON:"
+    )
+
+def _parse(text: str) -> Predicate | None:
+    try:
+        start, end = text.index("{"), text.rindex("}") + 1
+        data = json.loads(text[start:end])
+    except (ValueError, json.JSONDecodeError):
+        return None
+    action = data.get("action")
+    match = data.get("match", [])
+    if action not in _VALID or not isinstance(match, list):
+        return None
+    if action in ("keep_if", "drop_if") and not match:
+        return None
+    mode = data.get("match_mode", "any")
+    return Predicate(action=action, match=tuple(str(m) for m in match),
+                     match_mode="all" if mode == "all" else "any")
+
+def compile_rule(nl: str, item: Item, compile_fn: Callable[[str], str]) -> Predicate | None:
+    prompt = build_prompt(nl, item)
+    for _ in range(2):                         # initial try + one retry
+        pred = _parse(compile_fn(prompt))
+        if pred is not None:
+            return pred
+    return None
+
+def make_local_instruct(model_path: str) -> Callable[[str], str]:
+    from llama_cpp import Llama                 # lazy: base install has no llama-cpp
+    llm = Llama(model_path=model_path, n_ctx=2048, verbose=False)
+    def compile_fn(prompt: str) -> str:
+        out = llm(prompt, max_tokens=128, temperature=0.0, stop=["\n\n"])
+        return out["choices"][0]["text"]
+    return compile_fn
+```
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `. .venv/bin/activate && pytest tests/test_compiler.py -v`
+Expected: PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/smartctx/compiler.py pyproject.toml tests/test_compiler.py
+git commit -m "feat: NL rule compiler with injected instruct model"
+```
+
+---
+
+## Task 8: CLI orchestration (fail-open, --explain, rules, child run)
 
 **Files:**
 - Create: `src/smartctx/cli.py`, `src/smartctx/__main__.py`
+- Modify: `src/smartctx/config.py` (add `rule_model_path: str | None` field; parse toml
+  `rule_model_path` and env `SMARTCTX_RULE_MODEL`; default `None`)
 - Test: `tests/test_cli.py`
 
 **Interfaces:**
-- Consumes: everything above.
-- Produces: `main(argv=None) -> int`. Flow: parse own flags (`--explain`), treat the rest as passthrough → `load_config` → `claude_code_inventory` → `detect_goal` (prompt once if confidence < 0.15 and stdin is a TTY and not `-p/--print` in passthrough) → build embedder (`make_model2vec_embed`, fall back to `keyword_embed` on any import/load error) → `Ranker.rank` → `compose`. `--explain` prints goal + kept/dropped + argv and returns 0 without launching. Otherwise `subprocess.run(argv, env)` then delete `tmp_paths` in `finally`; return child returncode. **Any exception in the scoping pipeline → warn to stderr and exec full `["claude", *passthrough]`.**
+- Consumes: everything above (config, inventory, goal, ranker, compose, rules, compiler).
+- Produces: `main(argv=None) -> int`.
+  - Subcommand `smartctx rules` → `_cmd_rules(cwd)`: walk inventory, for each item without a
+    rule elicit + compile + save.
+  - Otherwise scoping flow: `load_config` → `claude_code_inventory` → resolve goal (prompt once
+    if confidence < 0.15 and interactive; **persist a prompted goal via `write_goal_cache`** —
+    preflight ruling) → `load_rules` → `apply_rules` → `Ranker.rank(context, undecided)` →
+    launch-time elicitation for rule-less dropped candidates (interactive only) → `compose`.
+  - `--explain` prints kept/dropped + argv and returns 0 without launching.
+  - Otherwise `subprocess.run(argv, env)`, delete `tmp_paths` in `finally`, return child rc.
+  - **Any exception in the scoping pipeline → warn to stderr and run full `["claude", *passthrough]`.**
+  - `_build_compiler(cfg)` returns a `compile_fn` from `make_local_instruct(cfg.rule_model_path)`
+    or `None` (no path / llama-cpp missing) — monkeypatched in tests.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -685,6 +1031,9 @@ import json, sys
 from pathlib import Path
 import smartctx.cli as cli
 
+class _RC:
+    def __init__(self, code): self.returncode = code
+
 def _root(tmp_path):
     root = tmp_path / "root"; root.mkdir()
     (root / "settings.json").write_text('{"enabledPlugins": {"figma@x": true}}')
@@ -692,8 +1041,8 @@ def _root(tmp_path):
     return root
 
 def test_explain_does_not_launch(tmp_path, monkeypatch, capsys):
-    root = _root(tmp_path)
-    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
+    _root(tmp_path)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "root"))
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(cli, "make_model2vec_embed", lambda name: cli.keyword_embed)
     launched = {"ran": False}
@@ -713,16 +1062,57 @@ def test_fail_open_launches_full_claude_on_error(tmp_path, monkeypatch):
     rc = cli.main(["-c"])
     assert captured["argv"] == ["claude", "-c"]
 
-class _RC:
-    def __init__(self, code): self.returncode = code
+def test_forced_drop_rule_excludes_item(tmp_path, monkeypatch, capsys):
+    root = _root(tmp_path)
+    (root / "smartctx").mkdir()
+    (root / "smartctx" / "rules.toml").write_text(
+        '[[rule]]\ntarget = "Gmail"\nnl = "never"\n'
+        '[rule.predicate]\naction = "always_drop"\nmatch = []\nmatch_mode = "any"\n')
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "make_model2vec_embed", lambda name: cli.keyword_embed)
+    monkeypatch.setattr(cli.subprocess, "run", lambda *a, **k: _RC(0))
+    cli.main(["--explain"])
+    out = capsys.readouterr().out
+    kept_line = out[out.index("kept:"):out.index("dropped:")]
+    assert "Gmail" not in kept_line          # always_drop rule removed it pre-ranking
+
+def test_rules_subcommand_authors_rule(tmp_path, monkeypatch):
+    root = _root(tmp_path)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "_build_compiler",
+        lambda cfg: (lambda prompt: '{"action":"always_keep","match":[],"match_mode":"any"}'))
+    replies = iter(["keep this plugin", "keep this server"])
+    monkeypatch.setattr("builtins.input", lambda *a, **k: next(replies, ""))
+    rc = cli.main(["rules"])
+    assert rc == 0
+    assert "always_keep" in (root / "smartctx" / "rules.toml").read_text()
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `pytest tests/test_cli.py -v`
+Run: `. .venv/bin/activate && pytest tests/test_cli.py -v`
 Expected: FAIL — `ModuleNotFoundError: smartctx.cli`.
 
 - [ ] **Step 3: Write minimal implementation**
+
+First, modify `src/smartctx/config.py` — add the `rule_model_path` field and parse it:
+
+```python
+# in Config dataclass, add field:
+    rule_model_path: str | None
+# in load_config, after model default block, add:
+    rule_model = None
+    for layer in layers:
+        if "rule_model_path" in layer:
+            rule_model = str(layer["rule_model_path"])
+    if "SMARTCTX_RULE_MODEL" in environ:
+        rule_model = environ["SMARTCTX_RULE_MODEL"]
+# and pass rule_model_path=rule_model into the returned Config(...)
+```
+
+(Task 1's two config tests still pass — they assert specific fields, not the field set.)
 
 ```python
 # src/smartctx/cli.py
@@ -730,52 +1120,117 @@ from __future__ import annotations
 import subprocess, sys
 from pathlib import Path
 from smartctx.config import load_config
-from smartctx.inventory import claude_code_inventory
-from smartctx.goal import detect_goal
+from smartctx.inventory import claude_code_inventory, Item
+from smartctx.goal import detect_goal, write_goal_cache
 from smartctx.ranker import Ranker, make_model2vec_embed, keyword_embed
 from smartctx.compose import compose
+from smartctx.rules import load_rules, apply_rules, has_rule, save_rule, Rule, Predicate, evaluate
+from smartctx.compiler import compile_rule, make_local_instruct
 
 def _warn(msg: str) -> None:
     print(f"smartctx: {msg}", file=sys.stderr)
 
+def _interactive(passthrough: list[str]) -> bool:
+    return sys.stdin.isatty() and "-p" not in passthrough and "--print" not in passthrough
+
 def _build_embed(model_name: str):
     try:
         return make_model2vec_embed(model_name)
-    except Exception as exc:  # import error, download failure, etc.
+    except Exception as exc:                       # import error, download failure, etc.
         _warn(f"model unavailable ({exc}); using keyword fallback")
         return keyword_embed
+
+def _build_compiler(cfg):
+    if not cfg.rule_model_path:
+        return None
+    try:
+        return make_local_instruct(cfg.rule_model_path)
+    except Exception as exc:
+        _warn(f"rule model unavailable ({exc}); rule authoring disabled")
+        return None
+
+def _resolve_goal(cwd: Path, passthrough: list[str]) -> str:
+    goal = detect_goal(cwd)
+    if goal.confidence < 0.15 and _interactive(passthrough):
+        entered = input(f"smartctx: session goal? [{goal.goal}] ").strip()
+        if entered:
+            write_goal_cache(cwd, entered)         # preflight ruling: persist, don't re-ask
+            return entered
+    return goal.goal
+
+def _elicit(item: Item, context: str, compile_fn, config_root: Path) -> str:
+    nl = input(f"smartctx: rule for '{item.id}' ({item.kind})? [enter=skip] ").strip()
+    if not nl:
+        return "undecided"
+    pred = compile_rule(nl, item, compile_fn) if compile_fn else None
+    if pred is None:                               # spec §7 degrade
+        choice = input("  couldn't compile; [k]eep always / [d]rop always / [s]kip? ").strip().lower()
+        pred = {"k": Predicate("always_keep", (), "any"),
+                "d": Predicate("always_drop", (), "any")}.get(choice)
+        if pred is None:
+            return "undecided"
+    save_rule(config_root, Rule(target=item.id, nl=nl, predicate=pred))
+    return evaluate(pred, context)
 
 def _scoped_plan(passthrough: list[str], cwd: Path):
     cfg = load_config(cwd=cwd)
     items = claude_code_inventory(cfg.config_root)
     if not items:
-        return None, None  # nothing to prune
-    goal = detect_goal(cwd)
-    if goal.confidence < 0.15 and sys.stdin.isatty() and "-p" not in passthrough and "--print" not in passthrough:
-        entered = input(f"smartctx: session goal? [{goal.goal}] ").strip()
-        goal_text = entered or goal.goal
-    else:
-        goal_text = goal.goal
+        return None, None
+    context = _resolve_goal(cwd, passthrough)
+    rules = load_rules(cfg.config_root, cwd)
+    outcome = apply_rules(items, rules, context)
     embed = _build_embed(cfg.model_name)
-    sel = Ranker(embed=embed).rank(goal_text, items, cfg.threshold, cfg.always_keep)
-    plan = compose(sel.kept, items, cfg.config_root, passthrough)
-    return sel, plan
+    ranked = Ranker(embed=embed).rank(context, list(outcome.undecided), cfg.threshold, cfg.always_keep)
+    kept = list(outcome.forced_keep) + list(ranked.kept)
+    dropped = list(ranked.dropped)
+    if _interactive(passthrough):                  # launch-time elicitation for rule-less drops
+        compile_fn = _build_compiler(cfg)
+        ruleless = [i for i, _ in dropped if not has_rule(i, rules)]
+        if ruleless:
+            _warn(f"{len(ruleless)} item(s) would be dropped with no rule; asking (enter to skip)")
+            for item in ruleless:
+                if _elicit(item, context, compile_fn, cfg.config_root) == "keep":
+                    kept.append(item)
+                    dropped = [(i, s) for i, s in dropped if i.id != item.id]
+    forced_drop_ids = {i.id for i in outcome.forced_drop}
+    kept = [i for i in kept if i.id not in forced_drop_ids]
+    plan = compose(kept, items, cfg.config_root, passthrough)
+    return (kept, dropped), plan
+
+def _cmd_rules(cwd: Path) -> int:
+    cfg = load_config(cwd=cwd)
+    items = claude_code_inventory(cfg.config_root)
+    rules = load_rules(cfg.config_root, cwd)
+    compile_fn = _build_compiler(cfg)
+    context = _resolve_goal(cwd, [])
+    authored = 0
+    for item in items:
+        if has_rule(item, rules):
+            continue
+        if _elicit(item, context, compile_fn, cfg.config_root) != "undecided":
+            authored += 1
+    print(f"smartctx: authored {authored} rule(s)")
+    return 0
 
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
+    cwd = Path.cwd()
+    if argv and argv[0] == "rules":
+        return _cmd_rules(cwd)
     explain = "--explain" in argv
     passthrough = [a for a in argv if a != "--explain"]
-    cwd = Path.cwd()
     try:
-        sel, plan = _scoped_plan(passthrough, cwd)
+        result, plan = _scoped_plan(passthrough, cwd)
     except Exception as exc:
         _warn(f"scoping failed ({exc}); launching full session")
         return subprocess.run(["claude", *passthrough]).returncode
     if plan is None:
         return subprocess.run(["claude", *passthrough]).returncode
+    kept, dropped = result
     if explain:
-        print(f"goal-scoped session\nkept: {[i.id for i in sel.kept]}")
-        print(f"dropped: {[(i.id, round(s, 3)) for i, s in sel.dropped]}")
+        print(f"goal-scoped session\nkept: {[i.id for i in kept]}")
+        print(f"dropped: {[(i.id, round(s, 3)) for i, s in dropped]}")
         print("argv: " + " ".join(plan.argv))
         return 0
     try:
@@ -798,31 +1253,37 @@ if __name__ == "__main__":
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `pytest tests/test_cli.py -v`
-Expected: PASS.
+Run: `. .venv/bin/activate && pytest tests/test_cli.py -v`
+Expected: PASS (4 tests).
 
 - [ ] **Step 5: Run the full suite + editable install smoke test**
 
-Run: `pytest -q && pip install -e . && smartctx --explain`
+Run: `. .venv/bin/activate && pytest -q && pip install -e . && smartctx --explain`
 Expected: all tests PASS; `smartctx --explain` prints a plan (or a fallback warning) without launching a nested session.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src/smartctx/cli.py src/smartctx/__main__.py tests/test_cli.py
-git commit -m "feat: CLI orchestration with fail-open and --explain"
+git add src/smartctx/cli.py src/smartctx/__main__.py src/smartctx/config.py tests/test_cli.py
+git commit -m "feat: CLI orchestration with rules, fail-open, and --explain"
 ```
 
 ---
 
-## Task 7: README + alias documentation
+## Task 9: README + alias documentation
 
 **Files:**
 - Create: `README.md`
 
 **Interfaces:** none (docs only).
 
-- [ ] **Step 1: Write README** covering: what it does (1 paragraph), `pipx install`, the alias integration examples (`CLAUDE_CONFIG_DIR=~/.claude-perso smartctx`), the config chain + a sample `.smartctx/config.toml` with an `always_keep` example, `--explain`, and the fail-open guarantee. Mark the personal always-keep list clearly as an example, not a default.
+- [ ] **Step 1: Write README** covering: what it does (1 paragraph), `pipx install` (+ the
+  `pipx install "smartctx[rules]"` extra for rule authoring), the alias integration examples
+  (`CLAUDE_CONFIG_DIR=~/.claude-perso smartctx`), the config chain + a sample `.smartctx/config.toml`
+  with an `always_keep` example, `--explain`, the exclusion-rules workflow (`smartctx rules`,
+  launch-time elicitation, a sample `rules.toml`, and the note that NL→predicate compilation needs
+  the optional local instruct model set via `rule_model_path`/`SMARTCTX_RULE_MODEL`), and the
+  fail-open guarantee. Mark the personal always-keep list clearly as an example, not a default.
 
 - [ ] **Step 2: Verify the sample config in the README parses**
 
@@ -838,9 +1299,28 @@ git commit -m "docs: usage, alias integration, config, fail-open"
 
 ---
 
+## Task ordering & dependencies
+
+Tasks 1–5 unchanged (config, inventory, goal, ranker, compose). Task 6 (rules) depends on Item
+(T2). Task 7 (compiler) depends on Item (T2) + Predicate (T6). Task 8 (CLI) depends on all and
+modifies config.py (adds `rule_model_path`). Task 9 (README) docs only. Task 1 is already
+COMPLETE (commit fa84e41). Execute 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9.
+
 ## Self-Review (completed against spec)
 
-- **Spec coverage:** §2 feasibility levers → Task 5 (compose) + Task 6 (argv). §3 profiles/`CLAUDE_CONFIG_DIR` → Task 1 (`_resolve_root`) + Task 5 (env preserve). §4 components → Tasks 1–6. §6 always-keep config chain → Task 1 + Task 4 (glob). §7 fail-open → Task 6 (all three degrade paths). §8 testing incl. `--explain` → every task + Task 6. §9 distribution → Task 1 (`pyproject`) + Task 7 (README). §11 defaults (0.35, TOML, no vendored model, wrap aliases only) → Tasks 1/4/7.
+- **Spec coverage:** §2 feasibility levers → Task 5 (compose) + Task 8 (argv). §3
+  profiles/`CLAUDE_CONFIG_DIR` → Task 1 (`_resolve_root`) + Task 5 (env preserve). §4 components →
+  Tasks 1–8. §5 data flow (rules before rank) → Task 8 `_scoped_plan`. §6 always-keep config chain
+  → Task 1 + Task 4 (glob). §7 fail-open + rule/instruct degrade → Task 8 (all degrade paths). §8
+  testing incl. `--explain` → every task + Task 8. §9 distribution + `[rules]` extra → Task 1
+  (`pyproject`) + Task 7 (extra) + Task 9 (README). §11 defaults → Tasks 1/4/9. §12 exclusion rules
+  (store/eval/compiler/elicitation/precedence) → Tasks 6, 7, 8.
 - **Placeholder scan:** no TBD/TODO; all code steps carry real code.
-- **Type consistency:** `Item(id, kind, name, description)`, `Config(config_root, always_keep, threshold, model_name)`, `Selection(kept, dropped)`, `LaunchPlan(argv, env, tmp_paths)` used consistently across Tasks 2/4/5/6.
-- **Known follow-ups (not blocking v1):** plugin/mcp descriptions default to id (Task 2 note); standalone-skill pruning stays coarse per spec §10; second harness adapter deferred per spec §10.
+- **Type consistency:** `Item(id, kind, name, description)`, `Config(config_root, always_keep,
+  threshold, model_name, rule_model_path)`, `Selection(kept, dropped)`, `LaunchPlan(argv, env,
+  tmp_paths)`, `Predicate(action, match, match_mode)`, `Rule(target, nl, predicate)`,
+  `RuleOutcome(forced_keep, forced_drop, undecided)` used consistently across Tasks 2/4/5/6/7/8.
+- **Preflight ruling wired:** Task 8 `_resolve_goal` calls `write_goal_cache` on a prompted goal.
+- **Known follow-ups (not blocking v1):** plugin/mcp descriptions default to id (Task 2 note);
+  standalone-skill pruning stays coarse per spec §10; second harness adapter deferred per spec §10;
+  rule context is the goal string only (no separate tag vector) — sufficient for substring match.
