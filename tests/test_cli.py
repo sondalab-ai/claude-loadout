@@ -374,3 +374,47 @@ def test_launch_elicitation_keeps_item_end_to_end(tmp_path, monkeypatch):
     assert rc == 0
     assert "Gmail" in captured["mcp"]["mcpServers"]       # elicited always_keep re-kept the server
     assert "always_keep" in (root / "smartctx" / "rules.toml").read_text()
+
+def test_help_prints_usage_without_prompting_or_launching(tmp_path, monkeypatch, capsys):
+    _two_profiles(tmp_path)                               # two profiles -> would prompt if not bypassed
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "_interactive", lambda p: True)
+    monkeypatch.setattr("builtins.input", lambda *a, **k: pytest.fail("--help must not prompt"))
+    launched = {"ran": False}
+    monkeypatch.setattr(cli.subprocess, "run", lambda *a, **k: launched.__setitem__("ran", True))
+    for flag in ("--help", "-h"):
+        rc = cli.main([flag])
+        assert rc == 0 and launched["ran"] is False
+        out = capsys.readouterr().out
+        assert "Usage:" in out and "smartctx doctor" in out and "pass straight through" in out
+
+def test_version_prints_without_prompting(tmp_path, monkeypatch, capsys):
+    _two_profiles(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "_interactive", lambda p: True)
+    monkeypatch.setattr("builtins.input", lambda *a, **k: pytest.fail("--version must not prompt"))
+    rc = cli.main(["--version"])
+    assert rc == 0
+    assert capsys.readouterr().out.startswith("smartctx ")
+
+def test_elicit_without_rule_model_skips_nl_prompt(tmp_path, monkeypatch, capsys):
+    root = _root(tmp_path)                                # no rule_model_path -> compile_fn is None
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
+    monkeypatch.setenv("SMARTCTX_THRESHOLD", "0.99")     # force everything into dropped
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "make_model2vec_embed", lambda name: cli.keyword_embed)
+    monkeypatch.setattr(cli, "_interactive", lambda p: True)
+    prompts = []
+    monkeypatch.setattr("builtins.input", lambda prompt="": prompts.append(prompt) or "k")
+    captured = _capture_mcp_overlay(monkeypatch)
+    rc = cli.main([])
+    assert rc == 0
+    joined = " ".join(prompts)
+    assert "rule for" not in joined                      # NL authoring skipped when no rule model
+    assert "[k]eep always" in joined                     # goes straight to structured choice
+    assert "no rule model configured" in capsys.readouterr().err   # upfront guidance shown
+    assert "Gmail" in captured["mcp"]["mcpServers"]       # [k]eep re-kept the server

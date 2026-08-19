@@ -1,6 +1,7 @@
 from __future__ import annotations
 import os, subprocess, sys
 from fnmatch import fnmatch
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import NamedTuple
 from smartctx.config import load_config
@@ -61,17 +62,39 @@ def _resolve_goal(cwd: Path, passthrough: list[str]) -> tuple[str, str, float]:
             return entered, "prompt", 1.0
     return goal.goal, goal.source, goal.confidence
 
+def _rules_intro(compile_fn) -> None:
+    # Printed once before an elicitation run so the interaction isn't a cold prompt.
+    if compile_fn:
+        print("smartctx: for each tool, describe in plain language when to keep or drop it.",
+              file=sys.stderr)
+        print('  e.g. "keep only when the goal is frontend"  '
+              '"drop unless it mentions email"  "always keep this"', file=sys.stderr)
+        print("  press enter to skip; if a description can't be translated you'll get "
+              "keep/drop/skip choices.", file=sys.stderr)
+    else:
+        print("smartctx: no rule model configured — natural-language rules are unavailable.",
+              file=sys.stderr)
+        print("  choose per tool: [k]eep always / [d]rop always / [s]kip (enter).", file=sys.stderr)
+
+def _pick_keep_drop_skip(item: Item) -> Predicate | None:
+    choice = _ask(f"  '{item.id}': [k]eep always / [d]rop always / [s]kip? ").strip().lower()
+    return {"k": Predicate("always_keep", (), "any"),
+            "d": Predicate("always_drop", (), "any")}.get(choice)
+
 def _elicit(item: Item, context: str, compile_fn, config_root: Path) -> str:
-    nl = _ask(f"smartctx: rule for '{item.id}' ({item.kind})? [enter=skip] ").strip()
-    if not nl:
-        return "undecided"
-    pred = compile_rule(nl, item, compile_fn) if compile_fn else None
-    if pred is None:                               # spec §7 degrade
-        choice = _ask("  couldn't compile; [k]eep always / [d]rop always / [s]kip? ").strip().lower()
-        pred = {"k": Predicate("always_keep", (), "any"),
-                "d": Predicate("always_drop", (), "any")}.get(choice)
-        if pred is None:
+    nl = ""
+    if compile_fn:                                 # natural-language authoring path
+        nl = _ask(f"smartctx: rule for '{item.id}' ({item.kind})? [enter=skip] ").strip()
+        if not nl:
             return "undecided"
+        pred = compile_rule(nl, item, compile_fn)
+        if pred is not None:
+            save_rule(config_root, Rule(target=item.id, nl=nl, predicate=pred))
+            return evaluate(pred, context)
+        _warn(f"couldn't translate that into a rule for '{item.id}'; choose manually")
+    pred = _pick_keep_drop_skip(item)              # spec §7 degrade / no rule model
+    if pred is None:
+        return "undecided"
     save_rule(config_root, Rule(target=item.id, nl=nl, predicate=pred))
     return evaluate(pred, context)
 
@@ -104,6 +127,7 @@ def _scoped_plan(passthrough: list[str], cwd: Path, config_root_override: Path |
                     if i.kind in {"mcp", "plugin"} and not has_rule(i, rules)]
         if ruleless:
             _warn(f"{len(ruleless)} item(s) would be dropped with no rule; asking (enter to skip)")
+            _rules_intro(compile_fn)
             for item in ruleless:
                 if _elicit(item, context, compile_fn, cfg.config_root) == "keep":
                     kept.append(item)
@@ -122,13 +146,16 @@ def _cmd_rules(cwd: Path, config_root_override: Path | None = None) -> int:
     rules = load_rules(cfg.config_root, cwd)
     compile_fn = _build_compiler(cfg)
     context = _resolve_goal(cwd, [])
+    pending = [i for i in items if not has_rule(i, rules)]
+    if not pending:
+        print("smartctx: every tool already has a rule")
+        return 0
+    _rules_intro(compile_fn)
     authored = 0
-    for item in items:
-        if has_rule(item, rules):
-            continue
+    for item in pending:
         if _elicit(item, context, compile_fn, cfg.config_root) != "undecided":
             authored += 1
-    print(f"smartctx: authored {authored} rule(s)")
+    print(f"smartctx: authored {_plural(authored, 'rule')}")
     return 0
 
 def _discover_profiles(active_root: Path) -> list[Path]:
@@ -218,6 +245,27 @@ def _cmd_doctor(cwd: Path) -> int:
     print("       smartctx rules")
     return 0
 
+def _smartctx_version() -> str:
+    try:
+        return version("smartctx")
+    except PackageNotFoundError:                     # running from a source tree, uninstalled
+        return "unknown"
+
+def _print_help() -> None:
+    print(
+        "smartctx — goal-aware launcher for Claude Code\n"
+        "\n"
+        "Usage:\n"
+        "  smartctx [claude-args...]   Launch claude with a goal-scoped tool set\n"
+        "  smartctx --explain          Print the scoping plan, then exit (no launch)\n"
+        "  smartctx rules              Author keep/drop rules interactively\n"
+        "  smartctx doctor             Report profiles, config, and model state\n"
+        "  smartctx --help, -h         Show this help\n"
+        "  smartctx --version, -V      Show the smartctx version\n"
+        "\n"
+        "Any other flags pass straight through to claude — run `claude --help` for those."
+    )
+
 def main(argv: list[str] | None = None) -> int:
     try:
         return _run(argv)
@@ -228,6 +276,12 @@ def main(argv: list[str] | None = None) -> int:
 def _run(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     cwd = Path.cwd()
+    if argv and argv[0] in ("--help", "-h"):        # smartctx's own help; no profile prompt/scoping
+        _print_help()
+        return 0
+    if argv and argv[0] in ("--version", "-V"):
+        print(f"smartctx {_smartctx_version()}")
+        return 0
     if argv and argv[0] == "doctor":                # doctor enumerates every profile itself
         return _cmd_doctor(cwd)
     rules_cmd = bool(argv) and argv[0] == "rules"
