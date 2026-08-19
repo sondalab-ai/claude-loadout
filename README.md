@@ -1,120 +1,143 @@
 # smartctx
 
-`smartctx` is a pre-launch wrapper for Claude Code that scopes a single session to the
-goal-relevant subset of your installed MCP servers and plugins. It infers the session goal from
-the working directory, ranks each installed item against that goal, applies your exclusion rules,
-then launches a **normal** Claude Code session (never `--bare`) with two ephemeral overlays that
-prune the off-topic items — so their tool schemas and descriptions no longer inflate the context
-window. The scoping is strictly session-local: it writes no Claude config, never mutates
-`settings.json` or `.claude.json`, and it is **fail-open** — any error at all degrades to
-launching the full, unscoped `claude`.
+**Start each Claude Code session with only the tools it needs.**
 
-## What it prunes (and what it does not)
+`smartctx` is a small launcher that sits in front of Claude Code. It looks at what you're
+working on, figures out which of your installed MCP servers and plugins are actually relevant,
+and starts the session with just those — leaving everything else out of the way. When you're
+done, nothing about your setup has changed.
 
-Pruning is done for the current session only, via CLI overlays:
+---
 
-- **MCP servers** — only the curated, kept set is loaded (`--strict-mcp-config --mcp-config`).
-  Because of `--strict-mcp-config`, only the servers in the generated file load, regardless of
-  what is in `.claude.json`.
-- **Plugins** — dropped plugins are disabled through a `--settings` overlay
-  (`enabledPlugins.<id> = false`). Skills, agents, MCP servers, and hooks provided *by* a plugin
-  go away transitively when their plugin is disabled.
+## Why
 
-Not pruned in v1:
+Every Claude Code session loads *all* of your installed MCP servers, plugins, and skills — a
+calendar integration, a browser driver, three documentation servers, a design system — whether
+or not today's task has anything to do with them. Each one spends part of the model's context
+window describing itself before you've typed a word. The more you install, the more crowded
+every session starts.
 
-- **Standalone skills** (under `$CLAUDE_CONFIG_DIR/skills`) are inventoried, scored, and shown in
-  the `--explain` dropped list, but they are **not removed** — Claude Code only exposes an
-  all-or-nothing switch for them, which v1 does not use.
-- `CLAUDE.md`, hooks, and memory are preserved (this is a normal session, not `--bare`).
+`smartctx` fixes that per session, without you having to toggle anything by hand. You keep
+everything installed; smartctx just decides, each time you launch, what's worth bringing in.
 
-## Install
+## What it does
+
+1. **Figures out the goal.** It reads signals from your working directory — the folder name,
+   marker files like `package.json` or `pyproject.toml`, the git branch. If it can't tell, it
+   asks once (and remembers your answer).
+2. **Ranks your tools against that goal** using a small, fast, local model — no network call, no
+   data leaving your machine.
+3. **Applies your rules.** You can pin tools to always keep, and write plain-language rules like
+   *"this corporate plugin only in work sessions."*
+4. **Launches Claude Code with the relevant subset.** The off-topic servers and plugins simply
+   aren't loaded for that session.
+
+If anything goes wrong at any step, smartctx quietly launches the full, normal session instead —
+**it can never leave you unable to start Claude.**
+
+## Quick start
 
 ```sh
 pipx install smartctx
 ```
 
-For the optional natural-language rule compiler (adds `llama-cpp-python`):
+Point your usual launch command at it. `smartctx` figures out which Claude profile you're using
+from the `CLAUDE_CONFIG_DIR` environment variable (default `~/.claude`) and passes it straight
+through, so one install wraps any alias — use whatever names you already have:
 
 ```sh
-pipx install "smartctx[rules]"
-```
-
-The core scoping installs and runs without the extra. On first run the embedding model
-(`minishlab/potion-base-8M` by default) is fetched to the standard cache; offline machines fall
-back to a keyword-overlap heuristic with a warning.
-
-## Alias integration
-
-`smartctx` resolves its config root from `$CLAUDE_CONFIG_DIR` (default `~/.claude`) and preserves
-that variable when it launches `claude`. Nothing about a profile is hardcoded, so a single binary
-wraps any alias. These are **documentation examples**, not shipped configuration — pick whatever
-alias names you use:
-
-```sh
-alias claude-perso="CLAUDE_CONFIG_DIR=~/.claude-perso smartctx"
 alias claude-work="CLAUDE_CONFIG_DIR=~/.claude-work smartctx"
-# opt-in: wrap bare `claude` too
+alias claude-perso="CLAUDE_CONFIG_DIR=~/.claude-perso smartctx"
+
+# Optional — wrap plain `claude` too:
 # alias claude="smartctx"
 ```
 
-v1 wraps profile aliases only; bare `claude` stays full unless you opt in with the last line.
-Any Claude Code arguments you pass are forwarded untouched, e.g. `claude-perso -p "..."`.
+That's it. Run `claude-work` (or whatever you aliased) as you always have — every Claude Code
+argument you pass is forwarded untouched, e.g. `claude-work -p "summarize this repo"`.
+
+## See what it would do — before it does it
+
+Curious, or tuning things? Add `--explain` and smartctx prints its plan and exits **without
+launching anything**:
+
+```sh
+smartctx --explain
+```
+
+You'll see the goal it detected, which items it would keep, which it would drop (and why), and
+the exact command it would run. It's the best way to get a feel for the tool and to calibrate how
+aggressively it prunes.
+
+---
+
+## How it works
+
+Under the hood, a scoped launch is a normal Claude Code session plus two small, temporary overlay
+files:
+
+- **MCP servers** — smartctx writes a curated MCP config listing only the kept servers and starts
+  Claude with `--strict-mcp-config`, so only those load.
+- **Plugins** — dropped plugins are switched off via a `--settings` overlay. Anything a plugin
+  provides (its skills, agents, MCP servers, hooks) goes with it.
+
+Both overlay files live in your temp directory and are deleted when the session ends. Your real
+configuration is never touched — smartctx **never** edits `settings.json` or `.claude.json`, and
+it is **not** the nuclear `--bare` mode: your `CLAUDE.md`, hooks, and memory all stay in place.
+
+### What it prunes — and what it doesn't
+
+| | Scoped per session? |
+|---|---|
+| MCP servers | **Yes** — only the kept set loads |
+| Plugins (and everything they provide) | **Yes** — dropped plugins are disabled |
+| Standalone skills (`$CLAUDE_CONFIG_DIR/skills`) | **No** — inventoried and shown in `--explain`, but not removed (Claude Code offers only an all-or-nothing switch, which v1 leaves alone) |
+| `CLAUDE.md`, hooks, memory | **No** — always preserved |
+
+---
 
 ## Configuration
 
-Config is TOML, resolved through a chain where **a later layer replaces an earlier one** for each
-key (layers do not merge, and a list-valued key is overwritten wholesale, not extended):
+Everything is optional — smartctx works with zero configuration. When you do want to tune it,
+settings are TOML and resolved through a chain, where **a later layer replaces an earlier one for
+each key** (layers don't merge; a list value is overwritten wholesale):
 
-1. built-in defaults — `always_keep` is **empty**, `threshold = 0.35`,
-   `model_name = "minishlab/potion-base-8M"`, `rule_model_path` unset.
-2. user/profile — `$CLAUDE_CONFIG_DIR/smartctx/config.toml`.
-3. repo-local — `./.smartctx/config.toml` in the working directory.
-4. environment — `SMARTCTX_ALWAYS_KEEP="id1,id2"`, `SMARTCTX_THRESHOLD`, `SMARTCTX_RULE_MODEL`.
-
-Keys:
+1. Built-in defaults
+2. User / profile — `$CLAUDE_CONFIG_DIR/smartctx/config.toml`
+3. Repo-local — `./.smartctx/config.toml`
+4. Environment — `SMARTCTX_ALWAYS_KEEP`, `SMARTCTX_THRESHOLD`, `SMARTCTX_RULE_MODEL`
 
 | Key | Meaning | Default |
 |---|---|---|
-| `always_keep` | item ids or globs never pruned (see precedence below) | *(empty)* |
-| `threshold` | cosine cutoff; an item is kept when its score is `>= threshold`. Raise it to prune more aggressively, lower it to keep more. | `0.35` |
-| `model_name` | model2vec embedding model fetched for ranking | `minishlab/potion-base-8M` |
-| `rule_model_path` | absolute path to the local GGUF instruct model for rule compilation | *(unset)* |
-
-Sample `.smartctx/config.toml`:
+| `always_keep` | Item ids or glob patterns to never prune. Unknown ids are ignored. | *(empty)* |
+| `threshold` | Cosine cutoff; an item is kept when its relevance score is `>= threshold`. Higher prunes more; lower keeps more. | `0.35` |
+| `model_name` | The embedding model used for ranking. | `minishlab/potion-base-8M` |
+| `rule_model_path` | Absolute path to a local instruct model for compiling natural-language rules (see below). | *(unset)* |
 
 ```toml
-# The always_keep list below is an EXAMPLE — the shipped default is empty.
-# Entries are item ids or glob patterns; unknown ids are simply ignored.
+# .smartctx/config.toml
+# always_keep below is an EXAMPLE — the shipped default is empty.
 always_keep = ["superpowers", "remember", "caveman*"]
 
 threshold = 0.35
 
-# rule_model_path is NOT tilde-expanded — use an absolute path, not "~/...".
+# Use an absolute path — "~" is not expanded.
 rule_model_path = "/Users/you/models/Qwen2.5-0.5B-Instruct.gguf"
 ```
 
-Note: `rule_model_path` (and `SMARTCTX_RULE_MODEL`) must be an absolute path — `~` is not
-expanded, and a tilde path silently degrades to "rule authoring disabled" at runtime.
-
-## Dry run: `--explain`
-
-`smartctx --explain [claude args...]` prints the detected goal, the kept item ids, the dropped
-items with their scores, and the exact `argv` that *would* be launched — then exits **without**
-launching. The `--explain` flag is consumed by smartctx and stripped from the passthrough. This is
-the primary surface for calibrating `threshold` and debugging what gets scoped out.
+On first run the embedding model is downloaded once to your standard cache. On an offline machine
+smartctx falls back to a keyword-matching heuristic and warns — it still runs.
 
 ## Exclusion rules
 
-Similarity alone cannot express "this corporate plugin belongs only in work sessions." Exclusion
-rules bind an item id/glob to a deterministic predicate that is evaluated offline at launch,
-against the goal string (case-insensitive substring match).
+Relevance ranking is good at "is this about the same topic," but it can't express intent like
+*"this design-system plugin belongs only in work sessions, never personal ones."* Exclusion
+rules do exactly that: they bind a tool (by id or glob) to a small deterministic rule that's
+evaluated offline every launch.
 
-**Precedence:** `always_keep` config (kept regardless) > rules > similarity threshold. Within
-rules, an exact-id rule wins over a glob rule; if still tied, `always_*` beats a conditional.
+**Precedence:** `always_keep` (kept no matter what) → your rules → similarity score.
 
-Rules live in the config chain: `$CLAUDE_CONFIG_DIR/smartctx/rules.toml` (user) and/or
-`./.smartctx/rules.toml` (repo); the repo file overrides the user file per `target`. Sample
-`rules.toml`:
+A rule reads naturally in TOML:
 
 ```toml
 [[rule]]
@@ -126,35 +149,47 @@ match = ["camunda", "bpmn", "work", "orchestration"]
 match_mode = "any"
 ```
 
-Predicate `action` is one of `keep_if`, `drop_if`, `always_keep`, `always_drop`; `match` is a list
-of terms combined by `match_mode` (`any` or `all`). `keep_if` forces keep on a match and force
-drop otherwise (item scoped *only* to those goals); `drop_if` forces drop on a match and otherwise
-falls through to ranking.
+- `keep_if` — keep the tool **only** when the goal matches; drop it otherwise.
+- `drop_if` — drop it when the goal matches; otherwise fall through to normal ranking.
+- `always_keep` / `always_drop` — unconditional.
 
-### Authoring rules
+`match` terms are compared case-insensitively against the goal and combined with `match_mode`
+(`any` or `all`). Rules live at `$CLAUDE_CONFIG_DIR/smartctx/rules.toml` (yours) and/or
+`./.smartctx/rules.toml` (this repo, which wins per `target`).
 
-- **Bulk — `smartctx rules`**: walks the inventory and, for each item without a rule, prompts for a
-  natural-language rule (empty input skips, leaving it to pure ranking). It resolves the session
-  goal first, so it may ask you to confirm the goal before it starts walking items.
-- **Launch-time elicitation**: when scoping would drop a rule-less item and the session is
-  interactive (a TTY, no `-p`/`--print`), smartctx warns how many such items there are, then asks
-  per item for a rule (press enter to skip). Non-interactive launches skip this entirely; only
-  already-compiled rules apply.
+### Writing rules the easy way
 
-Natural-language rules are compiled to a predicate by a small **local instruct model**, configured
-via `rule_model_path` / `SMARTCTX_RULE_MODEL` and installed through the `smartctx[rules]` extra.
-Without that model, authoring degrades to a simple prompt — keep always / drop always / skip — for
-each item; launches themselves stay deterministic and offline regardless.
+You rarely need to hand-write the TOML. Two ways to author rules in plain language:
 
-## Fail-open guarantee
+- **`smartctx rules`** walks through your tools and asks, for each one without a rule, how you
+  want it scoped. Empty answer = skip.
+- **At launch**, if smartctx is about to drop a tool you haven't ruled on (and you're in an
+  interactive session), it offers to capture a rule on the spot.
 
-`smartctx` must never make `claude` unlaunchable. Any exception while building the scoped plan, an
-empty inventory, or an unreadable config all degrade to launching the full unscoped `claude` (with
-a stderr warning where relevant); the child's exit code is propagated. Related degradations: a
-missing embedding model falls back to the keyword heuristic, and a missing rule model disables NL
-compilation — neither blocks a launch.
+Your plain-language answer is turned into a rule by a small **local instruct model**, enabled by
+installing the optional extra:
 
-The "no config mutation" guarantee is about Claude Code's own configuration. smartctx itself does
-write two files under your control: it appends authored rules to
-`$CLAUDE_CONFIG_DIR/smartctx/rules.toml`, and caches a confirmed session goal at `./.smartctx/goal`
-in the working directory.
+```sh
+pipx install "smartctx[rules]"
+```
+
+and pointing `rule_model_path` at a local model file. Without it, rule authoring falls back to a
+simple *keep / drop / skip* prompt — and either way, **launches themselves never call a model;
+they stay fully deterministic and offline.**
+
+## Design guarantees
+
+- **Session-local.** Scoping affects only the session it launches. Your Claude configuration is
+  never modified. (smartctx does write two of its own files under your control: authored rules in
+  `smartctx/rules.toml`, and a remembered goal in `./.smartctx/goal`.)
+- **Fail-open, always.** A missing config, malformed rules file, unavailable model, or any other
+  error degrades to launching the full, unscoped Claude Code — with a warning where it helps. The
+  child process's exit code is passed straight back. smartctx can slim a session down; it can
+  never stop one from starting.
+
+## Requirements
+
+- Python ≥ 3.11
+- Claude Code
+- Optional, for natural-language rule authoring: the `smartctx[rules]` extra
+  (`llama-cpp-python`) plus a local GGUF instruct model
