@@ -1,5 +1,5 @@
 from __future__ import annotations
-import subprocess, sys
+import os, subprocess, sys
 from fnmatch import fnmatch
 from pathlib import Path
 from typing import NamedTuple
@@ -10,6 +10,9 @@ from smartctx.ranker import Ranker, make_model2vec_embed, keyword_embed, bundled
 from smartctx.compose import compose
 from smartctx.rules import load_rules, apply_rules, has_rule, save_rule, Rule, Predicate, evaluate
 from smartctx.compiler import compile_rule, make_local_instruct
+
+class _Abort(Exception):
+    """User declined to pick a profile at the selection prompt."""
 
 def _warn(msg: str) -> None:
     print(f"smartctx: {msg}", file=sys.stderr)
@@ -80,8 +83,8 @@ class _Scope(NamedTuple):
     kept: list
     dropped: list
 
-def _scoped_plan(passthrough: list[str], cwd: Path):
-    cfg = load_config(cwd=cwd)
+def _scoped_plan(passthrough: list[str], cwd: Path, config_root_override: Path | None = None):
+    cfg = load_config(cwd=cwd, config_root_override=config_root_override)
     items = claude_code_inventory(cfg.config_root, cwd, cfg.global_config_path)
     if not items:
         return None, None
@@ -106,14 +109,15 @@ def _scoped_plan(passthrough: list[str], cwd: Path):
                     kept.append(item)
                     dropped = [(i, s) for i, s in dropped if i.id != item.id]
     plan = compose(kept, items, cfg.config_root, passthrough, cwd=cwd,
-                   global_config_path=cfg.global_config_path)
+                   global_config_path=cfg.global_config_path,
+                   launch_config_dir=_explicit_profile(config_root_override))
     return _Scope(context, gsource, gconf, cfg.threshold, kept, dropped), plan
 
-def _cmd_rules(cwd: Path) -> int:
+def _cmd_rules(cwd: Path, config_root_override: Path | None = None) -> int:
     if not _interactive([]):                        # no TTY -> nothing to elicit; fail-open
         _warn("rule authoring needs an interactive terminal; nothing to do")
         return 0
-    cfg = load_config(cwd=cwd)
+    cfg = load_config(cwd=cwd, config_root_override=config_root_override)
     items = claude_code_inventory(cfg.config_root, cwd, cfg.global_config_path)
     rules = load_rules(cfg.config_root, cwd)
     compile_fn = _build_compiler(cfg)
@@ -135,6 +139,42 @@ def _discover_profiles(active_root: Path) -> list[Path]:
         if path.is_dir() and path.resolve() != active_root.resolve() and path not in profiles:
             profiles.append(path)
     return profiles
+
+def _explicit_profile(override: Path | None) -> Path | None:
+    # A prompted profile must reach the launched claude via CLAUDE_CONFIG_DIR — except the
+    # ~/.claude default, which resolves .claude.json from the HOME root and so stays env-less.
+    return override if override and override != Path.home() / ".claude" else None
+
+def _launch_env(override: Path | None) -> dict | None:
+    prof = _explicit_profile(override)                  # None -> inherit parent env unchanged
+    return {**os.environ, "CLAUDE_CONFIG_DIR": str(prof)} if prof else None
+
+def _resolve_config_root(environ, passthrough: list[str]) -> Path | None:
+    # None -> resolve profile from env as usual. A Path -> user picked that profile.
+    # Only prompt when the profile is implicit (env unset), a real choice exists, and
+    # we have a TTY; an explicit CLAUDE_CONFIG_DIR is always honored without asking.
+    if environ.get("CLAUDE_CONFIG_DIR"):
+        return None
+    if not _interactive(passthrough):
+        return None
+    profiles = _discover_profiles(Path.home() / ".claude")
+    if len(profiles) <= 1:
+        return None
+    print("smartctx: CLAUDE_CONFIG_DIR not set — pick a Claude profile:", file=sys.stderr)
+    for idx, prof in enumerate(profiles, 1):
+        has_cfg = (prof / "smartctx" / "config.toml").is_file()
+        print(f"  {idx}) {prof}  (smartctx config: {'present' if has_cfg else 'absent'})",
+              file=sys.stderr)
+    while True:                                          # no default (spec B): Enter re-asks
+        try:
+            raw = input(f"profile [1-{len(profiles)}]: ").strip()
+        except EOFError:                                 # Ctrl-D / exhausted stdin -> abort
+            raise _Abort
+        if not raw:
+            continue
+        if raw.isdigit() and 1 <= int(raw) <= len(profiles):
+            return profiles[int(raw) - 1]
+        _warn(f"invalid choice {raw!r}")
 
 def _profile_report(root: Path, cwd: Path, active: bool,
                     global_config_path: Path | None = None) -> None:
@@ -179,21 +219,35 @@ def _cmd_doctor(cwd: Path) -> int:
     return 0
 
 def main(argv: list[str] | None = None) -> int:
+    try:
+        return _run(argv)
+    except KeyboardInterrupt:                       # Ctrl-C at any prompt -> clean abort, no traceback
+        _warn("aborted")
+        return 130
+
+def _run(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     cwd = Path.cwd()
-    if argv and argv[0] == "rules":
-        return _cmd_rules(cwd)
-    if argv and argv[0] == "doctor":
+    if argv and argv[0] == "doctor":                # doctor enumerates every profile itself
         return _cmd_doctor(cwd)
+    rules_cmd = bool(argv) and argv[0] == "rules"
     explain = "--explain" in argv
     passthrough = [a for a in argv if a != "--explain"]
+    try:                                            # ask which profile when it is implicit
+        override = _resolve_config_root(os.environ, [] if rules_cmd else passthrough)
+    except _Abort:
+        _warn("no profile selected; nothing to do")
+        return 0
+    if rules_cmd:
+        return _cmd_rules(cwd, override)
+    fallback_env = _launch_env(override)            # keep a prompted profile on the fallback launches
     try:
-        result, plan = _scoped_plan(passthrough, cwd)
+        result, plan = _scoped_plan(passthrough, cwd, override)
     except Exception as exc:
         _warn(f"scoping failed ({exc}); launching full session")
-        return subprocess.run(["claude", *passthrough]).returncode
+        return subprocess.run(["claude", *passthrough], env=fallback_env).returncode
     if plan is None:
-        return subprocess.run(["claude", *passthrough]).returncode
+        return subprocess.run(["claude", *passthrough], env=fallback_env).returncode
     scope = result
     if explain:
         print(f"goal: {scope.goal!r}  (source: {scope.source}, confidence: {scope.confidence:.2f})")

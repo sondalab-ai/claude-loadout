@@ -1,5 +1,6 @@
 import json, sys
 from pathlib import Path
+import pytest
 import smartctx.cli as cli
 
 class _RC:
@@ -33,6 +34,15 @@ def test_fail_open_launches_full_claude_on_error(tmp_path, monkeypatch):
                         lambda argv, **k: captured.__setitem__("argv", argv) or _RC(0))
     rc = cli.main(["-c"])
     assert captured["argv"] == ["claude", "-c"]
+
+def test_keyboard_interrupt_aborts_cleanly(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "root"))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "claude_code_inventory",
+                        lambda *a, **k: (_ for _ in ()).throw(KeyboardInterrupt()))
+    rc = cli.main([])                               # Ctrl-C at a prompt -> exit 130, no traceback
+    assert rc == 130
+    assert "aborted" in capsys.readouterr().err
 
 def _drop_rule_root(tmp_path):
     root = _root(tmp_path)
@@ -205,6 +215,149 @@ def test_mcp_json_server_kept_appears_in_overlay(tmp_path, monkeypatch):
     rc = cli.main([])
     assert rc == 0
     assert captured["mcp"]["mcpServers"]["Proj"] == {"command": "p"}   # real def from ./.mcp.json
+
+def _two_profiles(tmp_path):
+    # ~/.claude (no smartctx config) + ~/.claude-perso (with config); returns the perso root
+    default = tmp_path / ".claude"; default.mkdir()
+    default.joinpath("settings.json").write_text('{"enabledPlugins": {"figma@x": true}}')
+    default.joinpath(".claude.json").write_text('{"mcpServers": {}}')
+    perso = tmp_path / ".claude-perso"; perso.mkdir()
+    perso.joinpath("settings.json").write_text('{"enabledPlugins": {"figma@x": true}}')
+    perso.joinpath(".claude.json").write_text('{"mcpServers": {}}')
+    (perso / "smartctx").mkdir()
+    (perso / "smartctx" / "config.toml").write_text('always_keep = ["figma@x"]\n')
+    return perso
+
+def test_resolve_config_root_honors_explicit_env(monkeypatch):
+    monkeypatch.setattr(cli, "_interactive", lambda p: True)
+    assert cli._resolve_config_root({"CLAUDE_CONFIG_DIR": "/x"}, []) is None   # explicit -> no prompt
+
+def test_resolve_config_root_skips_when_non_interactive(monkeypatch):
+    monkeypatch.setattr(cli, "_interactive", lambda p: False)
+    assert cli._resolve_config_root({}, ["-p"]) is None                        # piped -> no prompt
+
+def test_resolve_config_root_skips_when_single_profile(tmp_path, monkeypatch):
+    (tmp_path / ".claude").mkdir()
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(cli, "_interactive", lambda p: True)
+    assert cli._resolve_config_root({}, []) is None                            # only one profile
+
+def test_resolve_config_root_prompts_and_returns_choice(tmp_path, monkeypatch, capsys):
+    perso = _two_profiles(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(cli, "_interactive", lambda p: True)
+    monkeypatch.setattr("builtins.input", lambda *a, **k: "2")                 # pick the sibling
+    chosen = cli._resolve_config_root({}, [])
+    assert chosen == perso
+    err = capsys.readouterr().err
+    assert "pick a Claude profile" in err
+    assert "smartctx config: present" in err and "smartctx config: absent" in err
+
+def test_resolve_config_root_reasks_on_empty_then_valid(tmp_path, monkeypatch):
+    _two_profiles(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(cli, "_interactive", lambda p: True)
+    replies = iter(["", "9", "1"])                                            # empty + out-of-range re-ask
+    monkeypatch.setattr("builtins.input", lambda *a, **k: next(replies))
+    chosen = cli._resolve_config_root({}, [])
+    assert chosen == tmp_path / ".claude"                                     # first profile, no default
+
+def test_resolve_config_root_aborts_on_eof(tmp_path, monkeypatch):
+    _two_profiles(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(cli, "_interactive", lambda p: True)
+    def _eof(*a, **k):
+        raise EOFError
+    monkeypatch.setattr("builtins.input", _eof)
+    with pytest.raises(cli._Abort):
+        cli._resolve_config_root({}, [])
+
+def test_main_aborts_launch_when_no_profile_selected(tmp_path, monkeypatch, capsys):
+    _two_profiles(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "_interactive", lambda p: True)
+    monkeypatch.setattr("builtins.input", lambda *a, **k: (_ for _ in ()).throw(EOFError()))
+    launched = {"ran": False}
+    monkeypatch.setattr(cli.subprocess, "run", lambda *a, **k: launched.__setitem__("ran", True) or _RC(0))
+    rc = cli.main([])
+    assert rc == 0 and launched["ran"] is False
+    assert "no profile selected" in capsys.readouterr().err
+
+def test_main_prompted_profile_reaches_launched_claude(tmp_path, monkeypatch):
+    perso = _two_profiles(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "make_model2vec_embed", lambda name: cli.keyword_embed)
+    monkeypatch.setattr(cli, "_interactive", lambda p: True)
+    monkeypatch.setattr("builtins.input", lambda *a, **k: "2")                 # pick perso sibling
+    captured = {}
+    monkeypatch.setattr(cli.subprocess, "run",
+                        lambda argv, **k: captured.update(k) or _RC(0))
+    rc = cli.main([])
+    assert rc == 0
+    assert captured["env"]["CLAUDE_CONFIG_DIR"] == str(perso)                  # profile propagated
+
+def _capture_settings_overlay(monkeypatch):
+    captured = {}
+    def _fake_run(argv, **k):
+        settings_path = argv[argv.index("--settings") + 1]
+        captured["settings"] = json.loads(Path(settings_path).read_text())
+        return _RC(0)
+    monkeypatch.setattr(cli.subprocess, "run", _fake_run)
+    return captured
+
+def _choice_then_skip(first):
+    yield first
+    while True:                                          # later prompts (elicitation) get skipped
+        yield ""
+
+def test_prompted_profile_with_always_keep_protects_pinned_item(tmp_path, monkeypatch):
+    perso = _two_profiles(tmp_path)                       # perso has always_keep = ["figma@x"]
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    monkeypatch.setenv("SMARTCTX_THRESHOLD", "0.99")     # force ranking to drop everything
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "make_model2vec_embed", lambda name: cli.keyword_embed)
+    monkeypatch.setattr(cli, "_interactive", lambda p: True)
+    replies = _choice_then_skip("2")                     # pick perso, skip any elicitation
+    monkeypatch.setattr("builtins.input", lambda *a, **k: next(replies))
+    captured = _capture_settings_overlay(monkeypatch)
+    rc = cli.main([])
+    assert rc == 0
+    assert "figma@x" not in captured["settings"]["enabledPlugins"]   # pinned -> not disabled
+
+def test_prompted_default_profile_lacking_config_disables_item(tmp_path, monkeypatch):
+    _two_profiles(tmp_path)                               # ~/.claude has no smartctx config
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    monkeypatch.setenv("SMARTCTX_THRESHOLD", "0.99")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "make_model2vec_embed", lambda name: cli.keyword_embed)
+    monkeypatch.setattr(cli, "_interactive", lambda p: True)
+    replies = _choice_then_skip("1")                     # pick ~/.claude default, skip elicitation
+    monkeypatch.setattr("builtins.input", lambda *a, **k: next(replies))
+    captured = _capture_settings_overlay(monkeypatch)
+    rc = cli.main([])
+    assert rc == 0
+    assert captured["settings"]["enabledPlugins"].get("figma@x") is False   # no pin -> disabled
+
+def test_main_prompted_default_profile_leaves_env_unset(tmp_path, monkeypatch):
+    _two_profiles(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "make_model2vec_embed", lambda name: cli.keyword_embed)
+    monkeypatch.setattr(cli, "_interactive", lambda p: True)
+    monkeypatch.setattr("builtins.input", lambda *a, **k: "1")                 # pick ~/.claude default
+    captured = {}
+    monkeypatch.setattr(cli.subprocess, "run",
+                        lambda argv, **k: captured.update(k) or _RC(0))
+    rc = cli.main([])
+    assert rc == 0
+    assert "CLAUDE_CONFIG_DIR" not in captured["env"]     # default profile uses HOME-root resolution
 
 def test_launch_elicitation_keeps_item_end_to_end(tmp_path, monkeypatch):
     root = _root(tmp_path)                                # Gmail mcp, figma@x plugin, no rules

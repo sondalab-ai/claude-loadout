@@ -21,7 +21,8 @@ def _write_tmp(prefix: str, data: dict) -> Path:
 def compose(kept, all_items, config_root: Path, passthrough: list[str],
             environ: Mapping[str, str] | None = None,
             cwd: Path | None = None,
-            global_config_path: Path | None = None) -> LaunchPlan:
+            global_config_path: Path | None = None,
+            launch_config_dir: Path | None = None) -> LaunchPlan:
     environ = os.environ if environ is None else environ
     kept_ids = {i.id for i in kept}
     if global_config_path is None:
@@ -37,4 +38,6 @@ def compose(kept, all_items, config_root: Path, passthrough: list[str],
     argv = ["claude", "--strict-mcp-config", "--mcp-config", str(mcp_path),
             "--settings", str(settings_path), *passthrough]
     env = dict(environ)
+    if launch_config_dir is not None:              # propagate a prompted profile to claude itself
+        env["CLAUDE_CONFIG_DIR"] = str(launch_config_dir)
     return LaunchPlan(argv=argv, env=env, tmp_paths=[mcp_path, settings_path])

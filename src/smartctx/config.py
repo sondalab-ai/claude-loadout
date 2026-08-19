@@ -46,9 +46,14 @@ def default_global_config_path(config_root: Path) -> Path:
     return Path.home() / ".claude.json" if config_root == Path.home() / ".claude" \
         else config_root / ".claude.json"
 
-def load_config(cwd: Path, environ: Mapping[str, str] | None = None) -> Config:
+def load_config(cwd: Path, environ: Mapping[str, str] | None = None,
+                config_root_override: Path | None = None) -> Config:
     environ = os.environ if environ is None else environ
-    root, global_config_path = _resolve_paths(environ)
+    if config_root_override is not None:                # explicit profile choice (cli prompt)
+        root = config_root_override
+        global_config_path = default_global_config_path(root)
+    else:
+        root, global_config_path = _resolve_paths(environ)
     layers = [_read_toml(root / "smartctx" / "config.toml"),
               _read_toml(cwd / ".smartctx" / "config.toml")]
     always: tuple[str, ...] = ()

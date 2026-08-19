@@ -56,6 +56,12 @@ alias claude-perso="CLAUDE_CONFIG_DIR=~/.claude-perso smartctx"
 That's it. Run `claude-work` (or whatever you aliased) as you always have — every Claude Code
 argument you pass is forwarded untouched, e.g. `claude-work -p "summarize this repo"`.
 
+If you run `smartctx` (or `--explain` / `rules`) with **`CLAUDE_CONFIG_DIR` unset** and more than
+one profile exists (`~/.claude`, `~/.claude-perso`, …), it asks which profile to use rather than
+silently falling back to `~/.claude` — where your `always_keep` wouldn't apply. Set the variable
+explicitly (as in the aliases above) to skip the prompt. There is no default at the prompt: pick a
+number, or press `Ctrl-D` to cancel without launching.
+
 ### Installing from source
 
 Working from a clone? Install the CLI from the repo instead:
