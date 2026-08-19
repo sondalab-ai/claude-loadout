@@ -29,13 +29,15 @@ def _frontmatter(text: str) -> dict[str, str]:
             out[k.strip()] = v.strip()
     return out
 
-def claude_code_inventory(config_root: Path) -> list[Item]:
+def claude_code_inventory(config_root: Path, cwd: Path | None = None) -> list[Item]:
     items: list[Item] = []
     settings = _load_json(config_root / "settings.json")
     for pid, enabled in (settings.get("enabledPlugins") or {}).items():
         if enabled:
             items.append(Item(id=pid, kind="plugin", name=pid, description=pid))
-    servers = _load_json(config_root / ".claude.json").get("mcpServers") or {}
+    servers = dict(_load_json(config_root / ".claude.json").get("mcpServers") or {})
+    if cwd is not None:                            # project .mcp.json overrides user defs (spec §4.2)
+        servers.update(_load_json(cwd / ".mcp.json").get("mcpServers") or {})
     for name in servers:
         items.append(Item(id=name, kind="mcp", name=name, description=name))
     skills_dir = config_root / "skills"

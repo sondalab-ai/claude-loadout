@@ -1,6 +1,12 @@
 import numpy as np
 from smartctx.inventory import Item
-from smartctx.ranker import Ranker
+from smartctx.ranker import Ranker, keyword_embed
+
+def test_keyword_embed_is_deterministic():
+    texts = ["astro sky imaging goal", "Gmail email server"]
+    a = keyword_embed(texts)
+    b = keyword_embed(texts)
+    assert np.array_equal(a, b)                          # crc32, not PYTHONHASHSEED-randomized hash
 
 def _stub_embed(texts):
     # deterministic: map keyword -> orthogonal-ish vectors

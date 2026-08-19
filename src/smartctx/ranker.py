@@ -1,4 +1,5 @@
 from __future__ import annotations
+import zlib
 from dataclasses import dataclass
 from fnmatch import fnmatch
 from typing import Callable
@@ -46,5 +47,5 @@ def keyword_embed(texts: list[str]) -> np.ndarray:
     out = np.zeros((len(texts), dim))
     for r, t in enumerate(texts):
         for tok in t.lower().split():
-            out[r, hash(tok) % dim] += 1.0
+            out[r, zlib.crc32(tok.encode()) % dim] += 1.0   # deterministic (spec §4)
     return out

@@ -1,9 +1,12 @@
 from __future__ import annotations
-import tomllib
+import sys, tomllib
 from dataclasses import dataclass
 from fnmatch import fnmatch
 from pathlib import Path
 from smartctx.inventory import Item
+
+def _warn(msg: str) -> None:                       # local, avoids importing cli (cycle)
+    print(f"smartctx: {msg}", file=sys.stderr)
 
 @dataclass(frozen=True)
 class Predicate:
@@ -64,12 +67,20 @@ def _rules_file(config_root: Path) -> Path:
 def _parse(path: Path) -> list[Rule]:
     try:
         data = tomllib.loads(path.read_text())
-    except (OSError, tomllib.TOMLDecodeError):
+    except OSError:                                 # absent file is the normal case
+        return []
+    except tomllib.TOMLDecodeError as exc:          # spec §7: parse error -> keep all + warn
+        _warn(f"rules parse error in {path} ({exc}); ignoring rules file")
         return []
     out = []
     for r in data.get("rule", []):
+        try:
+            target = r["target"]
+        except KeyError:
+            _warn(f"skipping rule without target in {path}")
+            continue
         p = r.get("predicate", {})
-        out.append(Rule(target=r["target"], nl=r.get("nl", ""),
+        out.append(Rule(target=target, nl=r.get("nl", ""),
                         predicate=Predicate(action=p.get("action", "always_keep"),
                                             match=tuple(p.get("match", [])),
                                             match_mode=p.get("match_mode", "any"))))
@@ -80,8 +91,12 @@ def load_rules(config_root: Path, cwd: Path) -> list[Rule]:
     repo = {r.target: r for r in _parse(cwd / ".smartctx" / "rules.toml")}
     return list({**user, **repo}.values())   # repo overrides per target
 
-def _esc(s: str) -> str:
-    return s.replace("\\", "\\\\").replace('"', '\\"')
+_ESC = {"\\": "\\\\", '"': '\\"', "\n": "\\n", "\t": "\\t", "\r": "\\r"}
+
+def _esc(s: str) -> str:                            # keep appended TOML basic strings parseable
+    return "".join(
+        _ESC.get(c, f"\\u{ord(c):04x}" if ord(c) < 0x20 or ord(c) == 0x7f else c)
+        for c in s)                                 # escape C0 controls + DEL (TOML forbids raw)
 
 def save_rule(config_root: Path, rule: Rule) -> None:
     path = _rules_file(config_root)

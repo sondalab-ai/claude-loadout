@@ -34,3 +34,27 @@ def test_load_and_save_roundtrip(tmp_path: Path):
     rules = load_rules(config_root=root, cwd=tmp_path)
     assert any(r.target == "figma*" and r.predicate.match == ("design", "ui") for r in rules)
     assert has_rule(Item("figma@x", "plugin", "figma", ""), rules) is True
+
+def test_malformed_rules_warns_and_does_not_crash(tmp_path, capsys):
+    root = tmp_path / "root"; (root / "smartctx").mkdir(parents=True)
+    (root / "smartctx" / "rules.toml").write_text("this = is = not valid toml\n[[")
+    rules = load_rules(config_root=root, cwd=tmp_path)    # must not raise
+    assert rules == []
+    assert "parse error" in capsys.readouterr().err.lower()
+
+def test_save_rule_escapes_control_chars_roundtrip(tmp_path: Path):
+    root = tmp_path / "root"; (root / "smartctx").mkdir(parents=True)
+    nasty = 'line1\nline2\ttab "quote" \\back'
+    save_rule(root, Rule("weird*", nasty, Predicate("drop_if", (nasty,), "any")))
+    rules = load_rules(config_root=root, cwd=tmp_path)    # appended TOML stays parseable
+    r = next(r for r in rules if r.target == "weird*")
+    assert r.nl == nasty and r.predicate.match == (nasty,)
+
+def test_parse_skips_rule_without_target(tmp_path, capsys):
+    root = tmp_path / "root"; (root / "smartctx").mkdir(parents=True)
+    (root / "smartctx" / "rules.toml").write_text(
+        '[[rule]]\nnl = "no target here"\n[rule.predicate]\naction = "always_keep"\n'
+        '[[rule]]\ntarget = "ok"\n[rule.predicate]\naction = "always_drop"\n')
+    rules = load_rules(config_root=root, cwd=tmp_path)    # must not raise KeyError
+    assert [r.target for r in rules] == ["ok"]
+    assert "without target" in capsys.readouterr().err.lower()

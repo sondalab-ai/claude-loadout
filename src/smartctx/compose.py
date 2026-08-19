@@ -16,18 +16,23 @@ def _write_tmp(prefix: str, data: dict) -> Path:
         json.dump(data, fh)
     return Path(name)
 
+def _server_defs(path: Path) -> dict:
+    try:
+        return json.loads(path.read_text()).get("mcpServers", {}) or {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
 def compose(kept, all_items, config_root: Path, passthrough: list[str],
-            environ: Mapping[str, str] | None = None) -> LaunchPlan:
+            environ: Mapping[str, str] | None = None,
+            cwd: Path | None = None) -> LaunchPlan:
     environ = os.environ if environ is None else environ
     kept_ids = {i.id for i in kept}
-    server_defs = {}
-    try:
-        server_defs = json.loads((config_root / ".claude.json").read_text()).get("mcpServers", {})
-    except (OSError, json.JSONDecodeError):
-        server_defs = {}
-    curated = {name: server_defs.get(name, {})
-               for i in all_items if i.kind == "mcp" and i.id in kept_ids
-               for name in [i.id]}
+    server_defs = dict(_server_defs(config_root / ".claude.json"))
+    if cwd is not None:                            # project .mcp.json overrides user defs (spec §4.2)
+        server_defs.update(_server_defs(cwd / ".mcp.json"))
+    curated = {i.id: server_defs[i.id]             # omit kept servers lacking a real definition
+               for i in all_items
+               if i.kind == "mcp" and i.id in kept_ids and i.id in server_defs}
     dropped_plugins = {i.id: False for i in all_items
                        if i.kind == "plugin" and i.id not in kept_ids}
     mcp_path = _write_tmp("mcp", {"mcpServers": curated})

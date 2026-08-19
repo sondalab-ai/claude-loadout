@@ -24,3 +24,12 @@ def test_inventory_collects_enabled_plugins_mcp_and_skills(tmp_path: Path):
 
 def test_inventory_missing_files_returns_empty(tmp_path: Path):
     assert claude_code_inventory(tmp_path) == []
+
+def test_inventory_includes_project_mcp_json(tmp_path: Path):
+    root = _root(tmp_path)
+    cwd = tmp_path / "repo"; cwd.mkdir()
+    (cwd / ".mcp.json").write_text('{"mcpServers": {"Proj": {"command": "p"}}}')
+    items = claude_code_inventory(root, cwd)
+    by_id = {(i.kind, i.id) for i in items}
+    assert ("mcp", "Proj") in by_id                     # project server inventoried (spec §4.2)
+    assert ("mcp", "Gmail") in by_id                    # user servers still present

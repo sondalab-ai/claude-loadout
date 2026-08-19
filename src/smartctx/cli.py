@@ -23,6 +23,12 @@ def _cleanup(tmp_paths) -> None:
 def _interactive(passthrough: list[str]) -> bool:
     return sys.stdin.isatty() and "-p" not in passthrough and "--print" not in passthrough
 
+def _ask(prompt: str) -> str:                       # EOF on piped stdin -> treat as skip
+    try:
+        return input(prompt)
+    except EOFError:
+        return ""
+
 def _build_embed(model_name: str):
     try:
         return make_model2vec_embed(model_name)
@@ -42,19 +48,19 @@ def _build_compiler(cfg):
 def _resolve_goal(cwd: Path, passthrough: list[str]) -> str:
     goal = detect_goal(cwd)
     if goal.confidence < 0.15 and _interactive(passthrough):
-        entered = input(f"smartctx: session goal? [{goal.goal}] ").strip()
+        entered = _ask(f"smartctx: session goal? [{goal.goal}] ").strip()
         if entered:
             write_goal_cache(cwd, entered)         # preflight ruling: persist, don't re-ask
             return entered
     return goal.goal
 
 def _elicit(item: Item, context: str, compile_fn, config_root: Path) -> str:
-    nl = input(f"smartctx: rule for '{item.id}' ({item.kind})? [enter=skip] ").strip()
+    nl = _ask(f"smartctx: rule for '{item.id}' ({item.kind})? [enter=skip] ").strip()
     if not nl:
         return "undecided"
     pred = compile_rule(nl, item, compile_fn) if compile_fn else None
     if pred is None:                               # spec §7 degrade
-        choice = input("  couldn't compile; [k]eep always / [d]rop always / [s]kip? ").strip().lower()
+        choice = _ask("  couldn't compile; [k]eep always / [d]rop always / [s]kip? ").strip().lower()
         pred = {"k": Predicate("always_keep", (), "any"),
                 "d": Predicate("always_drop", (), "any")}.get(choice)
         if pred is None:
@@ -64,7 +70,7 @@ def _elicit(item: Item, context: str, compile_fn, config_root: Path) -> str:
 
 def _scoped_plan(passthrough: list[str], cwd: Path):
     cfg = load_config(cwd=cwd)
-    items = claude_code_inventory(cfg.config_root)
+    items = claude_code_inventory(cfg.config_root, cwd)
     if not items:
         return None, None
     context = _resolve_goal(cwd, passthrough)
@@ -76,24 +82,26 @@ def _scoped_plan(passthrough: list[str], cwd: Path):
     embed = _build_embed(cfg.model_name)
     ranked = Ranker(embed=embed).rank(context, list(outcome.undecided), cfg.threshold, cfg.always_keep)
     kept = list(pinned) + list(outcome.forced_keep) + list(ranked.kept)
-    dropped = list(ranked.dropped)
+    dropped = list(ranked.dropped) + [(i, "rule") for i in outcome.forced_drop]  # surface in --explain
     if _interactive(passthrough):                  # launch-time elicitation for rule-less drops
         compile_fn = _build_compiler(cfg)
-        ruleless = [i for i, _ in dropped if not has_rule(i, rules)]
+        ruleless = [i for i, _ in dropped                     # only prunable kinds are actionable
+                    if i.kind in {"mcp", "plugin"} and not has_rule(i, rules)]
         if ruleless:
             _warn(f"{len(ruleless)} item(s) would be dropped with no rule; asking (enter to skip)")
             for item in ruleless:
                 if _elicit(item, context, compile_fn, cfg.config_root) == "keep":
                     kept.append(item)
                     dropped = [(i, s) for i, s in dropped if i.id != item.id]
-    forced_drop_ids = {i.id for i in outcome.forced_drop}
-    kept = [i for i in kept if i.id not in forced_drop_ids]
-    plan = compose(kept, items, cfg.config_root, passthrough)
+    plan = compose(kept, items, cfg.config_root, passthrough, cwd=cwd)
     return (kept, dropped), plan
 
 def _cmd_rules(cwd: Path) -> int:
+    if not _interactive([]):                        # no TTY -> nothing to elicit; fail-open
+        _warn("rule authoring needs an interactive terminal; nothing to do")
+        return 0
     cfg = load_config(cwd=cwd)
-    items = claude_code_inventory(cfg.config_root)
+    items = claude_code_inventory(cfg.config_root, cwd)
     rules = load_rules(cfg.config_root, cwd)
     compile_fn = _build_compiler(cfg)
     context = _resolve_goal(cwd, [])
@@ -123,7 +131,7 @@ def main(argv: list[str] | None = None) -> int:
     kept, dropped = result
     if explain:
         print(f"goal-scoped session\nkept: {[i.id for i in kept]}")
-        print(f"dropped: {[(i.id, round(s, 3)) for i, s in dropped]}")
+        print(f"dropped: {[(i.id, round(s, 3) if isinstance(s, float) else s) for i, s in dropped]}")
         print("argv: " + " ".join(plan.argv))
         _cleanup(plan.tmp_paths)
         return 0

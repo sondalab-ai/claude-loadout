@@ -1,11 +1,14 @@
 from __future__ import annotations
-import os, tomllib
+import os, sys, tomllib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping
 
 DEFAULT_THRESHOLD = 0.35
 DEFAULT_MODEL = "minishlab/potion-base-8M"
+
+def _warn(msg: str) -> None:                       # local, avoids importing cli (cycle)
+    print(f"smartctx: {msg}", file=sys.stderr)
 
 @dataclass(frozen=True)
 class Config:
@@ -19,7 +22,10 @@ def _read_toml(path: Path) -> dict:
     try:
         with path.open("rb") as fh:
             return tomllib.load(fh)
-    except (OSError, tomllib.TOMLDecodeError):
+    except OSError:                                 # absent file is the normal case
+        return {}
+    except tomllib.TOMLDecodeError as exc:         # spec §7: parse error -> keep all + warn
+        _warn(f"config parse error in {path} ({exc}); using defaults")
         return {}
 
 def _resolve_root(environ: Mapping[str, str]) -> Path:
@@ -47,6 +53,8 @@ def load_config(cwd: Path, environ: Mapping[str, str] | None = None) -> Config:
             rule_model = str(layer["rule_model_path"])
     if "SMARTCTX_RULE_MODEL" in environ:
         rule_model = environ["SMARTCTX_RULE_MODEL"]
+    if rule_model:
+        rule_model = str(Path(rule_model).expanduser())
     if "SMARTCTX_ALWAYS_KEEP" in environ:
         always = tuple(x for x in environ["SMARTCTX_ALWAYS_KEEP"].split(",") if x)
     if "SMARTCTX_THRESHOLD" in environ:
