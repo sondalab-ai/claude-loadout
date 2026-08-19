@@ -6,13 +6,16 @@ from typing import NamedTuple
 from smartctx.config import load_config
 from smartctx.inventory import claude_code_inventory, Item
 from smartctx.goal import detect_goal, write_goal_cache
-from smartctx.ranker import Ranker, make_model2vec_embed, keyword_embed, bundled_model_path
+from smartctx.ranker import Ranker, make_model2vec_embed, keyword_embed, bundled_model_path, resolve_model_source
 from smartctx.compose import compose
 from smartctx.rules import load_rules, apply_rules, has_rule, save_rule, Rule, Predicate, evaluate
 from smartctx.compiler import compile_rule, make_local_instruct
 
 def _warn(msg: str) -> None:
     print(f"smartctx: {msg}", file=sys.stderr)
+
+def _plural(n: int, noun: str) -> str:
+    return f"{n} {noun}" if n == 1 else f"{n} {noun}s"
 
 def _cleanup(tmp_paths) -> None:
     for p in tmp_paths:
@@ -136,11 +139,12 @@ def _cmd_doctor(cwd: Path) -> int:
         print(f"  inventory: unavailable ({exc})")
     else:
         counts = {k: sum(1 for i in items if i.kind == k) for k in ("mcp", "plugin", "skill")}
-        print(f"  inventory: {counts['mcp']} mcp, {counts['plugin']} plugins, {counts['skill']} skills")
-    bundled = bundled_model_path().is_dir()
+        print(f"  inventory: {counts['mcp']} mcp, {_plural(counts['plugin'], 'plugin')}, "
+              f"{_plural(counts['skill'], 'skill')}")
+    resolved = resolve_model_source(cfg.model_name)
     embed = _build_embed(cfg.model_name)           # warns + falls back on failure
     model_state = ("keyword fallback" if embed is keyword_embed
-                   else "bundled copy" if bundled else "external")
+                   else "bundled copy" if resolved == str(bundled_model_path()) else "external")
     print(f"  embedding model: {cfg.model_name} ({model_state})")
     print(f"  rule model: {cfg.rule_model_path or 'not configured — rule authoring uses keep/drop/skip prompts'}")
     print("\nNext steps")

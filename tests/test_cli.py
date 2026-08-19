@@ -127,9 +127,21 @@ def test_doctor_prints_guidance_and_does_not_launch(tmp_path, monkeypatch, capsy
     rc = cli.main(["doctor"])
     assert rc == 0 and launched["ran"] is False
     out = capsys.readouterr().out
-    assert "config dir:" in out and "inventory: 1 mcp, 1 plugins" in out
+    assert "config dir:" in out and "inventory: 1 mcp, 1 plugin, 0 skills" in out  # singular/plural
     assert "--explain" in out and "alias claude=" in out    # init guidance present
     assert "keyword fallback" in out                        # model state reported
+
+def test_doctor_reports_external_model_over_bundled_dir(tmp_path, monkeypatch, capsys):
+    root = _root(tmp_path)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
+    repo_cfg = tmp_path / ".smartctx"; repo_cfg.mkdir()
+    repo_cfg.joinpath("config.toml").write_text('model_name = "minishlab/potion-base-32M"')  # not bundled id
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "make_model2vec_embed", lambda name: (lambda texts: None))  # loads OK
+    rc = cli.main(["doctor"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "external" in out and "bundled copy" not in out  # vendored dir exists but model isn't it
 
 def test_doctor_survives_inventory_error(tmp_path, monkeypatch, capsys):
     root = _root(tmp_path)

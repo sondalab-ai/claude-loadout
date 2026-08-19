@@ -44,7 +44,7 @@ class Ranker:
                 dropped.append((item, float(score)))
         return Selection(kept=tuple(kept), dropped=tuple(dropped))
 
-def _resolve_model_source(model_name: str) -> str:
+def resolve_model_source(model_name: str) -> str:
     # A local directory path wins; the default id maps to the vendored copy;
     # anything else is treated as a Hub id (fetched on demand).
     candidate = Path(model_name)
@@ -56,7 +56,7 @@ def _resolve_model_source(model_name: str) -> str:
 
 def make_model2vec_embed(model_name: str) -> Callable[[list[str]], np.ndarray]:
     from model2vec import StaticModel
-    model = StaticModel.from_pretrained(_resolve_model_source(model_name))
+    model = StaticModel.from_pretrained(resolve_model_source(model_name))
     return lambda texts: np.asarray(model.encode(texts), dtype=float)
 
 def keyword_embed(texts: list[str]) -> np.ndarray:

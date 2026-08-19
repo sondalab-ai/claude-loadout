@@ -16,12 +16,14 @@ uninstall_pkg() {
     if command -v pipx >/dev/null 2>&1 \
         && pipx list --short 2>/dev/null | grep -Eq '^[[:space:]]*smartctx([[:space:]]|$)'; then
         warn "found smartctx installed via pipx — running: pipx uninstall smartctx"
-        pipx uninstall smartctx
+        if ! pipx uninstall smartctx; then
+            warn "pipx uninstall failed; remove it by hand, then re-run for config cleanup"
+        fi
         return
     fi
     if command -v smartctx >/dev/null 2>&1; then
         warn "smartctx on PATH but not via pipx — trying pip instead"
-        if ! python3 -m pip uninstall smartctx; then
+        if ! python3 -m pip uninstall -y smartctx; then
             warn "automatic uninstall failed; do it by hand from the environment that provides"
             warn "  $(command -v smartctx)"
         fi
