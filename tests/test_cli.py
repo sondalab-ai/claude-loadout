@@ -33,20 +33,43 @@ def test_fail_open_launches_full_claude_on_error(tmp_path, monkeypatch):
     rc = cli.main(["-c"])
     assert captured["argv"] == ["claude", "-c"]
 
-def test_forced_drop_rule_excludes_item(tmp_path, monkeypatch, capsys):
+def _drop_rule_root(tmp_path):
     root = _root(tmp_path)
     (root / "smartctx").mkdir()
     (root / "smartctx" / "rules.toml").write_text(
         '[[rule]]\ntarget = "Gmail"\nnl = "never"\n'
         '[rule.predicate]\naction = "always_drop"\nmatch = []\nmatch_mode = "any"\n')
+    return root
+
+def _capture_mcp_overlay(monkeypatch):
+    captured = {}
+    def _fake_run(argv, **k):
+        mcp_path = argv[argv.index("--mcp-config") + 1]
+        captured["mcp"] = json.loads(Path(mcp_path).read_text())
+        return _RC(0)
+    monkeypatch.setattr(cli.subprocess, "run", _fake_run)
+    return captured
+
+def test_forced_drop_rule_excludes_item(tmp_path, monkeypatch):
+    root = _drop_rule_root(tmp_path)
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(cli, "make_model2vec_embed", lambda name: cli.keyword_embed)
-    monkeypatch.setattr(cli.subprocess, "run", lambda *a, **k: _RC(0))
-    cli.main(["--explain"])
-    out = capsys.readouterr().out
-    kept_line = out[out.index("kept:"):out.index("dropped:")]
-    assert "Gmail" not in kept_line          # always_drop rule removed it pre-ranking
+    captured = _capture_mcp_overlay(monkeypatch)
+    rc = cli.main([])
+    assert rc == 0
+    assert "Gmail" not in captured["mcp"]["mcpServers"]   # always_drop rule curated it out
+
+def test_always_keep_config_overrides_drop_rule(tmp_path, monkeypatch):
+    root = _drop_rule_root(tmp_path)                       # Gmail carries an always_drop rule
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
+    monkeypatch.setenv("SMARTCTX_ALWAYS_KEEP", "Gmail")    # config always_keep must win (spec §12)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "make_model2vec_embed", lambda name: cli.keyword_embed)
+    captured = _capture_mcp_overlay(monkeypatch)
+    rc = cli.main([])
+    assert rc == 0
+    assert "Gmail" in captured["mcp"]["mcpServers"]        # config pin beats the drop rule
 
 def test_rules_subcommand_authors_rule(tmp_path, monkeypatch):
     root = _root(tmp_path)

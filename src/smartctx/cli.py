@@ -1,5 +1,6 @@
 from __future__ import annotations
 import subprocess, sys
+from fnmatch import fnmatch
 from pathlib import Path
 from smartctx.config import load_config
 from smartctx.inventory import claude_code_inventory, Item
@@ -11,6 +12,13 @@ from smartctx.compiler import compile_rule, make_local_instruct
 
 def _warn(msg: str) -> None:
     print(f"smartctx: {msg}", file=sys.stderr)
+
+def _cleanup(tmp_paths) -> None:
+    for p in tmp_paths:
+        try:
+            p.unlink()
+        except OSError:
+            pass
 
 def _interactive(passthrough: list[str]) -> bool:
     return sys.stdin.isatty() and "-p" not in passthrough and "--print" not in passthrough
@@ -61,10 +69,13 @@ def _scoped_plan(passthrough: list[str], cwd: Path):
         return None, None
     context = _resolve_goal(cwd, passthrough)
     rules = load_rules(cfg.config_root, cwd)
-    outcome = apply_rules(items, rules, context)
+    pinned = [i for i in items if any(fnmatch(i.id, g) for g in cfg.always_keep)]
+    pinned_ids = {i.id for i in pinned}            # always_keep config wins over rules (spec §12)
+    remainder = [i for i in items if i.id not in pinned_ids]
+    outcome = apply_rules(remainder, rules, context)
     embed = _build_embed(cfg.model_name)
     ranked = Ranker(embed=embed).rank(context, list(outcome.undecided), cfg.threshold, cfg.always_keep)
-    kept = list(outcome.forced_keep) + list(ranked.kept)
+    kept = list(pinned) + list(outcome.forced_keep) + list(ranked.kept)
     dropped = list(ranked.dropped)
     if _interactive(passthrough):                  # launch-time elicitation for rule-less drops
         compile_fn = _build_compiler(cfg)
@@ -114,12 +125,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"goal-scoped session\nkept: {[i.id for i in kept]}")
         print(f"dropped: {[(i.id, round(s, 3)) for i, s in dropped]}")
         print("argv: " + " ".join(plan.argv))
+        _cleanup(plan.tmp_paths)
         return 0
     try:
         return subprocess.run(plan.argv, env=plan.env).returncode
     finally:
-        for p in plan.tmp_paths:
-            try:
-                p.unlink()
-            except OSError:
-                pass
+        _cleanup(plan.tmp_paths)
