@@ -340,7 +340,7 @@ def main(argv: list[str] | None = None) -> int:
 def _run(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     cwd = Path.cwd()
-    if argv and argv[0] in ("--help", "-h"):        # smartctx's own help; no profile prompt/scoping
+    if argv and argv[0] in ("--help", "-h", "help"):  # smartctx's own help; no profile prompt/scoping
         _print_help()
         return 0
     if argv and argv[0] in ("--version", "-V"):

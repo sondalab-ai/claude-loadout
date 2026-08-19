@@ -384,7 +384,7 @@ def test_help_prints_usage_without_prompting_or_launching(tmp_path, monkeypatch,
     monkeypatch.setattr("builtins.input", lambda *a, **k: pytest.fail("--help must not prompt"))
     launched = {"ran": False}
     monkeypatch.setattr(cli.subprocess, "run", lambda *a, **k: launched.__setitem__("ran", True))
-    for flag in ("--help", "-h"):
+    for flag in ("--help", "-h", "help"):
         rc = cli.main([flag])
         assert rc == 0 and launched["ran"] is False
         out = capsys.readouterr().out
