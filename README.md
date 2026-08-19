@@ -196,3 +196,9 @@ they stay fully deterministic and offline.**
 - Claude Code
 - Optional, for natural-language rule authoring: the `smartctx[rules]` extra
   (`llama-cpp-python`) plus a local GGUF instruct model
+
+## Uninstalling
+
+`scripts/uninstall.sh` removes the package (pipx, falling back to pip) and asks whether to
+delete the config it wrote (`$CLAUDE_CONFIG_DIR/smartctx/` and this repo's `.smartctx/`). It
+never touches your shell rc — alias lines you added are listed for you to remove by hand.
