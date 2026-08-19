@@ -82,7 +82,7 @@ class _Scope(NamedTuple):
 
 def _scoped_plan(passthrough: list[str], cwd: Path):
     cfg = load_config(cwd=cwd)
-    items = claude_code_inventory(cfg.config_root, cwd)
+    items = claude_code_inventory(cfg.config_root, cwd, cfg.global_config_path)
     if not items:
         return None, None
     context, gsource, gconf = _resolve_goal(cwd, passthrough)
@@ -105,7 +105,8 @@ def _scoped_plan(passthrough: list[str], cwd: Path):
                 if _elicit(item, context, compile_fn, cfg.config_root) == "keep":
                     kept.append(item)
                     dropped = [(i, s) for i, s in dropped if i.id != item.id]
-    plan = compose(kept, items, cfg.config_root, passthrough, cwd=cwd)
+    plan = compose(kept, items, cfg.config_root, passthrough, cwd=cwd,
+                   global_config_path=cfg.global_config_path)
     return _Scope(context, gsource, gconf, cfg.threshold, kept, dropped), plan
 
 def _cmd_rules(cwd: Path) -> int:
@@ -113,7 +114,7 @@ def _cmd_rules(cwd: Path) -> int:
         _warn("rule authoring needs an interactive terminal; nothing to do")
         return 0
     cfg = load_config(cwd=cwd)
-    items = claude_code_inventory(cfg.config_root, cwd)
+    items = claude_code_inventory(cfg.config_root, cwd, cfg.global_config_path)
     rules = load_rules(cfg.config_root, cwd)
     compile_fn = _build_compiler(cfg)
     context = _resolve_goal(cwd, [])
@@ -135,13 +136,14 @@ def _discover_profiles(active_root: Path) -> list[Path]:
             profiles.append(path)
     return profiles
 
-def _profile_report(root: Path, cwd: Path, active: bool) -> None:
+def _profile_report(root: Path, cwd: Path, active: bool,
+                    global_config_path: Path | None = None) -> None:
     tag = " (active)" if active else ""
     print(f"  {root}{tag}")
     user_cfg = root / "smartctx" / "config.toml"
     print(f"    user config: {'present' if user_cfg.is_file() else 'absent'}")
     try:
-        items = claude_code_inventory(root, cwd)
+        items = claude_code_inventory(root, cwd, global_config_path)
     except Exception as exc:                        # fail-open: doctor must never crash
         print(f"    inventory: unavailable ({exc})")
         return
@@ -155,7 +157,8 @@ def _cmd_doctor(cwd: Path) -> int:
     profiles = _discover_profiles(cfg.config_root)
     print(f"  claude profiles: {_plural(len(profiles), 'profile')}")
     for root in profiles:
-        _profile_report(root, cwd, active=root == cfg.config_root)
+        active = root == cfg.config_root
+        _profile_report(root, cwd, active, cfg.global_config_path if active else None)
     repo_cfg = cwd / ".smartctx" / "config.toml"
     print(f"  repo config: {repo_cfg} ({'present' if repo_cfg.is_file() else 'absent'})")
     resolved = resolve_model_source(cfg.model_name)

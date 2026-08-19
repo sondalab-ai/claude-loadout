@@ -13,6 +13,7 @@ def _warn(msg: str) -> None:                       # local, avoids importing cli
 @dataclass(frozen=True)
 class Config:
     config_root: Path
+    global_config_path: Path            # .claude.json: mcpServers + project scopes
     always_keep: tuple[str, ...]
     threshold: float
     model_name: str
@@ -28,13 +29,26 @@ def _read_toml(path: Path) -> dict:
         _warn(f"config parse error in {path} ({exc}); using defaults")
         return {}
 
-def _resolve_root(environ: Mapping[str, str]) -> Path:
+def _resolve_paths(environ: Mapping[str, str]) -> tuple[Path, Path]:
+    # Claude Code: settings/skills live in CLAUDE_CONFIG_DIR (or ~/.claude by default),
+    # but .claude.json sits at <CLAUDE_CONFIG_DIR>/.claude.json — or ~/.claude.json (HOME
+    # root, beside the dir) when the default profile is used.
     raw = environ.get("CLAUDE_CONFIG_DIR")
-    return Path(raw).expanduser() if raw else Path.home() / ".claude"
+    if raw:
+        base = Path(raw).expanduser()
+        return base, base / ".claude.json"
+    return Path.home() / ".claude", Path.home() / ".claude.json"
+
+def default_global_config_path(config_root: Path) -> Path:
+    # Derive the .claude.json path for a profile dir when the env context is unknown
+    # (e.g. doctor enumerating sibling profiles). The default ~/.claude profile keeps
+    # its global state in ~/.claude.json, others in <profile>/.claude.json.
+    return Path.home() / ".claude.json" if config_root == Path.home() / ".claude" \
+        else config_root / ".claude.json"
 
 def load_config(cwd: Path, environ: Mapping[str, str] | None = None) -> Config:
     environ = os.environ if environ is None else environ
-    root = _resolve_root(environ)
+    root, global_config_path = _resolve_paths(environ)
     layers = [_read_toml(root / "smartctx" / "config.toml"),
               _read_toml(cwd / ".smartctx" / "config.toml")]
     always: tuple[str, ...] = ()
@@ -59,5 +73,6 @@ def load_config(cwd: Path, environ: Mapping[str, str] | None = None) -> Config:
         always = tuple(x for x in environ["SMARTCTX_ALWAYS_KEEP"].split(",") if x)
     if "SMARTCTX_THRESHOLD" in environ:
         threshold = float(environ["SMARTCTX_THRESHOLD"])
-    return Config(config_root=root, always_keep=always, threshold=threshold,
+    return Config(config_root=root, global_config_path=global_config_path,
+                  always_keep=always, threshold=threshold,
                   model_name=model, rule_model_path=rule_model)

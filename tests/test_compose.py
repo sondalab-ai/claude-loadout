@@ -21,3 +21,15 @@ def test_compose_writes_overlays_and_argv(tmp_path: Path):
     assert settings["enabledPlugins"] == {"figma@x": False}   # only dropped plugin
     assert plan.env["CLAUDE_CONFIG_DIR"] == str(root)
     assert set(plan.tmp_paths) == {mcp_path, settings_path}
+
+def test_compose_emits_project_scoped_server_def(tmp_path: Path):
+    root = tmp_path / "root"; root.mkdir()
+    cwd = tmp_path / "repo"; cwd.mkdir()
+    (root / ".claude.json").write_text(json.dumps(   # server defined only under projects[cwd]
+        {"projects": {str(cwd): {"mcpServers": {"Scoped": {"command": "z"}}}}}))
+    item = Item("Scoped", "mcp", "Scoped", "")
+    plan = compose([item], [item], root, passthrough=[], cwd=cwd)
+    mcp_path = Path(plan.argv[plan.argv.index("--mcp-config") + 1])
+    mcp = json.loads(mcp_path.read_text())
+    assert mcp["mcpServers"] == {"Scoped": {"command": "z"}}   # kept server survives to launch
+    mcp_path.unlink(); Path(plan.argv[plan.argv.index("--settings") + 1]).unlink()

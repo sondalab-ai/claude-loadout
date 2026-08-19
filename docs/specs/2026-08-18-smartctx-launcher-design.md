@@ -76,8 +76,10 @@ automatically. Rejected.
    `exec claude …`. Also exposes `smartctx rules` for bulk rule authoring. Unrecognized args
    pass through to `claude` untouched.
 2. **Inventory adapter (Claude Code)** — reads the resolved config root:
-   `enabledPlugins` + plugin manifests (name + description), `mcpServers`
-   (`$CLAUDE_CONFIG_DIR/.claude.json` + project `.mcp.json`), standalone skill frontmatter.
+   `enabledPlugins` + plugin manifests (name + description); MCP servers merged least→most
+   specific: global `mcpServers`, then `projects["<cwd>"].mcpServers`, then project `.mcp.json`
+   (later wins). The global file is `$CLAUDE_CONFIG_DIR/.claude.json`, or `~/.claude.json`
+   (HOME root, beside the dir) for the default profile. Plus standalone skill frontmatter.
    Emits items `{id, kind, name, description, footprint}` where `kind ∈ {mcp, plugin, skill}`.
 3. **Goal detector** — signals: directory basename, marker files
    (`package.json` / `pyproject.toml` / `*.tsx` / `README` / `docs/`), git remote & branch.

@@ -2,6 +2,7 @@ from __future__ import annotations
 import json, re
 from dataclasses import dataclass
 from pathlib import Path
+from smartctx.config import default_global_config_path
 
 @dataclass(frozen=True)
 class Item:
@@ -29,15 +30,28 @@ def _frontmatter(text: str) -> dict[str, str]:
             out[k.strip()] = v.strip()
     return out
 
-def claude_code_inventory(config_root: Path, cwd: Path | None = None) -> list[Item]:
+def resolve_mcp_servers(global_config_path: Path, cwd: Path | None) -> dict:
+    # Single source of truth for MCP discovery, shared by inventory + launch composition.
+    # Merge order = least to most specific (later wins, spec §4.2):
+    #   user-global -> projects[cwd] inside .claude.json -> repo .mcp.json.
+    global_cfg = _load_json(global_config_path)
+    servers = dict(global_cfg.get("mcpServers") or {})
+    if cwd is not None:
+        project = (global_cfg.get("projects") or {}).get(str(cwd)) or {}
+        servers.update(project.get("mcpServers") or {})
+        servers.update(_load_json(cwd / ".mcp.json").get("mcpServers") or {})
+    return servers
+
+def claude_code_inventory(config_root: Path, cwd: Path | None = None,
+                          global_config_path: Path | None = None) -> list[Item]:
     items: list[Item] = []
     settings = _load_json(config_root / "settings.json")
     for pid, enabled in (settings.get("enabledPlugins") or {}).items():
         if enabled:
             items.append(Item(id=pid, kind="plugin", name=pid, description=pid))
-    servers = dict(_load_json(config_root / ".claude.json").get("mcpServers") or {})
-    if cwd is not None:                            # project .mcp.json overrides user defs (spec §4.2)
-        servers.update(_load_json(cwd / ".mcp.json").get("mcpServers") or {})
+    if global_config_path is None:
+        global_config_path = default_global_config_path(config_root)
+    servers = resolve_mcp_servers(global_config_path, cwd)
     for name in servers:
         items.append(Item(id=name, kind="mcp", name=name, description=name))
     skills_dir = config_root / "skills"

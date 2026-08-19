@@ -33,3 +33,21 @@ def test_inventory_includes_project_mcp_json(tmp_path: Path):
     by_id = {(i.kind, i.id) for i in items}
     assert ("mcp", "Proj") in by_id                     # project server inventoried (spec §4.2)
     assert ("mcp", "Gmail") in by_id                    # user servers still present
+
+def test_inventory_includes_project_scoped_mcp_in_claude_json(tmp_path: Path):
+    root = tmp_path / "root"; root.mkdir()
+    cwd = tmp_path / "repo"; cwd.mkdir()
+    (root / ".claude.json").write_text(  # real Claude Code layout: MCP scoped under projects[cwd]
+        '{"mcpServers": {"Global": {"command": "g"}},'
+        f' "projects": {{"{cwd}": {{"mcpServers": {{"Scoped": {{"command": "s"}}}}}}}}}}')
+    by_id = {(i.kind, i.id) for i in claude_code_inventory(root, cwd)}
+    assert ("mcp", "Scoped") in by_id                   # project-scoped server discovered
+    assert ("mcp", "Global") in by_id                   # top-level server still present
+
+def test_inventory_default_profile_reads_home_claude_json(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    root = tmp_path / ".claude"; root.mkdir()           # default profile dir
+    (tmp_path / ".claude.json").write_text(             # global state sits beside it, not inside
+        '{"mcpServers": {"HomeSrv": {"command": "h"}}}')
+    by_id = {(i.kind, i.id) for i in claude_code_inventory(root)}
+    assert ("mcp", "HomeSrv") in by_id

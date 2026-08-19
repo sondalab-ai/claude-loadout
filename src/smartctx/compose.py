@@ -3,6 +3,8 @@ import json, os, tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping
+from smartctx.config import default_global_config_path
+from smartctx.inventory import resolve_mcp_servers
 
 @dataclass(frozen=True)
 class LaunchPlan:
@@ -16,20 +18,15 @@ def _write_tmp(prefix: str, data: dict) -> Path:
         json.dump(data, fh)
     return Path(name)
 
-def _server_defs(path: Path) -> dict:
-    try:
-        return json.loads(path.read_text()).get("mcpServers", {}) or {}
-    except (OSError, json.JSONDecodeError):
-        return {}
-
 def compose(kept, all_items, config_root: Path, passthrough: list[str],
             environ: Mapping[str, str] | None = None,
-            cwd: Path | None = None) -> LaunchPlan:
+            cwd: Path | None = None,
+            global_config_path: Path | None = None) -> LaunchPlan:
     environ = os.environ if environ is None else environ
     kept_ids = {i.id for i in kept}
-    server_defs = dict(_server_defs(config_root / ".claude.json"))
-    if cwd is not None:                            # project .mcp.json overrides user defs (spec §4.2)
-        server_defs.update(_server_defs(cwd / ".mcp.json"))
+    if global_config_path is None:
+        global_config_path = default_global_config_path(config_root)
+    server_defs = resolve_mcp_servers(global_config_path, cwd)  # same discovery as inventory
     curated = {i.id: server_defs[i.id]             # omit kept servers lacking a real definition
                for i in all_items
                if i.kind == "mcp" and i.id in kept_ids and i.id in server_defs}
