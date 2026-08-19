@@ -91,10 +91,11 @@ environment without launching anything and prints the next steps:
 smartctx doctor
 ```
 
-It shows the resolved config dir (from `CLAUDE_CONFIG_DIR`), which config files exist, how many
-MCP servers / plugins / skills it would inventory, which embedding model is in use (bundled,
-external, or keyword fallback), whether a rule model is configured — and then the alias +
-`--explain` + `rules` cheat sheet to get going.
+It enumerates every Claude profile it finds (`~/.claude`, `~/.claude-perso`, …), marks the one
+selected by `CLAUDE_CONFIG_DIR` as active, and for each shows which config files exist and how many
+MCP servers / plugins / skills it would inventory. It then reports which embedding model is in use
+(bundled, external, or keyword fallback), whether a rule model is configured — and finishes with the
+alias + `--explain` + `rules` cheat sheet to get going.
 
 ---
 

@@ -126,21 +126,38 @@ def _cmd_rules(cwd: Path) -> int:
     print(f"smartctx: authored {authored} rule(s)")
     return 0
 
+def _discover_profiles(active_root: Path) -> list[Path]:
+    # Claude Code keeps each profile in its own dir (~/.claude, ~/.claude-perso, ...);
+    # CLAUDE_CONFIG_DIR selects one. Report every sibling so a wrong-profile setup is visible.
+    profiles = [active_root]
+    for path in sorted(Path.home().glob(".claude*")):
+        if path.is_dir() and path.resolve() != active_root.resolve() and path not in profiles:
+            profiles.append(path)
+    return profiles
+
+def _profile_report(root: Path, cwd: Path, active: bool) -> None:
+    tag = " (active)" if active else ""
+    print(f"  {root}{tag}")
+    user_cfg = root / "smartctx" / "config.toml"
+    print(f"    user config: {'present' if user_cfg.is_file() else 'absent'}")
+    try:
+        items = claude_code_inventory(root, cwd)
+    except Exception as exc:                        # fail-open: doctor must never crash
+        print(f"    inventory: unavailable ({exc})")
+        return
+    counts = {k: sum(1 for i in items if i.kind == k) for k in ("mcp", "plugin", "skill")}
+    print(f"    inventory: {counts['mcp']} mcp, {_plural(counts['plugin'], 'plugin')}, "
+          f"{_plural(counts['skill'], 'skill')}")
+
 def _cmd_doctor(cwd: Path) -> int:
     cfg = load_config(cwd=cwd)
     print("smartctx doctor — setup check")
-    print(f"  config dir: {cfg.config_root}")
-    for label, path in (("user config", cfg.config_root / "smartctx" / "config.toml"),
-                        ("repo config", cwd / ".smartctx" / "config.toml")):
-        print(f"  {label}: {path} ({'present' if path.is_file() else 'absent'})")
-    try:
-        items = claude_code_inventory(cfg.config_root, cwd)
-    except Exception as exc:                       # fail-open: doctor must never crash
-        print(f"  inventory: unavailable ({exc})")
-    else:
-        counts = {k: sum(1 for i in items if i.kind == k) for k in ("mcp", "plugin", "skill")}
-        print(f"  inventory: {counts['mcp']} mcp, {_plural(counts['plugin'], 'plugin')}, "
-              f"{_plural(counts['skill'], 'skill')}")
+    profiles = _discover_profiles(cfg.config_root)
+    print(f"  claude profiles: {_plural(len(profiles), 'profile')}")
+    for root in profiles:
+        _profile_report(root, cwd, active=root == cfg.config_root)
+    repo_cfg = cwd / ".smartctx" / "config.toml"
+    print(f"  repo config: {repo_cfg} ({'present' if repo_cfg.is_file() else 'absent'})")
     resolved = resolve_model_source(cfg.model_name)
     embed = _build_embed(cfg.model_name)           # warns + falls back on failure
     model_state = ("keyword fallback" if embed is keyword_embed

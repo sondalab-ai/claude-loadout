@@ -119,6 +119,7 @@ def test_launch_elicitation_survives_eof_on_piped_stdin(tmp_path, monkeypatch):
 
 def test_doctor_prints_guidance_and_does_not_launch(tmp_path, monkeypatch, capsys):
     root = _root(tmp_path)                             # one mcp + one plugin
+    monkeypatch.setenv("HOME", str(tmp_path))          # hermetic profile discovery
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(cli, "make_model2vec_embed", lambda name: cli.keyword_embed)
@@ -127,12 +128,29 @@ def test_doctor_prints_guidance_and_does_not_launch(tmp_path, monkeypatch, capsy
     rc = cli.main(["doctor"])
     assert rc == 0 and launched["ran"] is False
     out = capsys.readouterr().out
-    assert "config dir:" in out and "inventory: 1 mcp, 1 plugin, 0 skills" in out  # singular/plural
+    assert "claude profiles: 1 profile" in out and f"{root} (active)" in out
+    assert "inventory: 1 mcp, 1 plugin, 0 skills" in out     # singular/plural
     assert "--explain" in out and "alias claude=" in out    # init guidance present
     assert "keyword fallback" in out                        # model state reported
 
+def test_doctor_enumerates_multiple_profiles(tmp_path, monkeypatch, capsys):
+    for name, plugin in ((".claude", "a@x"), (".claude-perso", "b@x")):
+        prof = tmp_path / name; prof.mkdir()
+        prof.joinpath("settings.json").write_text(f'{{"enabledPlugins": {{"{plugin}": true}}}}')
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / ".claude-perso"))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "make_model2vec_embed", lambda name: cli.keyword_embed)
+    rc = cli.main(["doctor"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "claude profiles: 2 profiles" in out
+    assert f"{tmp_path / '.claude-perso'} (active)" in out   # env-selected profile marked active
+    assert f"{tmp_path / '.claude'}\n" in out                # sibling listed, not marked active
+
 def test_doctor_reports_external_model_over_bundled_dir(tmp_path, monkeypatch, capsys):
     root = _root(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
     repo_cfg = tmp_path / ".smartctx"; repo_cfg.mkdir()
     repo_cfg.joinpath("config.toml").write_text('model_name = "minishlab/potion-base-32M"')  # not bundled id
@@ -145,6 +163,7 @@ def test_doctor_reports_external_model_over_bundled_dir(tmp_path, monkeypatch, c
 
 def test_doctor_survives_inventory_error(tmp_path, monkeypatch, capsys):
     root = _root(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(cli, "claude_code_inventory",
