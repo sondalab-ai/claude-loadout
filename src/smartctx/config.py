@@ -13,6 +13,7 @@ class Config:
     always_keep: tuple[str, ...]
     threshold: float
     model_name: str
+    rule_model_path: str | None
 
 def _read_toml(path: Path) -> dict:
     try:
@@ -40,8 +41,15 @@ def load_config(cwd: Path, environ: Mapping[str, str] | None = None) -> Config:
             threshold = float(layer["threshold"])
         if "model_name" in layer:
             model = str(layer["model_name"])
+    rule_model = None
+    for layer in layers:
+        if "rule_model_path" in layer:
+            rule_model = str(layer["rule_model_path"])
+    if "SMARTCTX_RULE_MODEL" in environ:
+        rule_model = environ["SMARTCTX_RULE_MODEL"]
     if "SMARTCTX_ALWAYS_KEEP" in environ:
         always = tuple(x for x in environ["SMARTCTX_ALWAYS_KEEP"].split(",") if x)
     if "SMARTCTX_THRESHOLD" in environ:
         threshold = float(environ["SMARTCTX_THRESHOLD"])
-    return Config(config_root=root, always_keep=always, threshold=threshold, model_name=model)
+    return Config(config_root=root, always_keep=always, threshold=threshold,
+                  model_name=model, rule_model_path=rule_model)
