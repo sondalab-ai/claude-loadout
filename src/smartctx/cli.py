@@ -15,8 +15,25 @@ from smartctx.compiler import compile_rule, make_local_instruct
 class _Abort(Exception):
     """User declined to pick a profile at the selection prompt."""
 
+_SGR = {"dim": "2", "bold": "1", "green": "32", "red": "31", "cyan": "36", "yellow": "33"}
+
+def _supports_color(err: bool) -> bool:
+    # Looked up lazily (not cached at import) so pytest's capsys stream swap is honoured.
+    if os.environ.get("NO_COLOR") or os.environ.get("SMARTCTX_NO_COLOR"):
+        return False
+    stream = sys.stderr if err else sys.stdout
+    return stream.isatty()
+
+def _paint(text: str, *codes: str, err: bool = False) -> str:
+    if not _supports_color(err):
+        return text
+    return f"\033[{';'.join(_SGR[c] for c in codes)}m{text}\033[0m"
+
+def _yn(flag: bool, *, err: bool = False) -> str:
+    return _paint("present", "green", err=err) if flag else _paint("absent", "dim", err=err)
+
 def _warn(msg: str) -> None:
-    print(f"smartctx: {msg}", file=sys.stderr)
+    print(f"{_paint('smartctx:', 'yellow', err=True)} {msg}", file=sys.stderr)
 
 def _plural(n: int, noun: str) -> str:
     return f"{n} {noun}" if n == 1 else f"{n} {noun}s"
@@ -64,20 +81,26 @@ def _resolve_goal(cwd: Path, passthrough: list[str]) -> tuple[str, str, float]:
 
 def _rules_intro(compile_fn) -> None:
     # Printed once before an elicitation run so the interaction isn't a cold prompt.
+    p = lambda s: print(s, file=sys.stderr)
+    dim = lambda s: _paint(s, "dim", err=True)
+    p("")
     if compile_fn:
-        print("smartctx: for each tool, describe in plain language when to keep or drop it.",
-              file=sys.stderr)
-        print('  e.g. "keep only when the goal is frontend"  '
-              '"drop unless it mentions email"  "always keep this"', file=sys.stderr)
-        print("  press enter to skip; if a description can't be translated you'll get "
-              "keep/drop/skip choices.", file=sys.stderr)
+        p(f"{_paint('smartctx:', 'yellow', err=True)} for each tool, describe in plain "
+          "language when to keep or drop it.")
+        p(dim('    e.g.  "keep only when the goal is frontend"'))
+        p(dim('          "drop unless it mentions email"'))
+        p(dim('          "always keep this"'))
+        p(dim("    press enter to skip; if a description can't be translated "
+              "you'll get keep/drop/skip choices."))
     else:
-        print("smartctx: no rule model configured — natural-language rules are unavailable.",
-              file=sys.stderr)
-        print("  choose per tool: [k]eep always / [d]rop always / [s]kip (enter).", file=sys.stderr)
+        p(f"{_paint('smartctx:', 'yellow', err=True)} no rule model configured — "
+          "natural-language rules are unavailable.")
+        p(dim("    [k]eep always / [d]rop always write a permanent rule; "
+              "[s]kip (enter) decides nothing and asks again next time."))
+    p("")
 
 def _pick_keep_drop_skip(item: Item) -> Predicate | None:
-    choice = _ask(f"  '{item.id}': [k]eep always / [d]rop always / [s]kip? ").strip().lower()
+    choice = _ask(f"  '{item.id}': [k]eep always / [d]rop always / [s]kip (decide later)? ").strip().lower()
     return {"k": Predicate("always_keep", (), "any"),
             "d": Predicate("always_drop", (), "any")}.get(choice)
 
@@ -148,14 +171,15 @@ def _cmd_rules(cwd: Path, config_root_override: Path | None = None) -> int:
     context = _resolve_goal(cwd, [])
     pending = [i for i in items if not has_rule(i, rules)]
     if not pending:
-        print("smartctx: every tool already has a rule")
+        print(f"{_paint('smartctx:', 'green')} every tool already has a rule")
         return 0
     _rules_intro(compile_fn)
     authored = 0
     for item in pending:
         if _elicit(item, context, compile_fn, cfg.config_root) != "undecided":
             authored += 1
-    print(f"smartctx: authored {_plural(authored, 'rule')}")
+    print()
+    print(f"{_paint('smartctx:', 'green')} authored {_plural(authored, 'rule')}")
     return 0
 
 def _discover_profiles(active_root: Path) -> list[Path]:
@@ -187,11 +211,16 @@ def _resolve_config_root(environ, passthrough: list[str]) -> Path | None:
     profiles = _discover_profiles(Path.home() / ".claude")
     if len(profiles) <= 1:
         return None
-    print("smartctx: CLAUDE_CONFIG_DIR not set — pick a Claude profile:", file=sys.stderr)
+    print("", file=sys.stderr)
+    print(f"{_paint('smartctx:', 'yellow', err=True)} CLAUDE_CONFIG_DIR not set — "
+          "pick a Claude profile:", file=sys.stderr)
+    print("", file=sys.stderr)
     for idx, prof in enumerate(profiles, 1):
         has_cfg = (prof / "smartctx" / "config.toml").is_file()
-        print(f"  {idx}) {prof}  (smartctx config: {'present' if has_cfg else 'absent'})",
+        num = _paint(f"{idx})", "bold", err=True)
+        print(f"  {num} {prof}  {_paint(f'(smartctx config: {_yn(has_cfg, err=True)})', 'dim', err=True)}",
               file=sys.stderr)
+    print("", file=sys.stderr)
     while True:                                          # no default (spec B): Enter re-asks
         try:
             raw = input(f"profile [1-{len(profiles)}]: ").strip()
@@ -205,44 +234,51 @@ def _resolve_config_root(environ, passthrough: list[str]) -> Path | None:
 
 def _profile_report(root: Path, cwd: Path, active: bool,
                     global_config_path: Path | None = None) -> None:
-    tag = " (active)" if active else ""
-    print(f"  {root}{tag}")
+    tag = f" {_paint('(active)', 'green', 'bold')}" if active else ""
+    print(f"  {_paint(str(root), 'cyan')}{tag}")
     user_cfg = root / "smartctx" / "config.toml"
-    print(f"    user config: {'present' if user_cfg.is_file() else 'absent'}")
+    print(f"    user config:  {_yn(user_cfg.is_file())}")
     try:
         items = claude_code_inventory(root, cwd, global_config_path)
     except Exception as exc:                        # fail-open: doctor must never crash
-        print(f"    inventory: unavailable ({exc})")
+        print(f"    inventory:    {_paint(f'unavailable ({exc})', 'red')}")
         return
     counts = {k: sum(1 for i in items if i.kind == k) for k in ("mcp", "plugin", "skill")}
-    print(f"    inventory: {counts['mcp']} mcp, {_plural(counts['plugin'], 'plugin')}, "
+    print(f"    inventory:    {counts['mcp']} mcp, {_plural(counts['plugin'], 'plugin')}, "
           f"{_plural(counts['skill'], 'skill')}")
 
 def _cmd_doctor(cwd: Path) -> int:
     cfg = load_config(cwd=cwd)
-    print("smartctx doctor — setup check")
+    print(_paint("smartctx doctor", "bold"))
+    print()
     profiles = _discover_profiles(cfg.config_root)
-    print(f"  claude profiles: {_plural(len(profiles), 'profile')}")
+    print(_paint(f"  claude profiles: {_plural(len(profiles), 'profile')}", "bold"))
+    print()
     for root in profiles:
         active = root == cfg.config_root
         _profile_report(root, cwd, active, cfg.global_config_path if active else None)
+        print()
     repo_cfg = cwd / ".smartctx" / "config.toml"
-    print(f"  repo config: {repo_cfg} ({'present' if repo_cfg.is_file() else 'absent'})")
+    print(_paint("  environment", "bold"))
+    print(f"    repo config:      {_paint(str(repo_cfg), 'cyan')} ({_yn(repo_cfg.is_file())})")
     resolved = resolve_model_source(cfg.model_name)
     embed = _build_embed(cfg.model_name)           # warns + falls back on failure
     model_state = ("keyword fallback" if embed is keyword_embed
                    else "bundled copy" if resolved == str(bundled_model_path()) else "external")
-    print(f"  embedding model: {cfg.model_name} ({model_state})")
-    print(f"  rule model: {cfg.rule_model_path or 'not configured — rule authoring uses keep/drop/skip prompts'}")
-    print("\nNext steps")
-    print("  1. Point your launch command at smartctx, e.g. add to your shell rc:")
-    print('       alias claude="smartctx"')
-    print('     or wrap a separate profile:')
-    print('       alias claude-work="CLAUDE_CONFIG_DIR=~/.claude-work smartctx"')
-    print("  2. Preview what a session would load, without launching anything:")
-    print("       smartctx --explain")
-    print("  3. Scope tools with plain-language rules:")
-    print("       smartctx rules")
+    print(f"    embedding model:  {cfg.model_name} {_paint(f'({model_state})', 'dim')}")
+    rule_state = cfg.rule_model_path or _paint(
+        "not configured — rule authoring uses keep/drop/skip prompts", "dim")
+    print(f"    rule model:       {rule_state}")
+    print()
+    print(_paint("  Next steps", "bold"))
+    print("    1. Point your launch command at smartctx, e.g. add to your shell rc:")
+    print(f"         {_paint('alias claude=\"smartctx\"', 'cyan')}")
+    print("       or wrap a separate profile:")
+    print(f"         {_paint('alias claude-work=\"CLAUDE_CONFIG_DIR=~/.claude-work smartctx\"', 'cyan')}")
+    print("    2. Preview what a session would load, without launching anything:")
+    print(f"         {_paint('smartctx --explain', 'cyan')}")
+    print("    3. Scope tools with plain-language rules:")
+    print(f"         {_paint('smartctx rules', 'cyan')}")
     return 0
 
 def _smartctx_version() -> str:
@@ -252,19 +288,47 @@ def _smartctx_version() -> str:
         return "unknown"
 
 def _print_help() -> None:
+    cmd = lambda s: _paint(s, "cyan")
     print(
-        "smartctx — goal-aware launcher for Claude Code\n"
+        f"{_paint('smartctx', 'bold')} — goal-aware launcher for Claude Code\n"
         "\n"
-        "Usage:\n"
-        "  smartctx [claude-args...]   Launch claude with a goal-scoped tool set\n"
-        "  smartctx --explain          Print the scoping plan, then exit (no launch)\n"
-        "  smartctx rules              Author keep/drop rules interactively\n"
-        "  smartctx doctor             Report profiles, config, and model state\n"
-        "  smartctx --help, -h         Show this help\n"
-        "  smartctx --version, -V      Show the smartctx version\n"
+        f"{_paint('Usage:', 'bold')}\n"
+        f"  {cmd('smartctx [claude-args...]')}   Launch claude with a goal-scoped tool set\n"
+        f"  {cmd('smartctx --explain')}          Print the scoping plan, then exit (no launch)\n"
+        f"  {cmd('smartctx rules')}              Author keep/drop rules interactively\n"
+        f"  {cmd('smartctx doctor')}             Report profiles, config, and model state\n"
+        f"  {cmd('smartctx --help, -h')}         Show this help\n"
+        f"  {cmd('smartctx --version, -V')}      Show the smartctx version\n"
         "\n"
-        "Any other flags pass straight through to claude — run `claude --help` for those."
+        f"{_paint('Any other flags pass straight through to claude — run `claude --help` for those.', 'dim')}"
     )
+
+def _print_explain(scope: _Scope, plan) -> None:
+    print(_paint("smartctx — scoping plan", "bold"))
+    print()
+    lbl = lambda s: _paint(f"  {s:<11}", "dim")
+    print(f"{lbl('goal')}{scope.goal!r}   "
+          f"{_paint(f'({scope.source} · confidence {scope.confidence:.2f})', 'dim')}")
+    print(f"{lbl('threshold')}{scope.threshold}")
+    print()
+    kept = [i.id for i in scope.kept]
+    print(_paint(f"  keeping ({len(kept)})", "bold"))
+    for cid in kept:
+        print(f"    {_paint('✓', 'green')} {cid}")
+    if not kept:
+        print(_paint("    (nothing)", "dim"))
+    print()
+    dropped = scope.dropped
+    print(_paint(f"  dropping ({len(dropped)})", "bold"))
+    width = max((len(i.id) for i, _ in dropped), default=0)
+    for item, s in dropped:
+        reason = f"{s:.3f}" if isinstance(s, float) else str(s)
+        print(f"    {_paint('✗', 'red')} {item.id:<{width}}  {_paint(reason, 'dim')}")
+    if not dropped:
+        print(_paint("    (nothing)", "dim"))
+    print()
+    print(_paint("  command", "bold"))
+    print(f"    {_paint(' '.join(plan.argv), 'dim')}")
 
 def main(argv: list[str] | None = None) -> int:
     try:
@@ -304,11 +368,7 @@ def _run(argv: list[str] | None = None) -> int:
         return subprocess.run(["claude", *passthrough], env=fallback_env).returncode
     scope = result
     if explain:
-        print(f"goal: {scope.goal!r}  (source: {scope.source}, confidence: {scope.confidence:.2f})")
-        print(f"threshold: {scope.threshold}")
-        print(f"kept: {[i.id for i in scope.kept]}")
-        print(f"dropped: {[(i.id, round(s, 3) if isinstance(s, float) else s) for i, s in scope.dropped]}")
-        print("argv: " + " ".join(plan.argv))
+        _print_explain(scope, plan)
         _cleanup(plan.tmp_paths)
         return 0
     try:

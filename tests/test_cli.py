@@ -22,7 +22,7 @@ def test_explain_does_not_launch(tmp_path, monkeypatch, capsys):
     rc = cli.main(["--explain"])
     assert rc == 0 and launched["ran"] is False
     out = capsys.readouterr().out.lower()
-    assert "kept" in out and "goal:" in out and "threshold:" in out   # --explain surfaces the goal
+    assert "keeping" in out and "goal" in out and "threshold" in out   # --explain surfaces the goal
 
 def test_fail_open_launches_full_claude_on_error(tmp_path, monkeypatch):
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "root"))
@@ -103,8 +103,8 @@ def test_explain_shows_rule_forced_drop(tmp_path, monkeypatch, capsys):
     rc = cli.main(["--explain"])
     assert rc == 0
     out = capsys.readouterr().out
-    dropped_line = next(l for l in out.splitlines() if l.startswith("dropped:"))
-    assert "Gmail" in dropped_line and "rule" in dropped_line   # forced drop surfaced with sentinel
+    gmail_line = next(l for l in out.splitlines() if "Gmail" in l)
+    assert "rule" in gmail_line   # forced drop surfaced in the dropping section with its sentinel
 
 def test_rules_subcommand_noop_without_tty(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "root"))
@@ -139,7 +139,7 @@ def test_doctor_prints_guidance_and_does_not_launch(tmp_path, monkeypatch, capsy
     assert rc == 0 and launched["ran"] is False
     out = capsys.readouterr().out
     assert "claude profiles: 1 profile" in out and f"{root} (active)" in out
-    assert "inventory: 1 mcp, 1 plugin, 0 skills" in out     # singular/plural
+    assert "1 mcp, 1 plugin, 0 skills" in out                # singular/plural
     assert "--explain" in out and "alias claude=" in out    # init guidance present
     assert "keyword fallback" in out                        # model state reported
 
@@ -180,7 +180,7 @@ def test_doctor_survives_inventory_error(tmp_path, monkeypatch, capsys):
                         lambda root, cwd=None: (_ for _ in ()).throw(RuntimeError("boom")))
     rc = cli.main(["doctor"])
     assert rc == 0
-    assert "inventory: unavailable" in capsys.readouterr().out
+    assert "unavailable" in capsys.readouterr().out
 
 def _skill_root(tmp_path):
     root = _root(tmp_path)
