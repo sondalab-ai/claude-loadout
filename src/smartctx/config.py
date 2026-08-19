@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping
 
-DEFAULT_THRESHOLD = 0.35
+DEFAULT_THRESHOLD = 0.20   # calibrated against potion-base-8M score distribution (see --explain)
 DEFAULT_MODEL = "minishlab/potion-base-8M"
 
 def _warn(msg: str) -> None:                       # local, avoids importing cli (cycle)

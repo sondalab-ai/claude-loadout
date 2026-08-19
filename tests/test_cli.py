@@ -20,7 +20,8 @@ def test_explain_does_not_launch(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(cli.subprocess, "run", lambda *a, **k: launched.__setitem__("ran", True))
     rc = cli.main(["--explain"])
     assert rc == 0 and launched["ran"] is False
-    assert "kept" in capsys.readouterr().out.lower()
+    out = capsys.readouterr().out.lower()
+    assert "kept" in out and "goal:" in out and "threshold:" in out   # --explain surfaces the goal
 
 def test_fail_open_launches_full_claude_on_error(tmp_path, monkeypatch):
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "root"))

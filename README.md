@@ -110,7 +110,7 @@ each key** (layers don't merge; a list value is overwritten wholesale):
 | Key | Meaning | Default |
 |---|---|---|
 | `always_keep` | Item ids or glob patterns to never prune. Unknown ids are ignored. | *(empty)* |
-| `threshold` | Cosine cutoff; an item is kept when its relevance score is `>= threshold`. Higher prunes more; lower keeps more. | `0.35` |
+| `threshold` | Cosine cutoff; an item is kept when its relevance score is `>= threshold`. Higher prunes more; lower keeps more. Calibrate with `--explain`. | `0.20` |
 | `model_name` | The embedding model used for ranking. | `minishlab/potion-base-8M` |
 | `rule_model_path` | Absolute path to a local instruct model for compiling natural-language rules (see below). | *(unset)* |
 
@@ -119,7 +119,7 @@ each key** (layers don't merge; a list value is overwritten wholesale):
 # always_keep below is an EXAMPLE — the shipped default is empty.
 always_keep = ["superpowers", "remember", "caveman*"]
 
-threshold = 0.35
+threshold = 0.20
 
 # Use an absolute path — "~" is not expanded.
 rule_model_path = "/Users/you/models/Qwen2.5-0.5B-Instruct.gguf"
