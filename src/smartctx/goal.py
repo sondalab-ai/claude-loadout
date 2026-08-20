@@ -1,4 +1,5 @@
 from __future__ import annotations
+import json, re, tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -7,6 +8,96 @@ class GoalResult:
     goal: str
     confidence: float
     source: str
+
+_DESC_CAP = 200                                    # keep the blurb short so it can't swamp the embedding
+_LINKY = re.compile(r'!?\[([^\]]*)\]\([^)]*\)')    # [text](url) / ![alt](src) -> text
+_NOISE_PREFIX = ("!", "[!", "<", ">", "|", "```", "~~~")   # image/badge, html, quote, table, fence
+_BULLET = re.compile(r'^([-*+]\s|\d+\.\s)')        # list item — drop, but keep **bold** taglines
+_HR = re.compile(r'^([-*=_]){3,}\s*$')             # horizontal rule
+
+_MAX_META = 1_000_000                              # don't parse a multi-MB generated config
+
+def _small_text(path: Path) -> str | None:
+    try:
+        if path.stat().st_size > _MAX_META:
+            return None
+        return path.read_text(errors="ignore")
+    except OSError:
+        return None
+
+def _metadata_description(cwd: Path) -> str | None:
+    raw = _small_text(cwd / "pyproject.toml")
+    if raw is not None:
+        try:
+            d = tomllib.loads(raw).get("project", {}).get("description")
+            if isinstance(d, str) and d.strip():
+                return d.strip()
+        except tomllib.TOMLDecodeError:
+            pass
+    raw = _small_text(cwd / "package.json")
+    if raw is not None:
+        try:
+            d = json.loads(raw).get("description")
+            if isinstance(d, str) and d.strip():
+                return d.strip()
+        except json.JSONDecodeError:
+            pass
+    return None
+
+def _clean(line: str) -> str:
+    line = _LINKY.sub(r"\1", line).replace("`", "").replace("*", "")   # drop emphasis markers
+    return line.lstrip("#>= ").strip()
+
+def _find_readme(cwd: Path) -> Path | None:
+    try:                                           # prefer README.md, then shortest README* name
+        readmes = sorted((p for p in cwd.iterdir()
+                          if p.is_file() and p.name.lower().startswith("readme")),
+                         key=lambda p: (p.suffix.lower() != ".md", len(p.name)))
+    except OSError:
+        return None
+    return readmes[0] if readmes else None
+
+def _readme_blurb(cwd: Path) -> str | None:
+    readme = _find_readme(cwd)
+    if readme is None:
+        return None
+    try:                                           # read only the head; READMEs are arbitrary user files
+        with readme.open("r", errors="ignore") as fh:
+            text = fh.read(8192)
+    except OSError:
+        return None
+    title, para = None, []
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line:
+            if para:                               # blank line ends the first real paragraph
+                break
+            continue
+        heading = line.startswith("#")
+        noise = not heading and (line.startswith(_NOISE_PREFIX)
+                                 or bool(_BULLET.match(line)) or bool(_HR.match(line)))
+        if noise:                                  # badges, tables, quotes, rules, fences, bullets
+            if para:
+                break
+            continue
+        cleaned = _clean(line)
+        if not cleaned:
+            continue
+        if title is None:                          # first heading or first plain line = the name
+            title = cleaned
+            continue
+        if heading:                                # a second heading ends the intro
+            break
+        para.append(cleaned)
+    if title is None:
+        return None
+    blurb = title if not para else f"{title} — {' '.join(para)}"
+    return re.sub(r"\s+", " ", blurb).strip()
+
+def _read_description(cwd: Path) -> str | None:
+    # Curated metadata one-liner wins; else the README's title + first paragraph.
+    desc = _metadata_description(cwd) or _readme_blurb(cwd)
+    return desc[:_DESC_CAP].rstrip() if desc else None
 
 _CACHE = lambda cwd: cwd / ".smartctx" / "goal"
 
@@ -21,22 +112,26 @@ def write_goal_cache(cwd: Path, goal: str) -> None:
         ignore.write_text(_GITIGNORE)
     (d / "goal").write_text(goal.strip() + "\n")
 
-def detect_goal(cwd: Path) -> GoalResult:
+def detect_goal(cwd: Path, use_cache: bool = True) -> GoalResult:
     cache = _CACHE(cwd)
-    if cache.is_file():
+    if use_cache and cache.is_file():                # update passes use_cache=False to re-infer fresh
         txt = cache.read_text().strip()
         if txt:
             return GoalResult(goal=txt, confidence=1.0, source="cache")
-    tags: list[str] = [cwd.name]
+    tech: list[str] = []
     conf = 0.0
     if (cwd / "pyproject.toml").exists():
-        tags.append("python project"); conf += 0.3
+        tech.append("python project"); conf += 0.3
     if (cwd / "package.json").exists():
-        tags.append("javascript project"); conf += 0.3
+        tech.append("javascript project"); conf += 0.3
     if any(cwd.glob("*.tsx")) or any(cwd.glob("**/*.tsx")):
-        tags.append("react frontend"); conf += 0.3
-    if any(cwd.glob("README*")):
+        tech.append("react frontend"); conf += 0.3
+    desc = _read_description(cwd)
+    if desc:                                       # a real purpose blurb leads; tech tags add keywords
+        goal = f"{desc} · {', '.join(tech)}" if tech else desc
+        return GoalResult(goal=goal, confidence=min(1.0, conf + 0.4), source="docs")
+    if _find_readme(cwd) is not None:               # README present but yielded no blurb
         conf += 0.1
     if conf == 0.0:
         return GoalResult(goal=cwd.name, confidence=0.0, source="none")
-    return GoalResult(goal=" ".join(tags), confidence=min(conf, 1.0), source="signals")
+    return GoalResult(goal=" ".join([cwd.name, *tech]), confidence=min(conf, 1.0), source="signals")
