@@ -1,5 +1,5 @@
 from __future__ import annotations
-import os, subprocess, sys
+import os, subprocess, sys, time
 from fnmatch import fnmatch
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
@@ -15,6 +15,8 @@ from smartctx.rules import (load_rules, apply_rules, has_rule, save_rule, write_
 from smartctx.compiler import compile_rule, make_local_instruct
 from smartctx import savings as _savings
 from smartctx import measure as _measure
+
+_LAUNCH_PAUSE_S = 1.5   # seeded launch: hold the scoping summary on screen before claude's TUI takes over
 
 class _Abort(Exception):
     """User declined to pick a profile at the selection prompt."""
@@ -962,7 +964,10 @@ def _launch_gate(scope: _Scope, plan, gate: _EditGate, passthrough: list[str], n
     seeded = _is_seeded(gate.cwd)
     if not seeded:
         _warn("this repo isn't seeded — run `smartctx init` to persist scoping for it")
-    if seeded or no_gate:                            # settled config, or opted out — no prompt, just launch
+    if no_gate:                                     # opted out — launch immediately, no pause
+        return scope, plan
+    if seeded:                                      # settled config — brief readable pause, then launch
+        time.sleep(_LAUNCH_PAUSE_S)
         return scope, plan
     while True:
         choice = _ask("  [enter] launch · [e] edit keep/drop · [q] cancel? ").strip().lower()

@@ -451,13 +451,32 @@ def test_launch_no_nudge_when_seeded(tmp_path, monkeypatch, capsys):
     (tmp_path / ".smartctx" / "config.toml").write_text("threshold = 0.5\n")   # already seeded
     monkeypatch.setattr(cli, "make_model2vec_embed", lambda name: cli.keyword_embed)
     monkeypatch.setattr(cli, "_interactive", lambda p: True)
+    monkeypatch.setattr(cli, "_LAUNCH_PAUSE_S", 0)               # don't actually sleep in the test
     monkeypatch.setattr("builtins.input", lambda *a, **k: "")
     monkeypatch.setattr(cli.subprocess, "run", lambda *a, **k: _RC(0))
     rc = cli.main([])
     assert rc == 0
     err = capsys.readouterr().err
+    assert "scoped out" in err                                   # seeded: summary still shown (then a brief pause)
     assert "smartctx init" not in err                            # seeded -> no nudge
     assert "[enter] launch" not in err                           # seeded -> no gate prompt, fire-and-forget
+
+def test_launch_seeded_pauses_before_claude(tmp_path, monkeypatch, capsys):
+    _root(tmp_path)
+    (tmp_path / "README.md").write_text("# P\n\nA tool that does X.\n")   # goal from docs -> no goal prompt
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "root"))
+    monkeypatch.setenv("SMARTCTX_THRESHOLD", "0.99")
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".smartctx").mkdir()
+    (tmp_path / ".smartctx" / "config.toml").write_text("threshold = 0.5\n")   # seeded
+    monkeypatch.setattr(cli, "make_model2vec_embed", lambda name: cli.keyword_embed)
+    monkeypatch.setattr(cli, "_interactive", lambda p: True)
+    slept = []
+    monkeypatch.setattr(cli.time, "sleep", lambda s: slept.append(s))
+    monkeypatch.setattr(cli.subprocess, "run", lambda *a, **k: _RC(0))
+    rc = cli.main([])
+    assert rc == 0
+    assert slept == [cli._LAUNCH_PAUSE_S]                        # a single readable pause, then launch
 
 def test_launch_gate_edit_recomposes_keep(tmp_path, monkeypatch):
     root = _root(tmp_path)
