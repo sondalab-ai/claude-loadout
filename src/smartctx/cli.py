@@ -9,7 +9,7 @@ from smartctx.inventory import claude_code_inventory, Item
 from smartctx.goal import detect_goal, write_goal_cache
 from smartctx.ranker import Ranker, make_model2vec_embed, keyword_embed, bundled_model_path, resolve_model_source
 from smartctx.compose import compose
-from smartctx.rules import (load_rules, apply_rules, has_rule, save_rule, append_rule, write_rules,
+from smartctx.rules import (load_rules, apply_rules, has_rule, save_rule, write_rules,
                             read_rules, profile_rules_file, rules_for,
                             Rule, Predicate, evaluate)
 from smartctx.compiler import compile_rule, make_local_instruct
@@ -171,18 +171,9 @@ def _scoped_plan(passthrough: list[str], cwd: Path, config_root_override: Path |
     kept = list(pinned) + list(outcome.forced_keep) + list(ranked.kept) + always_loaded
     dropped = ([(i, s) for i, s in ranked.dropped if not stays(i)]
                + [(i, "rule") for i in outcome.forced_drop if not stays(i)])  # prunable only
-    if _interactive(passthrough):                  # launch-time elicitation for rule-less drops
-        compile_fn = _build_compiler(cfg)
-        ruleless = [i for i, _ in dropped                     # only prunable kinds are actionable
-                    if i.kind in {"mcp", "plugin"} and not has_rule(i, rules)]
-        if ruleless:
-            _warn(f"{len(ruleless)} item(s) would be dropped with no rule; asking (enter to skip)")
-            _rules_intro(compile_fn, "to this repo only")
-            save = _repo_rule_saver(cwd, cfg, context)   # repo-scoped, lightly seeds on first rule
-            for item in ruleless:
-                if _elicit(item, context, compile_fn, save) == "keep":
-                    kept.append(item)
-                    dropped = [(i, s) for i, s in dropped if i.id != item.id]
+    # Launch-time keep/drop review is the pre-launch gate (a single checkbox over every prunable
+    # tool), not a per-item prompt — see _launch_gate. `smartctx rules` remains the per-item /
+    # natural-language authoring path.
     def _finish(kept, dropped):                    # compose + cost accounting for a keep/drop decision
         plan = compose(kept, items, cfg.config_root, passthrough, cwd=cwd,
                        global_config_path=cfg.global_config_path,
@@ -533,18 +524,6 @@ def _write_seed(repo: Path, cfg, goal: str, rules: list[Rule]) -> None:
     # Persist the local seed: scaffold + a fresh rules.toml holding `rules`.
     _write_seed_scaffold(repo, cfg, goal)
     write_rules(repo / ".smartctx" / "rules.toml", rules, header=_REPO_RULES_HEADER)
-
-def _repo_rule_saver(repo: Path, cfg, goal: str):
-    # Launch-time rules are repo-scoped and local. The first one lightly seeds the repo
-    # (scaffold) so `smartctx update` can later refresh it coherently, then appends the rule.
-    def save(rule: Rule) -> None:
-        if not (repo / ".smartctx" / "config.toml").is_file():
-            _write_seed_scaffold(repo, cfg, goal)
-        rp = repo / ".smartctx" / "rules.toml"
-        if not rp.exists():
-            rp.write_text(_REPO_RULES_HEADER)
-        append_rule(rp, rule)
-    return save
 
 def _kept_dropped(prunable: list[Item], kept_ids: set[str]) -> tuple[list[Item], list[Item]]:
     return ([i for i in prunable if i.id in kept_ids],
@@ -898,6 +877,7 @@ def _print_help() -> None:
         f"  {cmd('smartctx update [ROOT]')}      Refresh existing seeds — this repo, or all seeded under ROOT\n"
         f"  {cmd('smartctx doctor')}             Report profiles, config, and model state\n"
         f"  {cmd('smartctx measure')}            Measure real MCP tool-token cost — MCP only (they expose tools at runtime; opt-in, connects)\n"
+        f"  {cmd('smartctx --no-gate')}          Launch without the pre-launch review pause (or set SMARTCTX_NO_GATE)\n"
         f"  {cmd('smartctx --help, -h')}         Show this help\n"
         f"  {cmd('smartctx --version, -V')}      Show the smartctx version\n"
         "\n"
@@ -973,15 +953,17 @@ def _maybe_persist_edit(gate: _EditGate, selected_ids: set) -> None:
     _seed_repo(gate.cwd, gate.cfg, gate.items, gate.pinned_ids | selected_ids, gate.goal)
     _warn("saved — this repo is now seeded (`smartctx update` refreshes it)")
 
-def _launch_gate(scope: _Scope, plan, gate: _EditGate, passthrough: list[str]):
+def _launch_gate(scope: _Scope, plan, gate: _EditGate, passthrough: list[str], no_gate: bool = False):
     # Interactive pre-launch review: read the summary, optionally edit keep/drop, then launch.
     # Returns the (possibly re-composed) (scope, plan) to run. Non-interactive -> pass through.
     if gate is None or not (_interactive(passthrough) and (scope.savings.dropped or scope.connectors)):
         return scope, plan
     _warn(_savings_line(scope))
-    if _is_seeded(gate.cwd):                         # settled config — respect it, no prompt, just launch
+    seeded = _is_seeded(gate.cwd)
+    if not seeded:
+        _warn("this repo isn't seeded — run `smartctx init` to persist scoping for it")
+    if seeded or no_gate:                            # settled config, or opted out — no prompt, just launch
         return scope, plan
-    _warn("this repo isn't seeded — run `smartctx init` to persist scoping for it")
     while True:
         choice = _ask("  [enter] launch · [e] edit keep/drop · [q] cancel? ").strip().lower()
         if choice == "q":
@@ -1033,7 +1015,8 @@ def _run(argv: list[str] | None = None) -> int:
         return _cmd_update(cwd, argv[1:], os.environ)
     rules_cmd = bool(argv) and argv[0] == "rules"
     explain = "--explain" in argv
-    passthrough = [a for a in argv if a != "--explain"]
+    no_gate = "--no-gate" in argv or bool(os.environ.get("SMARTCTX_NO_GATE"))
+    passthrough = [a for a in argv if a not in ("--explain", "--no-gate")]   # smartctx flags, not claude's
     try:                                            # ask which profile when it is implicit
         override = _resolve_config_root(os.environ, [] if rules_cmd else passthrough)
     except _Abort:
@@ -1054,7 +1037,7 @@ def _run(argv: list[str] | None = None) -> int:
         _print_explain(scope, plan)
         _cleanup(plan.tmp_paths)
         return 0
-    scope, plan = _launch_gate(scope, plan, gate, passthrough)   # read/adjust before claude takes the screen
+    scope, plan = _launch_gate(scope, plan, gate, passthrough, no_gate)   # read/adjust before claude takes the screen
     try:
         return subprocess.run(plan.argv, env=plan.env).returncode
     finally:

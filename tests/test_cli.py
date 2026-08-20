@@ -189,21 +189,28 @@ def _skill_root(tmp_path):
     (skill / "SKILL.md").write_text("---\nname: astro\ndescription: sky imaging\n---\nbody")
     return root
 
-def test_dropped_skill_does_not_elicit(tmp_path, monkeypatch):
+def test_dropped_skill_not_offered_in_gate(tmp_path, monkeypatch):
     root = _skill_root(tmp_path)
+    (tmp_path / "README.md").write_text("# P\n\nA tool that does X.\n")   # goal from docs -> no goal prompt
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
     monkeypatch.setenv("SMARTCTX_THRESHOLD", "0.99")      # force everything into dropped
-    monkeypatch.chdir(tmp_path)
+    monkeypatch.chdir(tmp_path)                            # unseeded -> gate offered
     monkeypatch.setattr(cli, "make_model2vec_embed", lambda name: cli.keyword_embed)
     monkeypatch.setattr(cli, "_interactive", lambda p: True)
-    prompts = []
-    monkeypatch.setattr("builtins.input", lambda prompt="": prompts.append(prompt) or "")
+    monkeypatch.setattr(cli, "_can_raw", lambda: True)
+    seen = {}
+    def fake_checkbox(title, labels, **kw):
+        seen["labels"] = labels
+        return list(range(len(labels)))                    # capture labels, keep all
+    monkeypatch.setattr(cli, "_checkbox_select", fake_checkbox)
+    answers = iter(["e", "n"])                             # open editor, don't persist
+    monkeypatch.setattr("builtins.input", lambda *a, **k: next(answers, ""))
     monkeypatch.setattr(cli.subprocess, "run", lambda *a, **k: _RC(0))
     rc = cli.main([])
     assert rc == 0
-    joined = " ".join(prompts)
-    assert "astro" not in joined                          # un-prunable skill never elicited
-    assert "Gmail" in joined and "figma@x" in joined      # prunable kinds are elicited
+    joined = " ".join(seen["labels"])
+    assert "astro" not in joined                          # un-prunable skill never editable in the gate
+    assert "Gmail" in joined and "figma@x" in joined      # prunable kinds are editable
 
 def test_explain_skills_shown_always_loaded_not_dropped(tmp_path, monkeypatch, capsys):
     root = _skill_root(tmp_path)                          # figma@x plugin + Gmail mcp + astro skill
@@ -377,23 +384,22 @@ def test_main_prompted_default_profile_leaves_env_unset(tmp_path, monkeypatch):
     assert rc == 0
     assert "CLAUDE_CONFIG_DIR" not in captured["env"]     # default profile uses HOME-root resolution
 
-def test_launch_elicitation_keeps_item_end_to_end(tmp_path, monkeypatch):
-    root = _root(tmp_path)                                # Gmail mcp, figma@x plugin, no rules
-    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
-    monkeypatch.setenv("SMARTCTX_THRESHOLD", "0.99")     # force everything into dropped
-    monkeypatch.chdir(tmp_path)
+def test_launch_no_gate_env_suppresses_prompt(tmp_path, monkeypatch, capsys):
+    _root(tmp_path)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "root"))
+    (tmp_path / "README.md").write_text("# P\n\nA tool that does X.\n")   # goal from docs -> no goal prompt
+    monkeypatch.setenv("SMARTCTX_THRESHOLD", "0.99")     # force drops -> summary would show
+    monkeypatch.setenv("SMARTCTX_NO_GATE", "1")          # opt out of the pause
+    monkeypatch.chdir(tmp_path)                          # unseeded repo (would normally gate)
     monkeypatch.setattr(cli, "make_model2vec_embed", lambda name: cli.keyword_embed)
     monkeypatch.setattr(cli, "_interactive", lambda p: True)
-    monkeypatch.setattr(cli, "_build_compiler",
-        lambda cfg: (lambda prompt: '{"action":"always_keep","match":[],"match_mode":"any"}'))
-    monkeypatch.setattr("builtins.input", lambda prompt="": "keep it")
-    captured = _capture_mcp_overlay(monkeypatch)
+    monkeypatch.setattr("builtins.input", lambda *a, **k: pytest.fail("no-gate must not prompt"))
+    monkeypatch.setattr(cli.subprocess, "run", lambda *a, **k: _RC(0))
     rc = cli.main([])
     assert rc == 0
-    assert "Gmail" in captured["mcp"]["mcpServers"]       # elicited always_keep re-kept the server
-    assert "always_keep" in (tmp_path / ".smartctx" / "rules.toml").read_text()   # repo-scoped, not profile
-    assert (tmp_path / ".smartctx" / "config.toml").is_file()                     # first launch rule lightly seeds
-    assert not (root / "smartctx" / "rules.toml").exists()                        # profile left untouched
+    err = capsys.readouterr().err
+    assert "scoped out" in err and "smartctx init" in err   # summary + nudge still shown
+    assert "[enter] launch" not in err                      # but no interactive gate
 
 def test_explain_reports_estimated_savings(tmp_path, monkeypatch, capsys):
     _root(tmp_path)                                       # 1 mcp + 1 plugin, no rules
@@ -453,23 +459,6 @@ def test_launch_no_nudge_when_seeded(tmp_path, monkeypatch, capsys):
     assert "smartctx init" not in err                            # seeded -> no nudge
     assert "[enter] launch" not in err                           # seeded -> no gate prompt, fire-and-forget
 
-def test_launch_elicited_keep_auto_seeds_repo(tmp_path, monkeypatch):
-    root = _root(tmp_path)
-    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
-    monkeypatch.setenv("SMARTCTX_THRESHOLD", "0.99")
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(cli, "make_model2vec_embed", lambda name: cli.keyword_embed)
-    monkeypatch.setattr(cli, "_interactive", lambda p: True)
-    monkeypatch.setattr(cli, "_build_compiler", lambda cfg: None)   # no NL model -> k/d/s path
-    monkeypatch.setattr("builtins.input", lambda *a, **k: "d")      # drop always -> writes a repo rule
-    monkeypatch.setattr(cli.subprocess, "run", lambda *a, **k: _RC(0))
-    rc = cli.main([])
-    assert rc == 0
-    assert (tmp_path / ".smartctx" / "config.toml").is_file()       # first launch rule lightly seeds
-    assert "always_drop" in (tmp_path / ".smartctx" / "rules.toml").read_text()
-    assert (tmp_path / ".smartctx" / ".gitignore").read_text().strip().endswith("*")   # local, gitignored
-    assert not (root / "smartctx" / "rules.toml").exists()          # profile untouched
-
 def test_launch_gate_edit_recomposes_keep(tmp_path, monkeypatch):
     root = _root(tmp_path)
     (tmp_path / "README.md").write_text("# P\n\nA tool that does X.\n")   # goal from docs -> no goal prompt
@@ -478,7 +467,6 @@ def test_launch_gate_edit_recomposes_keep(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(cli, "make_model2vec_embed", lambda name: cli.keyword_embed)
     monkeypatch.setattr(cli, "_interactive", lambda p: True)
-    monkeypatch.setattr(cli, "_elicit", lambda *a, **k: "undecided")   # skip per-item elicitation
     monkeypatch.setattr(cli, "_can_raw", lambda: True)
     answers = iter(["e", "n"])                            # gate: edit, then don't persist
     monkeypatch.setattr("builtins.input", lambda *a, **k: next(answers, ""))
@@ -498,7 +486,6 @@ def test_launch_gate_edit_persists_seed(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(cli, "make_model2vec_embed", lambda name: cli.keyword_embed)
     monkeypatch.setattr(cli, "_interactive", lambda p: True)
-    monkeypatch.setattr(cli, "_elicit", lambda *a, **k: "undecided")
     monkeypatch.setattr(cli, "_can_raw", lambda: True)
     answers = iter(["e", "y"])                            # edit, then persist
     monkeypatch.setattr("builtins.input", lambda *a, **k: next(answers, ""))
@@ -611,23 +598,20 @@ def test_version_prints_without_prompting(tmp_path, monkeypatch, capsys):
     assert rc == 0
     assert capsys.readouterr().out.startswith("smartctx ")
 
-def test_elicit_without_rule_model_skips_nl_prompt(tmp_path, monkeypatch, capsys):
+def test_rules_without_rule_model_skips_nl_prompt(tmp_path, monkeypatch, capsys):
     root = _root(tmp_path)                                # no rule_model_path -> compile_fn is None
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
-    monkeypatch.setenv("SMARTCTX_THRESHOLD", "0.99")     # force everything into dropped
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(cli, "make_model2vec_embed", lambda name: cli.keyword_embed)
     monkeypatch.setattr(cli, "_interactive", lambda p: True)
     prompts = []
     monkeypatch.setattr("builtins.input", lambda prompt="": prompts.append(prompt) or "k")
-    captured = _capture_mcp_overlay(monkeypatch)
-    rc = cli.main([])
+    rc = cli.main(["rules"])
     assert rc == 0
     joined = " ".join(prompts)
     assert "rule for" not in joined                      # NL authoring skipped when no rule model
     assert "[k]eep always" in joined                     # goes straight to structured choice
     assert "no rule model configured" in capsys.readouterr().err   # upfront guidance shown
-    assert "Gmail" in captured["mcp"]["mcpServers"]       # [k]eep re-kept the server
+    assert "always_keep" in (root / "smartctx" / "rules.toml").read_text()   # [k]eep authored a rule
 
 def _proj(base, name):
     r = base / name; r.mkdir(parents=True); return r        # any subdir is a project (no .git needed)

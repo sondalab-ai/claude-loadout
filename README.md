@@ -253,17 +253,16 @@ match_mode = "any"
 You rarely need to hand-write the TOML. Two ways to author rules interactively — and **they write
 to different places on purpose**:
 
-- **`smartctx rules`** — the deliberate **profile-wide** path. Walks through your tools and asks,
-  for each one without a rule, how you want it scoped; the rule lands in
+- **`smartctx rules`** — the deliberate **profile-wide** path. Walks through your tools one by one
+  (natural-language or *keep / drop / skip*) and asks how you want each scoped; the rule lands in
   `$CLAUDE_CONFIG_DIR/smartctx/rules.toml` and applies to **every repo in the profile**. Empty
   answer = skip. Use this for a tool you always want the same way everywhere.
-- **At launch**, if smartctx is about to drop a tool you haven't ruled on (and you're in an
-  interactive session), it offers to capture a rule on the spot — **scoped to that repo only**
-  (`./.smartctx/rules.toml`, local and gitignored). The first such rule also lightly seeds the repo
-  (writes `./.smartctx/config.toml`) so `smartctx update` can refresh it later. A decision you make
-  in one repo never leaks to the others.
+- **At launch**, the [pre-launch gate](#adjusting-before-launch) lets you review and adjust the
+  keep/drop for the current repo in one checkbox, and optionally **save** it — writing
+  `./.smartctx/` (local, gitignored) so the choice is **scoped to that repo only** and never leaks
+  to the others.
 
-> Launch scoping without a rule is per-session — it changes nothing on disk. If you launch in a repo
+> Launch scoping you don't save is per-session — it changes nothing on disk. If you launch in a repo
 > that isn't seeded, smartctx nudges you to run `smartctx init` to persist a full keep/drop set for
 > it.
 
@@ -308,6 +307,9 @@ this repo isn't seeded — run `smartctx init` to persist scoping for it
 **Once the repo is seeded** — you saved from the gate, or ran `smartctx init` — the pause stops:
 smartctx prints the one-line estimate and launches straight through. Re-tune a seeded repo with
 `smartctx update`. Non-interactive launches (`-p`, pipelines) never pause.
+
+To skip the pause without seeding, pass `--no-gate` (or set `SMARTCTX_NO_GATE=1`): smartctx still
+prints the estimate and the *not seeded* nudge, but launches immediately without prompting.
 
 ### Seeding repos — `smartctx init`
 
