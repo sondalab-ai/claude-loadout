@@ -296,5 +296,10 @@ particular answer can't be translated, that one item falls back to the *keep / d
 ## Uninstalling
 
 `scripts/uninstall.sh` removes the package (pipx, falling back to pip) and asks whether to
-delete the config it wrote (`$CLAUDE_CONFIG_DIR/smartctx/` and this repo's `.smartctx/`). It
+delete the config it wrote: the profile config (`$CLAUDE_CONFIG_DIR/smartctx/`) and every
+per-repo `.smartctx/` it created. For the latter it scans a root you choose (defaulting to
+`$HOME`; type `/` to sweep the whole filesystem), lists every smartctx-authored `.smartctx/`
+directory found, and removes them only after a single confirmation. A directory is treated as
+smartctx's only when it carries an artifact smartctx wrote (`goal`, `config.toml`,
+`rules.toml`, or a self-ignore `.gitignore`), so an unrelated `.smartctx/` is left alone. It
 never touches your shell rc — alias lines you added are listed for you to remove by hand.
