@@ -375,6 +375,108 @@ def test_launch_elicitation_keeps_item_end_to_end(tmp_path, monkeypatch):
     assert "Gmail" in captured["mcp"]["mcpServers"]       # elicited always_keep re-kept the server
     assert "always_keep" in (root / "smartctx" / "rules.toml").read_text()
 
+def test_explain_reports_estimated_savings(tmp_path, monkeypatch, capsys):
+    _root(tmp_path)                                       # 1 mcp + 1 plugin, no rules
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "root"))
+    monkeypatch.setenv("SMARTCTX_THRESHOLD", "0.99")     # force both into dropped
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "make_model2vec_embed", lambda name: cli.keyword_embed)
+    monkeypatch.setattr(cli.subprocess, "run", lambda *a, **k: pytest.fail("--explain must not launch"))
+    rc = cli.main(["--explain"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "savings" in out
+    assert "ranked tools:" in out and "2 of 2 pruned" in out   # mcp + plugin, skills excluded
+    assert "1.8k tokens" in out                          # 1200 (mcp) + 600 (plugin)
+
+def test_launch_prints_savings_line_to_stderr(tmp_path, monkeypatch, capsys):
+    _root(tmp_path)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "root"))
+    monkeypatch.setenv("SMARTCTX_THRESHOLD", "0.99")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "make_model2vec_embed", lambda name: cli.keyword_embed)
+    monkeypatch.setattr(cli, "_interactive", lambda p: True)   # savings line is interactive-only
+    monkeypatch.setattr("builtins.input", lambda *a, **k: "")   # skip any elicitation
+    monkeypatch.setattr(cli.subprocess, "run", lambda *a, **k: _RC(0))
+    rc = cli.main([])
+    assert rc == 0
+    err = capsys.readouterr().err
+    assert "scoped out 2 of 2 prunable tools" in err and "tokens trimmed" in err
+
+def test_doctor_reports_prunable_budget(tmp_path, monkeypatch, capsys):
+    _root(tmp_path)                                       # 1 mcp + 1 plugin
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "root"))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "make_model2vec_embed", lambda name: cli.keyword_embed)
+    rc = cli.main(["doctor"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "prunable:" in out and "1.8k tokens" in out   # budget ceiling line present
+
+def test_token_costs_config_override_changes_estimate(tmp_path, monkeypatch, capsys):
+    _root(tmp_path)
+    repo = tmp_path / ".smartctx"; repo.mkdir()
+    repo.joinpath("config.toml").write_text("[token_costs]\nmcp = 5000\nplugin = 0\n")
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "root"))
+    monkeypatch.setenv("SMARTCTX_THRESHOLD", "0.99")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "make_model2vec_embed", lambda name: cli.keyword_embed)
+    monkeypatch.setattr(cli.subprocess, "run", lambda *a, **k: pytest.fail("must not launch"))
+    rc = cli.main(["--explain"])
+    assert rc == 0
+    assert "5k tokens" in capsys.readouterr().out        # 5000 (mcp) + 0 (plugin), overrides applied
+
+def test_measure_command_reports_and_caches(tmp_path, monkeypatch, capsys):
+    root = _root(tmp_path)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
+    monkeypatch.chdir(tmp_path)
+    servers = [cli._measure.Server("Context7", "http", "https://c7", "✔ Connected"),
+               cli._measure.Server("S&P", "http", "https://sp", "! Needs authentication")]
+    monkeypatch.setattr(cli._measure, "discover", lambda: servers)
+    monkeypatch.setattr(cli._measure, "measure_http", lambda url, timeout=15.0: 1800)
+    rc = cli.main(["measure"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Context7" in out and "1.8k tok" in out and "measured" in out
+    assert "unmeasured" in out and "needs auth" in out
+    assert cli._measure.load_costs(root) == {"Context7": 1800}   # only the measured one cached
+
+def test_explain_prefers_measured_cost_over_constant(tmp_path, monkeypatch, capsys):
+    root = _root(tmp_path)                                # Gmail mcp + figma@x plugin
+    (root / "smartctx").mkdir()
+    (root / "smartctx" / "costs.json").write_text(
+        '{"servers": {"Gmail": {"tokens": 9000, "method": "m"}}}')
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
+    monkeypatch.setenv("SMARTCTX_THRESHOLD", "0.99")     # force both into dropped
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "make_model2vec_embed", lambda name: cli.keyword_embed)
+    monkeypatch.setattr(cli.subprocess, "run", lambda *a, **k: pytest.fail("must not launch"))
+    rc = cli.main(["--explain"])
+    assert rc == 0
+    assert "9.6k tokens" in capsys.readouterr().out      # 9000 measured (Gmail) + 600 (figma plugin)
+
+def test_explain_surfaces_connectors_dropped_by_strict_mode(tmp_path, monkeypatch, capsys):
+    root = _root(tmp_path)                                # mcp "Gmail" + plugin "figma@x"
+    (root / "smartctx").mkdir()
+    (root / "smartctx" / "costs.json").write_text(json.dumps({"servers": {
+        "claude.ai Calendar": {"tokens": 21000, "method": "m"},   # connector -> counted
+        "Gmail": {"tokens": 9000, "method": "m"},                 # .claude.json server -> not a connector
+        "plugin:playwright:playwright": {"tokens": 4600, "method": "m"},  # plugin-bundled -> excluded
+    }}))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
+    monkeypatch.setenv("SMARTCTX_THRESHOLD", "0.99")     # drop Gmail + figma
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "make_model2vec_embed", lambda name: cli.keyword_embed)
+    monkeypatch.setattr(cli.subprocess, "run", lambda *a, **k: pytest.fail("must not launch"))
+    rc = cli.main(["--explain"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "connectors dropped (all-or-nothing" in out
+    assert "claude.ai Calendar" in out and "21k" in out
+    assert "plugin:playwright:playwright" not in out      # plugin-bundled server is not a connector
+    assert "30.6k tokens" in out                          # 9000 (Gmail measured) + 600 (figma) + 21000
+
 def test_help_prints_usage_without_prompting_or_launching(tmp_path, monkeypatch, capsys):
     _two_profiles(tmp_path)                               # two profiles -> would prompt if not bypassed
     monkeypatch.setenv("HOME", str(tmp_path))

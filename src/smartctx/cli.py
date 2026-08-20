@@ -11,6 +11,8 @@ from smartctx.ranker import Ranker, make_model2vec_embed, keyword_embed, bundled
 from smartctx.compose import compose
 from smartctx.rules import load_rules, apply_rules, has_rule, save_rule, Rule, Predicate, evaluate
 from smartctx.compiler import compile_rule, make_local_instruct
+from smartctx import savings as _savings
+from smartctx import measure as _measure
 
 class _Abort(Exception):
     """User declined to pick a profile at the selection prompt."""
@@ -128,6 +130,9 @@ class _Scope(NamedTuple):
     threshold: float
     kept: list
     dropped: list
+    savings: _savings.Savings
+    connectors: list                                # (id, tokens) claude.ai connectors strict-mode drops
+    measured: bool                                  # whether a costs.json cache was found
 
 def _scoped_plan(passthrough: list[str], cwd: Path, config_root_override: Path | None = None):
     cfg = load_config(cwd=cwd, config_root_override=config_root_override)
@@ -158,7 +163,12 @@ def _scoped_plan(passthrough: list[str], cwd: Path, config_root_override: Path |
     plan = compose(kept, items, cfg.config_root, passthrough, cwd=cwd,
                    global_config_path=cfg.global_config_path,
                    launch_config_dir=_explicit_profile(config_root_override))
-    return _Scope(context, gsource, gconf, cfg.threshold, kept, dropped), plan
+    measured = _measure.load_costs(cfg.config_root)
+    saved = _savings.estimate_savings(kept, [i for i, _ in dropped], cfg.token_costs, measured)
+    mcp_ids = {i.id for i in items if i.kind == "mcp"}
+    connectors = sorted(_measure.connector_costs(measured, mcp_ids).items(), key=lambda kv: -kv[1])
+    return _Scope(context, gsource, gconf, cfg.threshold, kept, dropped,
+                  saved, connectors, bool(measured)), plan
 
 def _cmd_rules(cwd: Path, config_root_override: Path | None = None) -> int:
     if not _interactive([]):                        # no TTY -> nothing to elicit; fail-open
@@ -180,6 +190,14 @@ def _cmd_rules(cwd: Path, config_root_override: Path | None = None) -> int:
             authored += 1
     print()
     print(f"{_paint('smartctx:', 'green')} authored {_plural(authored, 'rule')}")
+    cache = _measure.load_costs(cfg.config_root)
+    b = _savings.budget(items, cfg.token_costs, cache)
+    print(f"{_paint('smartctx:', 'green')} up to ~{_savings.human_tokens(b.tokens)} tokens "
+          "prunable per session — run `smartctx --explain` for this session's estimate")
+    conns = _measure.connector_costs(cache, {i.id for i in items if i.kind == "mcp"})
+    if conns:
+        print(f"{_paint('smartctx:', 'green')} plus ~{_savings.human_tokens(sum(conns.values()))} "
+              f"tokens from {_plural(len(conns), 'claude.ai connector')} dropped by strict mode")
     return 0
 
 def _discover_profiles(active_root: Path) -> list[Path]:
@@ -233,7 +251,8 @@ def _resolve_config_root(environ, passthrough: list[str]) -> Path | None:
         _warn(f"invalid choice {raw!r}")
 
 def _profile_report(root: Path, cwd: Path, active: bool,
-                    global_config_path: Path | None = None) -> None:
+                    global_config_path: Path | None = None,
+                    token_costs: dict[str, int] | None = None) -> None:
     tag = f" {_paint('(active)', 'green', 'bold')}" if active else ""
     print(f"  {_paint(str(root), 'cyan')}{tag}")
     user_cfg = root / "smartctx" / "config.toml"
@@ -246,6 +265,15 @@ def _profile_report(root: Path, cwd: Path, active: bool,
     counts = {k: sum(1 for i in items if i.kind == k) for k in ("mcp", "plugin", "skill")}
     print(f"    inventory:    {counts['mcp']} mcp, {_plural(counts['plugin'], 'plugin')}, "
           f"{_plural(counts['skill'], 'skill')}")
+    cache = _measure.load_costs(root)
+    b = _savings.budget(items, token_costs, cache)
+    print(f"    prunable:     up to ~{_savings.human_tokens(b.tokens)} tokens "
+          f"{_paint('(estimate; actual depends on the session goal)', 'dim')}")
+    conns = _measure.connector_costs(cache, {i.id for i in items if i.kind == "mcp"})
+    if conns:
+        print(f"    connectors:   {_plural(len(conns), 'server')} dropped by strict mode, "
+              f"~{_savings.human_tokens(sum(conns.values()))} tokens "
+              f"{_paint('(measured; not selectable)', 'dim')}")
 
 def _cmd_doctor(cwd: Path) -> int:
     cfg = load_config(cwd=cwd)
@@ -256,7 +284,8 @@ def _cmd_doctor(cwd: Path) -> int:
     print()
     for root in profiles:
         active = root == cfg.config_root
-        _profile_report(root, cwd, active, cfg.global_config_path if active else None)
+        _profile_report(root, cwd, active,
+                        cfg.global_config_path if active else None, cfg.token_costs)
         print()
     repo_cfg = cwd / ".smartctx" / "config.toml"
     print(_paint("  environment", "bold"))
@@ -281,6 +310,49 @@ def _cmd_doctor(cwd: Path) -> int:
     print(f"         {_paint('smartctx rules', 'cyan')}")
     return 0
 
+def _cmd_measure(cwd: Path) -> int:
+    cfg = load_config(cwd=cwd)
+    print(_paint("smartctx measure", "bold"))
+    print(_paint("  connecting to each MCP server to tokenize its real tool set …", "dim"))
+    print()
+    try:
+        servers = _measure.discover()
+    except _measure.MeasureError as exc:            # fail-open: never crash a diagnostic
+        _warn(str(exc))
+        return 0
+    if not servers:
+        print("  no MCP servers found")
+        return 0
+    width = max(len(s.id) for s in servers)
+    n_total = len(servers)
+    live = sys.stdout.isatty()                          # transient progress only on a real terminal
+    results, total = [], 0
+    for i, s in enumerate(servers, 1):
+        if live:                                        # overwrite-in-place status while we connect
+            sys.stdout.write(f"\r  [{i}/{n_total}] connecting {s.id} …\033[K")
+            sys.stdout.flush()
+        r = _measure.measure_server(s)
+        results.append(r)
+        prefix = "\r\033[K" if live else ""             # clear the status line, then print the result
+        if r.tokens is None:
+            print(f"{prefix}  {s.id:<{width}}  {_paint('unmeasured', 'yellow')} {_paint(f'({r.reason})', 'dim')}")
+        else:
+            total += r.tokens
+            print(f"{prefix}  {s.id:<{width}}  "
+                  f"{_paint('~' + _savings.human_tokens(r.tokens) + ' tok', 'green')} "
+                  f"{_paint('(measured, ' + r.method + ')', 'dim')}")
+    _measure.save_costs(cfg.config_root, results)
+    n = sum(1 for r in results if r.tokens is not None)
+    print()
+    print(f"{_paint('smartctx:', 'green')} measured {_plural(n, 'server')}, "
+          f"~{_savings.human_tokens(total)} tokens total")
+    print(_paint(f"  cached to {_measure.costs_path(cfg.config_root)}", "dim"))
+    print(_paint("  these are a diagnostic view; a measured cost feeds savings only for MCP "
+                 "servers in your .claude.json/.mcp.json (matched by bare name).", "dim"))
+    print(_paint("  claude.ai connectors and plugin-bundled servers are shown here but aren't "
+                 "pruned by smartctx.", "dim"))
+    return 0
+
 def _smartctx_version() -> str:
     try:
         return version("smartctx")
@@ -297,6 +369,7 @@ def _print_help() -> None:
         f"  {cmd('smartctx --explain')}          Print the scoping plan, then exit (no launch)\n"
         f"  {cmd('smartctx rules')}              Author keep/drop rules interactively\n"
         f"  {cmd('smartctx doctor')}             Report profiles, config, and model state\n"
+        f"  {cmd('smartctx measure')}            Measure real MCP tool-token cost (opt-in, connects)\n"
         f"  {cmd('smartctx --help, -h')}         Show this help\n"
         f"  {cmd('smartctx --version, -V')}      Show the smartctx version\n"
         "\n"
@@ -327,8 +400,36 @@ def _print_explain(scope: _Scope, plan) -> None:
     if not dropped:
         print(_paint("    (nothing)", "dim"))
     print()
+    conn_tok = sum(t for _, t in scope.connectors)
+    if scope.connectors:
+        print(_paint("  connectors dropped (all-or-nothing, strict mode)", "bold"))
+        w = max(len(c) for c, _ in scope.connectors)
+        for cid, tok in scope.connectors:
+            print(f"    {_paint('✗', 'red')} {cid:<{w}}  {_paint('~' + _savings.human_tokens(tok), 'dim')}")
+        print()
+    s = scope.savings
+    print(_paint("  savings", "bold"))
+    print(f"    ranked tools:   {s.dropped} of {s.total} pruned "
+          f"{_paint('(≈ ' + _savings.human_tokens(s.tokens) + ' tokens)', 'dim')}")
+    if scope.connectors:
+        print(f"    connectors:     {len(scope.connectors)} dropped "
+              f"{_paint('(≈ ' + _savings.human_tokens(conn_tok) + ' tokens, measured)', 'dim')}")
+    elif not scope.measured:
+        print(_paint("    connectors:     run `smartctx measure` to quantify the claude.ai "
+                     "connectors strict mode drops", "dim"))
+    print(f"    {_paint('≈ ' + _savings.human_tokens(s.tokens + conn_tok) + ' tokens', 'green', 'bold')} "
+          "trimmed this session (estimate)")
+    print()
     print(_paint("  command", "bold"))
     print(f"    {_paint(' '.join(plan.argv), 'dim')}")
+
+def _savings_line(scope: _Scope) -> str:
+    s = scope.savings
+    conn_tok = sum(t for _, t in scope.connectors)
+    core = f"scoped out {s.dropped} of {s.total} prunable tools"
+    if scope.connectors:
+        core += f" + {len(scope.connectors)} connectors"
+    return f"{core} · ~{_savings.human_tokens(s.tokens + conn_tok)} tokens trimmed (estimate)"
 
 def main(argv: list[str] | None = None) -> int:
     try:
@@ -348,6 +449,8 @@ def _run(argv: list[str] | None = None) -> int:
         return 0
     if argv and argv[0] == "doctor":                # doctor enumerates every profile itself
         return _cmd_doctor(cwd)
+    if argv and argv[0] == "measure":               # opt-in, connects to servers; no scoping
+        return _cmd_measure(cwd)
     rules_cmd = bool(argv) and argv[0] == "rules"
     explain = "--explain" in argv
     passthrough = [a for a in argv if a != "--explain"]
@@ -371,6 +474,8 @@ def _run(argv: list[str] | None = None) -> int:
         _print_explain(scope, plan)
         _cleanup(plan.tmp_paths)
         return 0
+    if (scope.savings.dropped or scope.connectors) and _interactive(passthrough):  # skip on -p pipelines
+        _warn(_savings_line(scope))
     try:
         return subprocess.run(plan.argv, env=plan.env).returncode
     finally:

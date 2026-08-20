@@ -1,8 +1,9 @@
 from __future__ import annotations
 import os, sys, tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Mapping
+from smartctx.savings import DEFAULT_TOKEN_COSTS
 
 DEFAULT_THRESHOLD = 0.20   # calibrated against potion-base-8M score distribution (see --explain)
 DEFAULT_MODEL = "minishlab/potion-base-8M"
@@ -18,6 +19,7 @@ class Config:
     threshold: float
     model_name: str
     rule_model_path: str | None
+    token_costs: dict[str, int] = field(default_factory=lambda: dict(DEFAULT_TOKEN_COSTS))
 
 def _read_toml(path: Path) -> dict:
     try:
@@ -66,6 +68,10 @@ def load_config(cwd: Path, environ: Mapping[str, str] | None = None,
             threshold = float(layer["threshold"])
         if "model_name" in layer:
             model = str(layer["model_name"])
+    token_costs = dict(DEFAULT_TOKEN_COSTS)
+    for layer in layers:
+        if isinstance(layer.get("token_costs"), dict):
+            token_costs.update({str(k): int(v) for k, v in layer["token_costs"].items()})
     rule_model = None
     for layer in layers:
         if "rule_model_path" in layer:
@@ -80,4 +86,5 @@ def load_config(cwd: Path, environ: Mapping[str, str] | None = None,
         threshold = float(environ["SMARTCTX_THRESHOLD"])
     return Config(config_root=root, global_config_path=global_config_path,
                   always_keep=always, threshold=threshold,
-                  model_name=model, rule_model_path=rule_model)
+                  model_name=model, rule_model_path=rule_model,
+                  token_costs=token_costs)
