@@ -23,8 +23,9 @@ everything installed; smartctx just decides, each time you launch, what's worth 
 ## What it does
 
 1. **Figures out the goal.** It reads signals from your working directory — the folder name,
-   marker files like `package.json` or `pyproject.toml`, the git branch. If it can't tell, it
-   asks once (and remembers your answer).
+   marker files like `package.json` or `pyproject.toml`, and any project description it can find
+   (a `description` field, or the README's title and opening line). If it can't tell, it asks once
+   (and remembers your answer). This stays fully local and offline — no model call, just text.
 2. **Ranks your tools against that goal** using a small, fast, local model — no network call, no
    data leaving your machine.
 3. **Applies your rules.** You can pin tools to always keep, and write plain-language rules like
@@ -249,12 +250,22 @@ match_mode = "any"
 
 ### Writing rules the easy way
 
-You rarely need to hand-write the TOML. Two ways to author rules interactively:
+You rarely need to hand-write the TOML. Two ways to author rules interactively — and **they write
+to different places on purpose**:
 
-- **`smartctx rules`** walks through your tools and asks, for each one without a rule, how you
-  want it scoped. Empty answer = skip.
+- **`smartctx rules`** — the deliberate **profile-wide** path. Walks through your tools and asks,
+  for each one without a rule, how you want it scoped; the rule lands in
+  `$CLAUDE_CONFIG_DIR/smartctx/rules.toml` and applies to **every repo in the profile**. Empty
+  answer = skip. Use this for a tool you always want the same way everywhere.
 - **At launch**, if smartctx is about to drop a tool you haven't ruled on (and you're in an
-  interactive session), it offers to capture a rule on the spot.
+  interactive session), it offers to capture a rule on the spot — **scoped to that repo only**
+  (`./.smartctx/rules.toml`, local and gitignored). The first such rule also lightly seeds the repo
+  (writes `./.smartctx/config.toml`) so `smartctx update` can refresh it later. A decision you make
+  in one repo never leaks to the others.
+
+> Launch scoping without a rule is per-session — it changes nothing on disk. If you launch in a repo
+> that isn't seeded, smartctx nudges you to run `smartctx init` to persist a full keep/drop set for
+> it.
 
 > [!IMPORTANT]
 > **Natural-language rules need setup that isn't included by default.** Out of the box these
@@ -275,41 +286,78 @@ You rarely need to hand-write the TOML. Two ways to author rules interactively:
 With both in place, your plain-language answer is compiled into a rule by the local model. If a
 particular answer can't be translated, that one item falls back to the *keep / drop / skip* choice.
 
-### Seeding many repos at once — `smartctx init`
+### Adjusting before launch
 
-`smartctx rules` scopes one repo interactively. When you have a directory full of projects,
-`smartctx init` seeds them in bulk — writing each project's `.smartctx/config.toml` and
-`.smartctx/rules.toml` so a whole machine gets sensible scoping without launching Claude in every
-checkout first.
+The first time you launch in an **unseeded** repo that actually scopes something out (interactive
+session), smartctx pauses on a one-line summary before handing the terminal to Claude — so the
+estimate and the *not seeded* nudge don't flash past, and you get a chance to adjust:
 
-```sh
-smartctx init            # seed every project folder under the current directory
-smartctx init ~/src      # seed under a specific root
+```
+scoped out 4 of 11 prunable tools + 9 connectors · ~87.7k tokens trimmed (estimate)
+this repo isn't seeded — run `smartctx init` to persist scoping for it
+  [enter] launch · [e] edit keep/drop · [q] cancel?
 ```
 
-Discovery is deliberately simple: **every direct subfolder of `ROOT`** is treated as a project
-(dotfile dirs like `.git` are ignored). For each project you keep:
+- **enter** launches with the scoping as shown.
+- **e** opens a checkbox of the prunable tools (pinned tools aren't listed — they always stay),
+  pre-ticked to the current decision. Toggle, confirm, and smartctx re-composes the launch with your
+  set. It then offers to **save** those choices to the repo (writing `./.smartctx/`, so future
+  launches and `smartctx update` respect them) — decline to keep the edit to just this session.
+- **q** cancels without launching.
 
-1. **Picks the subset.** Projects that already carry a `.smartctx/config.toml` *or* an authored
-   `.smartctx/rules.toml` are shown as *already configured* and skipped (never clobbered). From the
-   rest you choose which to seed (`1,3`, ranges like `2-4`, or `all`; empty cancels).
+**Once the repo is seeded** — you saved from the gate, or ran `smartctx init` — the pause stops:
+smartctx prints the one-line estimate and launches straight through. Re-tune a seeded repo with
+`smartctx update`. Non-interactive launches (`-p`, pipelines) never pause.
+
+### Seeding repos — `smartctx init`
+
+`smartctx rules` scopes one repo interactively. `smartctx init` writes the same
+`.smartctx/config.toml` and `.smartctx/rules.toml` non-interactively, so scoping is in place before
+you ever launch Claude in a checkout — for the current repo, or a whole directory of them at once.
+
+```sh
+smartctx init            # seed the current repo
+smartctx init .          # bulk-seed every project folder under the current directory
+smartctx init ~/src      # bulk-seed under a specific root
+```
+
+The argument is the switch, mirroring `smartctx update`: **no argument seeds the current repo
+itself**; **a `ROOT` argument seeds every direct subfolder of `ROOT`** in bulk (dotfile dirs like
+`.git` are ignored). The bulk run adds a project-picker step; otherwise both flows are identical.
+For each project you keep:
+
+1. **Picks the subset** *(bulk only)*. Projects that already carry a `.smartctx/config.toml` *or* an
+   authored `.smartctx/rules.toml` are shown as *already configured* and skipped (never clobbered).
+   The rest appear in a checkbox list (all ticked by default): `↑`/`↓` to move, space to toggle, `a`
+   for all/none, enter to confirm, `q` to cancel. Where a raw terminal isn't available it falls back
+   to a typed prompt (`1,3`, ranges like `2-4`, or `all`; empty cancels). Single-repo `init` skips
+   this step — an already-configured repo is reported, with a nudge to run `smartctx update`.
 2. **Confirms the profile.** If you run more than one Claude profile (`~/.claude`,
    `~/.claude-perso`, …), each project asks which one to inventory against — with a sticky default,
    so a work cluster and a personal cluster each take one keypress to switch. The chosen profile
    decides which tools exist, and therefore which rules get written.
 3. **Confirms the goal.** smartctx shows the goal it auto-detected for the project; press enter to
    accept, type to override, or `s` to skip that project.
+4. **Reviews the keep/drop.** After the goal, smartctx ranks the tools and shows the resulting
+   keep/drop as a checkbox list, pre-ticked to its automatic decision (space toggles, enter
+   confirms, `q` skips the project). Enter straight away accepts the auto decision; toggle to
+   overrule it before it's frozen — the same control the single-repo launch flow gives you, in one
+   screen. Where a raw terminal isn't available it accepts the auto decision silently.
+
+Each seeded project then prints a receipt — the count line plus the full list of tools kept and
+dropped — and the run ends with a summary that also names any projects you skipped and why.
 
 Seeded files are **local, not committed**: init writes a `.smartctx/.gitignore` that ignores the
 whole directory, so the generated (machine-derived) config never lands in git. This is the opposite
 of a rule you author by hand with `smartctx rules`, which stays shareable — bulk-seeded scoping is
 per-machine, hand-authored scoping is for the team.
 
-For each seeded project it ranks the profile's tools against that goal and freezes the keep/drop
-decision into `rules.toml` (only for the kinds launches actually prune — MCP servers and plugins).
+For each seeded project it ranks the profile's tools against that goal and — after the keep/drop
+review in step 4 — freezes that decision into `rules.toml` (only for the kinds launches actually
+prune — MCP servers and plugins).
 `config.toml` gets the resolved `threshold` and `model_name`. Pass **`--yes`** to run
-non-interactively (every eligible project, auto-detected goals, active profile) — required when
-there's no terminal, e.g. in a script.
+non-interactively (every eligible project, auto-detected goals, auto keep/drop, active profile) —
+required when there's no terminal, e.g. in a script.
 
 > [!NOTE]
 > The frozen decisions come from the *auto-detected* goal, which can be low-confidence for a project
@@ -318,6 +366,33 @@ there's no terminal, e.g. in a script.
 > re-run `smartctx rules` where you want a sharper goal. Note too that `--yes` assumes a single
 > profile: it seeds every project against the *active* one, so with several profiles run it
 > interactively, or once per profile with `CLAUDE_CONFIG_DIR` set and a narrower `ROOT`.
+
+### Refreshing existing seeds — `smartctx update`
+
+Seeds go stale: you install a new plugin or MCP server, the project's purpose shifts, or you want a
+tighter keep/drop than the first pass gave you. `smartctx update` re-runs the decision over a repo
+that `init` already seeded and rewrites its `.smartctx/`.
+
+```sh
+smartctx update            # refresh the repo you're standing in
+smartctx update ~/src      # refresh every seeded project under a root (bulk)
+```
+
+- **Single vs bulk.** No argument updates the current repo; a `ROOT` updates every seeded project
+  under it (bulk shows the same checkbox picker as `init`). "Seeded" means a repo `init` wrote —
+  detected by its `.smartctx/config.toml`. A repo with only a hand-committed `rules.toml` (no
+  config) is left untouched; a bulk run names it as *not seeded*, and a single run refuses.
+- **Fresh goal.** update re-infers the goal from scratch (README/metadata as of now, ignoring the
+  cached one), then lets you accept or override — so a project that changed direction gets a current
+  goal, not the stale cache.
+- **Inventory reconcile.** Tools added to the profile since the last seed appear in the review; tools
+  that vanished drop out of the regenerated rules.
+- **Your rules survive.** Rules you authored by hand (via `smartctx rules` or by editing the file)
+  are shown in the keep/drop review pre-ticked to their current state and preserved verbatim — only
+  the machine-written rules are regenerated. Flip a hand-authored decision in the review and update
+  replaces just that one with a fresh machine rule. `--yes` refreshes non-interactively — but note
+  that because it re-infers the goal, a goal you typed by hand at a previous run is replaced by the
+  inferred one; run update interactively (and override at the goal prompt) to keep a hand-typed goal.
 
 ## Design guarantees
 

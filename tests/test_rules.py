@@ -58,3 +58,9 @@ def test_parse_skips_rule_without_target(tmp_path, capsys):
     rules = load_rules(config_root=root, cwd=tmp_path)    # must not raise KeyError
     assert [r.target for r in rules] == ["ok"]
     assert "without target" in capsys.readouterr().err.lower()
+
+def test_conditional_rule_matches_docs_goal_with_separator():
+    from smartctx.rules import Predicate, evaluate
+    goal = "smartctx — start sessions with only what you need · python project"
+    assert evaluate(Predicate("keep_if", ("python",), "any"), goal) == "keep"   # separator doesn't block substring
+    assert evaluate(Predicate("drop_if", ("email",), "any"), goal) == "undecided"

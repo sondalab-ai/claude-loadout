@@ -9,7 +9,8 @@ from smartctx.inventory import claude_code_inventory, Item
 from smartctx.goal import detect_goal, write_goal_cache
 from smartctx.ranker import Ranker, make_model2vec_embed, keyword_embed, bundled_model_path, resolve_model_source
 from smartctx.compose import compose
-from smartctx.rules import (load_rules, apply_rules, has_rule, save_rule, write_rules,
+from smartctx.rules import (load_rules, apply_rules, has_rule, save_rule, append_rule, write_rules,
+                            read_rules, profile_rules_file, rules_for,
                             Rule, Predicate, evaluate)
 from smartctx.compiler import compile_rule, make_local_instruct
 from smartctx import savings as _savings
@@ -82,8 +83,9 @@ def _resolve_goal(cwd: Path, passthrough: list[str]) -> tuple[str, str, float]:
             return entered, "prompt", 1.0
     return goal.goal, goal.source, goal.confidence
 
-def _rules_intro(compile_fn) -> None:
+def _rules_intro(compile_fn, scope: str) -> None:
     # Printed once before an elicitation run so the interaction isn't a cold prompt.
+    # `scope` names where authored rules land (this repo vs the whole profile).
     p = lambda s: print(s, file=sys.stderr)
     dim = lambda s: _paint(s, "dim", err=True)
     p("")
@@ -100,6 +102,7 @@ def _rules_intro(compile_fn) -> None:
           "natural-language rules are unavailable.")
         p(dim("    [k]eep always / [d]rop always write a permanent rule; "
               "[s]kip (enter) decides nothing and asks again next time."))
+    p(dim(f"    rules you author here apply {scope}."))
     p("")
 
 def _pick_keep_drop_skip(item: Item) -> Predicate | None:
@@ -107,7 +110,8 @@ def _pick_keep_drop_skip(item: Item) -> Predicate | None:
     return {"k": Predicate("always_keep", (), "any"),
             "d": Predicate("always_drop", (), "any")}.get(choice)
 
-def _elicit(item: Item, context: str, compile_fn, config_root: Path) -> str:
+def _elicit(item: Item, context: str, compile_fn, save) -> str:
+    # `save(Rule)` persists an authored rule to the chosen scope (profile or a repo's local file).
     nl = ""
     if compile_fn:                                 # natural-language authoring path
         nl = _ask(f"smartctx: rule for '{item.id}' ({item.kind})? [enter=skip] ").strip()
@@ -115,13 +119,13 @@ def _elicit(item: Item, context: str, compile_fn, config_root: Path) -> str:
             return "undecided"
         pred = compile_rule(nl, item, compile_fn)
         if pred is not None:
-            save_rule(config_root, Rule(target=item.id, nl=nl, predicate=pred))
+            save(Rule(target=item.id, nl=nl, predicate=pred))
             return evaluate(pred, context)
         _warn(f"couldn't translate that into a rule for '{item.id}'; choose manually")
     pred = _pick_keep_drop_skip(item)              # spec §7 degrade / no rule model
     if pred is None:
         return "undecided"
-    save_rule(config_root, Rule(target=item.id, nl=nl, predicate=pred))
+    save(Rule(target=item.id, nl=nl, predicate=pred))
     return evaluate(pred, context)
 
 class _Scope(NamedTuple):
@@ -135,11 +139,22 @@ class _Scope(NamedTuple):
     connectors: list                                # (id, tokens) claude.ai connectors strict-mode drops
     measured: bool                                  # whether a costs.json cache was found
 
+class _EditGate(NamedTuple):
+    # Everything the pre-launch review needs to redraw and re-compose a plan.
+    items: list
+    editable: list                                  # prunable, non-pinned items the user may toggle
+    kept_ids: set                                   # prunable ids currently kept (checkbox preset)
+    pinned_ids: set
+    replan: object                                  # callable(selected_ids) -> (_Scope, plan)
+    cwd: Path
+    cfg: object
+    goal: str
+
 def _scoped_plan(passthrough: list[str], cwd: Path, config_root_override: Path | None = None):
     cfg = load_config(cwd=cwd, config_root_override=config_root_override)
     items = claude_code_inventory(cfg.config_root, cwd, cfg.global_config_path)
     if not items:
-        return None, None
+        return None, None, None
     context, gsource, gconf = _resolve_goal(cwd, passthrough)
     rules = load_rules(cfg.config_root, cwd)
     pinned = [i for i in items if any(fnmatch(i.id, g) for g in cfg.always_keep)]
@@ -148,28 +163,49 @@ def _scoped_plan(passthrough: list[str], cwd: Path, config_root_override: Path |
     outcome = apply_rules(remainder, rules, context)
     embed = _build_embed(cfg.model_name)
     ranked = Ranker(embed=embed).rank(context, list(outcome.undecided), cfg.threshold, cfg.always_keep)
-    kept = list(pinned) + list(outcome.forced_keep) + list(ranked.kept)
-    dropped = list(ranked.dropped) + [(i, "rule") for i in outcome.forced_drop]  # surface in --explain
+    # compose never removes skills (only mcp via --strict-mcp-config, plugins via enabledPlugins),
+    # so a non-prunable item that ranks or rules "out" still loads — keep it, never show it dropped.
+    stays = lambda i: i.kind not in _savings.PRUNABLE
+    always_loaded = ([i for i, _ in ranked.dropped if stays(i)]
+                     + [i for i in outcome.forced_drop if stays(i)])
+    kept = list(pinned) + list(outcome.forced_keep) + list(ranked.kept) + always_loaded
+    dropped = ([(i, s) for i, s in ranked.dropped if not stays(i)]
+               + [(i, "rule") for i in outcome.forced_drop if not stays(i)])  # prunable only
     if _interactive(passthrough):                  # launch-time elicitation for rule-less drops
         compile_fn = _build_compiler(cfg)
         ruleless = [i for i, _ in dropped                     # only prunable kinds are actionable
                     if i.kind in {"mcp", "plugin"} and not has_rule(i, rules)]
         if ruleless:
             _warn(f"{len(ruleless)} item(s) would be dropped with no rule; asking (enter to skip)")
-            _rules_intro(compile_fn)
+            _rules_intro(compile_fn, "to this repo only")
+            save = _repo_rule_saver(cwd, cfg, context)   # repo-scoped, lightly seeds on first rule
             for item in ruleless:
-                if _elicit(item, context, compile_fn, cfg.config_root) == "keep":
+                if _elicit(item, context, compile_fn, save) == "keep":
                     kept.append(item)
                     dropped = [(i, s) for i, s in dropped if i.id != item.id]
-    plan = compose(kept, items, cfg.config_root, passthrough, cwd=cwd,
-                   global_config_path=cfg.global_config_path,
-                   launch_config_dir=_explicit_profile(config_root_override))
-    measured = _measure.load_costs(cfg.config_root)
-    saved = _savings.estimate_savings(kept, [i for i, _ in dropped], cfg.token_costs, measured)
-    mcp_ids = {i.id for i in items if i.kind == "mcp"}
-    connectors = sorted(_measure.connector_costs(measured, mcp_ids).items(), key=lambda kv: -kv[1])
-    return _Scope(context, gsource, gconf, cfg.threshold, kept, dropped,
-                  saved, connectors, bool(measured)), plan
+    def _finish(kept, dropped):                    # compose + cost accounting for a keep/drop decision
+        plan = compose(kept, items, cfg.config_root, passthrough, cwd=cwd,
+                       global_config_path=cfg.global_config_path,
+                       launch_config_dir=_explicit_profile(config_root_override))
+        measured = _measure.load_costs(cfg.config_root)
+        saved = _savings.estimate_savings(kept, [i for i, _ in dropped], cfg.token_costs, measured)
+        mcp_ids = {i.id for i in items if i.kind == "mcp"}
+        connectors = sorted(_measure.connector_costs(measured, mcp_ids).items(), key=lambda kv: -kv[1])
+        scope = _Scope(context, gsource, gconf, cfg.threshold, kept, dropped,
+                       saved, connectors, bool(measured))
+        return scope, plan
+    prunable = [i for i in items if i.kind in _savings.PRUNABLE]
+    editable = [i for i in prunable if i.id not in pinned_ids]     # pinned always stay; not offered
+    def _replan(selected_ids: set[str]):           # rebuild the plan from an edited prunable keep-set
+        final = pinned_ids | selected_ids
+        nkept = [i for i in items if i.kind not in _savings.PRUNABLE or i.id in final]
+        ndropped = [(i, "edited") for i in prunable if i.id not in final]
+        return _finish(nkept, ndropped)
+    scope, plan = _finish(kept, dropped)
+    gate = _EditGate(items=items, editable=editable,
+                     kept_ids={i.id for i in kept if i.kind in _savings.PRUNABLE},
+                     pinned_ids=pinned_ids, replan=_replan, cwd=cwd, cfg=cfg, goal=context)
+    return scope, plan, gate
 
 def _cmd_rules(cwd: Path, config_root_override: Path | None = None) -> int:
     if not _interactive([]):                        # no TTY -> nothing to elicit; fail-open
@@ -179,15 +215,16 @@ def _cmd_rules(cwd: Path, config_root_override: Path | None = None) -> int:
     items = claude_code_inventory(cfg.config_root, cwd, cfg.global_config_path)
     rules = load_rules(cfg.config_root, cwd)
     compile_fn = _build_compiler(cfg)
-    context = _resolve_goal(cwd, [])
+    context, _src, _conf = _resolve_goal(cwd, [])   # goal string for conditional-rule evaluation
     pending = [i for i in items if not has_rule(i, rules)]
     if not pending:
         print(f"{_paint('smartctx:', 'green')} every tool already has a rule")
         return 0
-    _rules_intro(compile_fn)
+    _rules_intro(compile_fn, "to every repo in this profile")
+    save = lambda r: save_rule(cfg.config_root, r)   # profile-scoped: the deliberate global path
     authored = 0
     for item in pending:
-        if _elicit(item, context, compile_fn, cfg.config_root) != "undecided":
+        if _elicit(item, context, compile_fn, save) != "undecided":
             authored += 1
     print()
     print(f"{_paint('smartctx:', 'green')} authored {_plural(authored, 'rule')}")
@@ -284,18 +321,105 @@ def _parse_selection(raw: str, n: int) -> set[int] | None:
             return None
     return picks or None
 
-def _select_repos(eligible: list[Path], already: int) -> list[Path] | None:
+_CHECK_HINT = "↑/↓ move · space toggle · a all/none · enter confirm · q cancel"
+
+def _read_key():                                    # one keypress -> normalized token
+    import termios, tty
+    fd = sys.stdin.fileno()
+    old = termios.tcgetattr(fd)
+    try:
+        tty.setraw(fd)
+        ch = sys.stdin.read(1)
+        if ch == "\x1b":                            # CSI escape -> arrow keys
+            seq = sys.stdin.read(2)
+            return {"[A": "up", "[B": "down"}.get(seq, "esc")
+        return ch
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+
+def _render_checklist(title, labels, selected, cursor, out, redraw_lines, hint=_CHECK_HINT):
+    if redraw_lines:                                # rewind over the previous frame
+        out.write(f"\033[{redraw_lines}F")
+    lines = [title, ""]
+    for i, lab in enumerate(labels):
+        box = "[x]" if selected[i] else "[ ]"
+        pointer = _paint(">", "cyan", "bold", err=True) if i == cursor else " "
+        lines.append(f" {pointer} {box} {lab}")
+    lines.append("")
+    lines.append(_paint(f"  {hint}", "dim", err=True))
+    out.write("".join(f"\033[K{l}\n" for l in lines))
+    out.flush()
+    return len(lines)
+
+def _checkbox_select(title, labels, read_key=None, out=sys.stderr,
+                     preset=None, allow_empty=False, hint=_CHECK_HINT) -> list[int] | None:
+    # Interactive multi-select; returns chosen 0-based indices, or None to cancel.
+    # Logic is driven by read_key() so tests can feed a key sequence without a real tty.
+    # preset seeds the initial ticks (default: all on); allow_empty lets Enter confirm an
+    # empty pick (keep-nothing is a valid keep/drop outcome) instead of reading it as cancel.
+    read_key = read_key or _read_key
+    n = len(labels)
+    selected = list(preset) if preset is not None else [True] * n
+    cursor = 0
+    drawn = _render_checklist(title, labels, selected, cursor, out, 0, hint)
+    while True:
+        key = read_key()
+        if key in ("up", "k"):
+            cursor = (cursor - 1) % n
+        elif key in ("down", "j"):
+            cursor = (cursor + 1) % n
+        elif key == " ":
+            selected[cursor] = not selected[cursor]
+        elif key in ("a", "A"):
+            fill = not all(selected)                 # all on -> clear; otherwise select all
+            selected = [fill] * n
+        elif key in ("\r", "\n"):
+            chosen = [i for i, s in enumerate(selected) if s]
+            return chosen if allow_empty else (chosen or None)
+        elif key == "\x03":                              # Ctrl-C -> exit 130 like every other prompt
+            raise KeyboardInterrupt
+        elif key in ("q", "Q", "esc", "\x04"):           # q / Esc / Ctrl-D -> quiet cancel
+            return None
+        else:
+            continue                                # ignore unmapped keys without redrawing
+        drawn = _render_checklist(title, labels, selected, cursor, out, drawn, hint)
+
+def _can_raw() -> bool:
+    # True only when stdin is a real terminal we can put into raw mode; the picker
+    # renders before its first keystroke, so probe up front to avoid a stray frame.
+    try:
+        import termios
+        termios.tcgetattr(sys.stdin.fileno())
+        return sys.stdin.isatty()
+    except Exception:
+        return False
+
+def _select_repos(eligible: list[Path], already: int,
+                  label: str = "smartctx init:", action: str = "seed") -> list[Path] | None:
+    import shutil
+    rows = shutil.get_terminal_size((80, 24)).lines
+    if not _can_raw() or len(eligible) + 4 > rows:  # no raw tty / frame taller than the window
+        return _select_repos_line(eligible, already, label, action)
+    head = _plural(len(eligible), "project") + f" eligible to {action}"
+    if already:
+        head += f" ({already} already configured, skipped)"
+    title = f"{_paint(label, 'yellow', err=True)} {head}"
+    picks = _checkbox_select(title, [str(p) for p in eligible])
+    return [eligible[i] for i in picks] if picks else None
+
+def _select_repos_line(eligible: list[Path], already: int,
+                       label: str = "smartctx init:", action: str = "seed") -> list[Path] | None:
     print("", file=sys.stderr)
     head = _plural(len(eligible), "project") + " eligible"
     if already:
         head += f" ({already} already configured, skipped)"
-    print(f"{_paint('smartctx init:', 'yellow', err=True)} {head}", file=sys.stderr)
+    print(f"{_paint(label, 'yellow', err=True)} {head}", file=sys.stderr)
     print("", file=sys.stderr)
     for idx, repo in enumerate(eligible, 1):
         print(f"  {_paint(f'{idx})', 'bold', err=True)} {repo}", file=sys.stderr)
     print("", file=sys.stderr)
     while True:
-        raw = _ask(f"select repos to seed [1-{len(eligible)}, ranges, 'all'; enter to cancel]: ")
+        raw = _ask(f"select projects to {action} [1-{len(eligible)}, ranges, 'all'; enter to cancel]: ")
         if not raw.strip():
             return None
         picks = _parse_selection(raw, len(eligible))
@@ -303,13 +427,14 @@ def _select_repos(eligible: list[Path], already: int) -> list[Path] | None:
             return [eligible[i - 1] for i in sorted(picks)]
         _warn(f"invalid selection {raw!r}")
 
-def _pick_profile(profiles: list[Path], default: Path, repo: Path) -> Path:
+def _pick_profile(profiles: list[Path], default: Path, repo: Path,
+                  label: str = "smartctx init:") -> Path:
     print("", file=sys.stderr)
-    print(f"{_paint('smartctx init:', 'yellow', err=True)} profile for "
+    print(f"{_paint(label, 'yellow', err=True)} profile for "
           f"{_paint(str(repo), 'cyan', err=True)}", file=sys.stderr)
     for idx, prof in enumerate(profiles, 1):
-        tag = _paint(" (default)", "dim", err=True) if prof == default else ""
-        print(f"  {_paint(f'{idx})', 'bold', err=True)} {prof}{tag}", file=sys.stderr)
+        mark = _paint(" (default)", "dim", err=True) if prof == default else ""
+        print(f"  {_paint(f'{idx})', 'bold', err=True)} {prof}{mark}", file=sys.stderr)
     while True:
         raw = _ask(f"profile [1-{len(profiles)}, enter for default]: ").strip()
         if not raw:
@@ -318,11 +443,11 @@ def _pick_profile(profiles: list[Path], default: Path, repo: Path) -> Path:
             return profiles[int(raw) - 1]
         _warn(f"invalid choice {raw!r}")
 
-def _confirm_goal(repo: Path) -> str | None:
-    # Returns the accepted/overridden goal, or None to skip this repo.
-    g = detect_goal(repo)
+def _confirm_goal(repo: Path, use_cache: bool = True, label: str = "smartctx init:") -> str | None:
+    # Returns the accepted/overridden goal, or None to skip this repo. update re-infers fresh.
+    g = detect_goal(repo, use_cache=use_cache)
     print("", file=sys.stderr)
-    print(f"{_paint('smartctx init:', 'yellow', err=True)} {_paint(str(repo), 'cyan', err=True)} → "
+    print(f"{_paint(label, 'yellow', err=True)} {_paint(str(repo), 'cyan', err=True)} → "
           f"{g.goal!r} {_paint(f'({g.source} · conf {g.confidence:.2f})', 'dim', err=True)}",
           file=sys.stderr)
     raw = _ask("  accept [enter] / type a goal to override / 's' to skip this repo: ").strip()
@@ -330,9 +455,8 @@ def _confirm_goal(repo: Path) -> str | None:
         return None
     return raw or g.goal
 
-def _decide_keep(items, cfg, context: str, repo: Path) -> set[str]:
+def _decide_keep(items, cfg, context: str, rules: list[Rule]) -> set[str]:
     # Mirror _scoped_plan's non-interactive core: pinned + rules + ranked kept set.
-    rules = load_rules(cfg.config_root, repo)
     pinned = [i for i in items if any(fnmatch(i.id, g) for g in cfg.always_keep)]
     pinned_ids = {i.id for i in pinned}
     outcome = apply_rules([i for i in items if i.id not in pinned_ids], rules, context)
@@ -340,9 +464,16 @@ def _decide_keep(items, cfg, context: str, repo: Path) -> set[str]:
     ranked = Ranker(embed=embed).rank(context, list(outcome.undecided), cfg.threshold, cfg.always_keep)
     return pinned_ids | {i.id for i in outcome.forced_keep} | {i.id for i in ranked.kept}
 
-def _materialize_rules(items, kept_ids: set[str], goal: str) -> list[Rule]:
+# Machine-materialized rules carry this nl prefix so `update` can tell them from rules a human
+# authored (via `smartctx rules` or by hand) and regenerate only the machine ones.
+_SEED_NL_PREFIX = "seeded by smartctx"
+
+def _is_seeded_rule(rule: Rule) -> bool:
+    return rule.nl.startswith(_SEED_NL_PREFIX)
+
+def _materialize_rules(items, kept_ids: set[str], goal: str, verb: str = "init") -> list[Rule]:
     # Freeze keep/drop only for the kinds compose actually prunes (mcp, plugin).
-    nl = f"seeded by smartctx init (goal: {goal})"
+    nl = f"{_SEED_NL_PREFIX} {verb} (goal: {goal})"
     rules = []
     for i in items:
         if i.kind not in ("mcp", "plugin"):
@@ -351,55 +482,118 @@ def _materialize_rules(items, kept_ids: set[str], goal: str) -> list[Rule]:
         rules.append(Rule(target=i.id, nl=nl, predicate=Predicate(action, (), "any")))
     return rules
 
-def _seed_repo(repo: Path, profile: Path, goal: str) -> tuple[int, int]:
-    # Returns (kept, dropped) counts among prunable tools. Writes config + rules + goal cache.
+def _prunable(items) -> list[Item]:
+    return [i for i in items if i.kind in ("mcp", "plugin")]
+
+def _pinned_ids(items, cfg) -> set[str]:
+    # Tools the config's always_keep pins: they win over rules at launch (spec §12), so the
+    # keep/drop review must not offer them — a rule that dropped one would be ignored anyway.
+    return {i.id for i in items if any(fnmatch(i.id, g) for g in cfg.always_keep)}
+
+def _plan_repo(repo: Path, profile: Path, goal: str):
+    # Load the profile, inventory the repo, and auto-decide keep/drop (no side effects).
     cfg = load_config(cwd=repo, config_root_override=profile)
     items = claude_code_inventory(cfg.config_root, repo, cfg.global_config_path)
-    kept_ids = _decide_keep(items, cfg, goal, repo)
+    kept_ids = _decide_keep(items, cfg, goal, load_rules(cfg.config_root, repo))
+    return cfg, items, kept_ids
+
+def _review_keep_drop(repo: Path, prunable: list[Item], kept_ids: set[str],
+                      label: str = "smartctx init:"):
+    # Let the user adjust the auto keep/drop before it is frozen (checkbox pre-ticked to the
+    # auto decision). Returns the kept-id set, or None to skip the repo. Falls back to the auto
+    # decision when a raw tty isn't available or the frame is taller than the window.
+    import shutil
+    if not prunable:
+        return set(kept_ids)
+    rows = shutil.get_terminal_size((80, 24)).lines
+    if not _can_raw() or len(prunable) + 4 > rows:
+        return set(kept_ids)                        # can't draw the picker; accept auto silently
+    preset = [i.id in kept_ids for i in prunable]
+    labels = [f"{i.id}  {_paint('(' + i.kind + ')', 'dim', err=True)}" for i in prunable]
+    title = (f"{_paint(label, 'yellow', err=True)} keep/drop for "
+             f"{_paint(str(repo), 'cyan', err=True)}")
+    hint = "↑/↓ move · space toggle · a all/none · enter confirm · q skip repo"
+    picks = _checkbox_select(title, labels, preset=preset, allow_empty=True, hint=hint)
+    if picks is None:                               # q / Esc -> skip this repo entirely
+        return None
+    return {prunable[i].id for i in picks}
+
+_REPO_RULES_HEADER = "# generated by smartctx — local, gitignored keep/drop decisions\n"
+
+def _write_seed_scaffold(repo: Path, cfg, goal: str) -> None:
+    # Local seed metadata, no rules: .gitignore + goal cache + config.toml.
     d = repo / ".smartctx"; d.mkdir(exist_ok=True)
     (d / ".gitignore").write_text(_LOCAL_GITIGNORE)   # before write_goal_cache, which only writes if absent
     write_goal_cache(repo, goal)
     model = cfg.model_name.replace("\\", "\\\\").replace('"', '\\"')   # TOML basic string
-    (repo / ".smartctx" / "config.toml").write_text(
+    (d / "config.toml").write_text(
         f'{_CONFIG_HEADER}threshold = {cfg.threshold}\nmodel_name = "{model}"\n')
-    rules = _materialize_rules(items, kept_ids, goal)
-    write_rules(repo / ".smartctx" / "rules.toml", rules,
-                header="# generated by smartctx init — local, gitignored keep/drop decisions\n")
-    prunable = [i for i in items if i.kind in ("mcp", "plugin")]
-    kept = sum(1 for i in prunable if i.id in kept_ids)
-    return kept, len(prunable) - kept
+
+def _write_seed(repo: Path, cfg, goal: str, rules: list[Rule]) -> None:
+    # Persist the local seed: scaffold + a fresh rules.toml holding `rules`.
+    _write_seed_scaffold(repo, cfg, goal)
+    write_rules(repo / ".smartctx" / "rules.toml", rules, header=_REPO_RULES_HEADER)
+
+def _repo_rule_saver(repo: Path, cfg, goal: str):
+    # Launch-time rules are repo-scoped and local. The first one lightly seeds the repo
+    # (scaffold) so `smartctx update` can later refresh it coherently, then appends the rule.
+    def save(rule: Rule) -> None:
+        if not (repo / ".smartctx" / "config.toml").is_file():
+            _write_seed_scaffold(repo, cfg, goal)
+        rp = repo / ".smartctx" / "rules.toml"
+        if not rp.exists():
+            rp.write_text(_REPO_RULES_HEADER)
+        append_rule(rp, rule)
+    return save
+
+def _kept_dropped(prunable: list[Item], kept_ids: set[str]) -> tuple[list[Item], list[Item]]:
+    return ([i for i in prunable if i.id in kept_ids],
+            [i for i in prunable if i.id not in kept_ids])
+
+def _seed_repo(repo: Path, cfg, items, kept_ids: set[str], goal: str) -> tuple[list[Item], list[Item]]:
+    # init path: freeze every prunable tool's keep/drop as a machine rule.
+    _write_seed(repo, cfg, goal, _materialize_rules(items, kept_ids, goal, verb="init"))
+    return _kept_dropped(_prunable(items), kept_ids)
 
 def _cmd_init(cwd: Path, args: list[str], environ) -> int:
     yes = "--yes" in args
     root_args = [a for a in args if a != "--yes"]
-    root = Path(root_args[0]).expanduser() if root_args else cwd
-    if not root.is_dir():
-        _warn(f"{root} is not a directory; nothing to do")
-        return 0
-    projects = _discover_projects(root)
     configured = lambda r: ((r / ".smartctx" / "config.toml").is_file()
                             or (r / ".smartctx" / "rules.toml").is_file())
-    eligible = [r for r in projects if not configured(r)]   # either config file -> skip whole project
-    already = len(projects) - len(eligible)
+    if root_args:                                    # bulk: every unconfigured project under ROOT
+        root = Path(root_args[0]).expanduser()
+        if not root.is_dir():
+            _warn(f"{root} is not a directory; nothing to do")
+            return 0
+        projects = _discover_projects(root)
+        eligible = [r for r in projects if not configured(r)]   # either config file -> skip whole project
+        already_list = [r for r in projects if configured(r)]   # named in the report, never re-seeded
+    else:                                            # single: seed the current repo itself
+        eligible = [] if configured(cwd) else [cwd]
+        already_list = [cwd] if configured(cwd) else []
+    already = len(already_list)
     if not eligible:
         print(f"{_paint('smartctx:', 'green')} nothing to seed"
-              f"{f' ({already} already configured)' if already else ' (no project folders found)'}")
+              f"{f' ({already} already configured — run `smartctx update` to refresh)' if already else ' (no project folders found)'}")
+        for repo in already_list:
+            print(f"  {_paint('–', 'dim')} {repo} {_paint('(already configured)', 'dim')}")
         return 0
-    tty = sys.stdin.isatty()
-    if not tty and not yes:
+    if not sys.stdin.isatty() and not yes:
         _warn("init needs an interactive terminal (or pass --yes); nothing to do")
         return 0
-    if yes:
-        selected = eligible
-    else:
-        selected = _select_repos(eligible, already)   # empty pick / Ctrl-D -> None
+    if root_args and not yes:
+        selected = _select_repos(eligible, already)   # bulk picker; empty pick / Ctrl-D -> None
         if not selected:
             _warn("no repos selected; nothing to do")
             return 0
+    else:                                            # single repo, or --yes: no picker
+        selected = eligible
     active = load_config(cwd=cwd).config_root
     profiles = _discover_profiles(active)
     sticky = active
-    seeded = skipped = 0
+    seeded = 0
+    chosen = set(selected)                          # eligible projects the user left out of the run
+    skipped: list[tuple[Path, str]] = [(r, "not selected") for r in eligible if r not in chosen]
     for repo in selected:
         profile = sticky
         if not yes and len(profiles) > 1:
@@ -409,19 +603,177 @@ def _cmd_init(cwd: Path, args: list[str], environ) -> int:
         else:
             goal = _confirm_goal(repo)
             if goal is None:
-                skipped += 1
+                skipped.append((repo, "skipped at goal prompt"))
                 continue
-        kept, dropped = _seed_repo(repo, profile, goal)
+        cfg, items, auto_kept = _plan_repo(repo, profile, goal)
+        prunable = _prunable(items)
+        locked = _pinned_ids(prunable, cfg)         # config always_keep wins at launch — not reviewable
+        if yes:
+            kept_ids = auto_kept
+        else:
+            picked = _review_keep_drop(repo, [i for i in prunable if i.id not in locked], auto_kept)
+            if picked is None:                      # q / Esc in the keep/drop picker
+                skipped.append((repo, "skipped at keep/drop review"))
+                continue
+            kept_ids = set(picked) | locked         # pinned tools always survive
+        kept, dropped = _seed_repo(repo, cfg, items, kept_ids, goal)
         seeded += 1
-        print(f"  {_paint('✓', 'green')} {repo}  "
-              f"{_paint(f'({kept} kept / {dropped} dropped)', 'dim')}")
+        _report_repo(repo, kept, dropped)
+    _print_init_summary(seeded, skipped, already_list)
+    return 0
+
+def _report_repo(repo: Path, kept: list[Item], dropped: list[Item]) -> None:
+    # Verbose per-repo receipt: the count line, then the full kept/dropped id lists.
+    print(f"  {_paint('✓', 'green')} {repo}  "
+          f"{_paint(f'({len(kept)} kept / {len(dropped)} dropped)', 'dim')}")
+    for label, items, mark, color in (("kept", kept, "✓", "green"),
+                                       ("dropped", dropped, "✗", "red")):
+        for i in items:
+            print(f"      {_paint(mark, color)} {i.id} {_paint(f'({i.kind})', 'dim')}")
+    if not kept and not dropped:
+        print(f"      {_paint('(no prunable tools)', 'dim')}")
+
+def _print_init_summary(seeded: int, skipped: list[tuple[Path, str]],
+                        already_list: list[Path]) -> None:
     print()
     tail = f"seeded {_plural(seeded, 'project')}"
     if skipped:
-        tail += f", {skipped} skipped by you"
-    if already:
-        tail += f", {already} already configured"
+        tail += f", {_plural(len(skipped), 'project')} skipped"
+    if already_list:
+        tail += f", {len(already_list)} already configured"
     print(f"{_paint('smartctx:', 'green')} {tail}")
+    notes = skipped + [(r, "already configured") for r in already_list]
+    for repo, reason in notes:                       # name every project that didn't get seeded
+        print(f"  {_paint('–', 'dim')} {repo} {_paint(f'({reason})', 'dim')}")
+
+_UPDATE_LABEL = "smartctx update:"
+
+def _is_seeded(repo: Path) -> bool:
+    # init always writes config.toml under a local gitignore; its presence marks a repo that
+    # update owns. A repo carrying only a hand-committed rules.toml (no config) is left alone.
+    return (repo / ".smartctx" / "config.toml").is_file()
+
+def _split_repo_rules(repo: Path) -> tuple[list[Rule], list[Rule]]:
+    # (human, machine) split of the repo's local rules.toml by the seed nl marker.
+    rr = read_rules(repo / ".smartctx" / "rules.toml")
+    return ([r for r in rr if not _is_seeded_rule(r)],
+            [r for r in rr if _is_seeded_rule(r)])
+
+def _decision_rules(cfg, repo_human: list[Rule]) -> list[Rule]:
+    # Rules that decide keep/drop during an update: profile rules + the repo's human rules
+    # (repo overrides profile per target). The old machine rules are deliberately excluded so
+    # ranking gets a fresh say on every tool the human hasn't pinned.
+    merged = {r.target: r for r in read_rules(profile_rules_file(cfg.config_root))}
+    merged.update({r.target: r for r in repo_human})
+    return list(merged.values())
+
+def _reconcile_rules(prunable: list[Item], final_kept: set[str],
+                     decision: list[Rule], repo_human: list[Rule], goal: str) -> list[Rule]:
+    # Preserve human rules that still yield the chosen decision; write a machine rule for every
+    # other prunable tool. A human exact-id rule the user flipped is dropped so the machine wins.
+    nl = f"{_SEED_NL_PREFIX} update (goal: {goal})"
+    machine, overridden = [], set()
+    for i in prunable:
+        want = "keep" if i.id in final_kept else "drop"
+        gov = rules_for(i, decision)
+        if gov and evaluate(gov[0].predicate, goal) == want:
+            continue                                 # an existing rule already yields it; leave as-is
+        if any(r.target == i.id for r in repo_human):
+            overridden.add(i.id)                     # user flipped a human exact rule -> replace it
+        action = "always_keep" if want == "keep" else "always_drop"
+        machine.append(Rule(target=i.id, nl=nl, predicate=Predicate(action, (), "any")))
+    preserved = [r for r in repo_human if r.target not in overridden]
+    return preserved + machine
+
+def _update_repo(repo: Path, profile: Path, goal: str, yes: bool):
+    # Refresh one seeded repo. Returns (kept, dropped) prunable item lists, or None if skipped.
+    cfg = load_config(cwd=repo, config_root_override=profile)
+    items = claude_code_inventory(cfg.config_root, repo, cfg.global_config_path)
+    repo_human, _machine = _split_repo_rules(repo)
+    decision = _decision_rules(cfg, repo_human)
+    baseline = _decide_keep(items, cfg, goal, decision)   # human rules honored, machine rules re-ranked
+    prunable = _prunable(items)
+    locked = _pinned_ids(prunable, cfg)               # config always_keep wins at launch — not reviewable
+    if yes:
+        final = baseline
+    else:
+        picked = _review_keep_drop(repo, [i for i in prunable if i.id not in locked],
+                                   baseline, label=_UPDATE_LABEL)
+        if picked is None:
+            return None
+        final = set(picked) | locked
+    _write_seed(repo, cfg, goal, _reconcile_rules(prunable, final, decision, repo_human, goal))
+    return _kept_dropped(prunable, final)
+
+def _print_update_summary(updated: int, skipped: list[tuple[Path, str]],
+                          unseeded: list[Path]) -> None:
+    print()
+    tail = f"updated {_plural(updated, 'project')}"
+    if skipped:
+        tail += f", {_plural(len(skipped), 'project')} skipped"
+    if unseeded:
+        tail += f", {len(unseeded)} not seeded"
+    print(f"{_paint('smartctx:', 'green')} {tail}")
+    notes = skipped + [(r, "not seeded — run init") for r in unseeded]
+    for repo, reason in notes:
+        print(f"  {_paint('–', 'dim')} {repo} {_paint(f'({reason})', 'dim')}")
+
+def _cmd_update(cwd: Path, args: list[str], environ) -> int:
+    yes = "--yes" in args
+    root_args = [a for a in args if a != "--yes"]
+    unseeded: list[Path] = []
+    if root_args:                                    # bulk: every seeded project under ROOT
+        root = Path(root_args[0]).expanduser()
+        if not root.is_dir():
+            _warn(f"{root} is not a directory; nothing to do")
+            return 0
+        projects = _discover_projects(root)
+        eligible = [r for r in projects if _is_seeded(r)]
+        unseeded = [r for r in projects if not _is_seeded(r)]
+        if not eligible:
+            print(f"{_paint('smartctx:', 'green')} nothing to update"
+                  f"{f' ({len(unseeded)} not seeded — run init)' if unseeded else ' (no seeded projects found)'}")
+            return 0
+    else:                                            # single: the current repo
+        if not _is_seeded(cwd):
+            _warn("this repo isn't smartctx-seeded; run `smartctx init` first")
+            return 0
+        eligible = [cwd]
+    if not sys.stdin.isatty() and not yes:
+        _warn("update needs an interactive terminal (or pass --yes); nothing to do")
+        return 0
+    if root_args and not yes:
+        selected = _select_repos(eligible, 0, label=_UPDATE_LABEL, action="update")
+        if not selected:
+            _warn("no repos selected; nothing to do")
+            return 0
+    else:
+        selected = eligible
+    active = load_config(cwd=cwd).config_root
+    profiles = _discover_profiles(active)
+    sticky = active
+    updated = 0
+    chosen = set(selected)
+    skipped: list[tuple[Path, str]] = [(r, "not selected") for r in eligible if r not in chosen]
+    for repo in selected:
+        profile = sticky
+        if not yes and len(profiles) > 1:
+            profile = sticky = _pick_profile(profiles, sticky, repo, label=_UPDATE_LABEL)
+        if yes:
+            goal = detect_goal(repo, use_cache=False).goal
+        else:
+            goal = _confirm_goal(repo, use_cache=False, label=_UPDATE_LABEL)
+            if goal is None:
+                skipped.append((repo, "skipped at goal prompt"))
+                continue
+        result = _update_repo(repo, profile, goal, yes)
+        if result is None:
+            skipped.append((repo, "skipped at keep/drop review"))
+            continue
+        kept, dropped = result
+        updated += 1
+        _report_repo(repo, kept, dropped)
+    _print_update_summary(updated, skipped, unseeded)
     return 0
 
 def _profile_report(root: Path, cwd: Path, active: bool,
@@ -541,10 +893,11 @@ def _print_help() -> None:
         f"{_paint('Usage:', 'bold')}\n"
         f"  {cmd('smartctx [claude-args...]')}   Launch claude with a goal-scoped tool set\n"
         f"  {cmd('smartctx --explain')}          Print the scoping plan, then exit (no launch)\n"
-        f"  {cmd('smartctx rules')}              Author keep/drop rules interactively\n"
-        f"  {cmd('smartctx init [ROOT]')}        Bulk-seed local config into project folders under ROOT\n"
+        f"  {cmd('smartctx rules')}              Author profile-wide keep/drop rules (all repos; launch prompts are repo-local)\n"
+        f"  {cmd('smartctx init [ROOT]')}        Seed local config — this repo, or bulk-seed every project under ROOT\n"
+        f"  {cmd('smartctx update [ROOT]')}      Refresh existing seeds — this repo, or all seeded under ROOT\n"
         f"  {cmd('smartctx doctor')}             Report profiles, config, and model state\n"
-        f"  {cmd('smartctx measure')}            Measure real MCP tool-token cost (opt-in, connects)\n"
+        f"  {cmd('smartctx measure')}            Measure real MCP tool-token cost — MCP only (they expose tools at runtime; opt-in, connects)\n"
         f"  {cmd('smartctx --help, -h')}         Show this help\n"
         f"  {cmd('smartctx --version, -V')}      Show the smartctx version\n"
         "\n"
@@ -559,11 +912,12 @@ def _print_explain(scope: _Scope, plan) -> None:
           f"{_paint(f'({scope.source} · confidence {scope.confidence:.2f})', 'dim')}")
     print(f"{lbl('threshold')}{scope.threshold}")
     print()
-    kept = [i.id for i in scope.kept]
-    print(_paint(f"  keeping ({len(kept)})", "bold"))
-    for cid in kept:
-        print(f"    {_paint('✓', 'green')} {cid}")
-    if not kept:
+    kept_prunable = [i for i in scope.kept if i.kind in _savings.PRUNABLE]
+    skills = [i for i in scope.kept if i.kind not in _savings.PRUNABLE]
+    print(_paint(f"  keeping ({len(kept_prunable)})", "bold"))
+    for i in kept_prunable:
+        print(f"    {_paint('✓', 'green')} {i.id}")
+    if not kept_prunable:
         print(_paint("    (nothing)", "dim"))
     print()
     dropped = scope.dropped
@@ -575,6 +929,11 @@ def _print_explain(scope: _Scope, plan) -> None:
     if not dropped:
         print(_paint("    (nothing)", "dim"))
     print()
+    if skills:                                     # loaded regardless of ranking — compose can't prune them
+        print(_paint(f"  always loaded — skills, not prunable ({len(skills)})", "bold"))
+        for i in skills:
+            print(f"    {_paint('•', 'cyan')} {i.id}")
+        print()
     conn_tok = sum(t for _, t in scope.connectors)
     if scope.connectors:
         print(_paint("  connectors dropped (all-or-nothing, strict mode)", "bold"))
@@ -606,6 +965,48 @@ def _savings_line(scope: _Scope) -> str:
         core += f" + {len(scope.connectors)} connectors"
     return f"{core} · ~{_savings.human_tokens(s.tokens + conn_tok)} tokens trimmed (estimate)"
 
+def _maybe_persist_edit(gate: _EditGate, selected_ids: set) -> None:
+    # Offer to freeze the edited keep/drop as a repo seed so future launches respect it.
+    ans = _ask("  save these choices to this repo? [y/N] ").strip().lower()
+    if ans not in ("y", "yes"):
+        return
+    _seed_repo(gate.cwd, gate.cfg, gate.items, gate.pinned_ids | selected_ids, gate.goal)
+    _warn("saved — this repo is now seeded (`smartctx update` refreshes it)")
+
+def _launch_gate(scope: _Scope, plan, gate: _EditGate, passthrough: list[str]):
+    # Interactive pre-launch review: read the summary, optionally edit keep/drop, then launch.
+    # Returns the (possibly re-composed) (scope, plan) to run. Non-interactive -> pass through.
+    if gate is None or not (_interactive(passthrough) and (scope.savings.dropped or scope.connectors)):
+        return scope, plan
+    _warn(_savings_line(scope))
+    if _is_seeded(gate.cwd):                         # settled config — respect it, no prompt, just launch
+        return scope, plan
+    _warn("this repo isn't seeded — run `smartctx init` to persist scoping for it")
+    while True:
+        choice = _ask("  [enter] launch · [e] edit keep/drop · [q] cancel? ").strip().lower()
+        if choice == "q":
+            raise KeyboardInterrupt                 # clean abort, exit 130
+        if choice != "e":
+            return scope, plan
+        if not gate.editable:
+            _warn("nothing to edit — every kept tool is pinned by config")
+            return scope, plan
+        if not _can_raw():                          # no raw terminal -> can't draw the checkbox
+            _warn("can't draw the editor here; launching as scoped")
+            return scope, plan
+        preset = [i.id in gate.kept_ids for i in gate.editable]
+        labels = [f"{i.id}  {_paint('(' + i.kind + ')', 'dim', err=True)}" for i in gate.editable]
+        picks = _checkbox_select(_paint("keep/drop for this launch", "yellow", err=True),
+                                 labels, preset=preset, allow_empty=True)
+        if picks is None:                           # q in the checkbox -> back to the gate prompt
+            continue
+        selected = {gate.editable[i].id for i in picks}
+        _cleanup(plan.tmp_paths)                    # discard the superseded plan's temp files
+        scope, plan = gate.replan(selected)
+        _maybe_persist_edit(gate, selected)
+        _warn(_savings_line(scope))
+        return scope, plan
+
 def main(argv: list[str] | None = None) -> int:
     try:
         return _run(argv)
@@ -628,6 +1029,8 @@ def _run(argv: list[str] | None = None) -> int:
         return _cmd_measure(cwd)
     if argv and argv[0] == "init":                  # bulk-seed repo config; resolves profiles itself
         return _cmd_init(cwd, argv[1:], os.environ)
+    if argv and argv[0] == "update":                # refresh existing seeds (single repo or bulk)
+        return _cmd_update(cwd, argv[1:], os.environ)
     rules_cmd = bool(argv) and argv[0] == "rules"
     explain = "--explain" in argv
     passthrough = [a for a in argv if a != "--explain"]
@@ -640,7 +1043,7 @@ def _run(argv: list[str] | None = None) -> int:
         return _cmd_rules(cwd, override)
     fallback_env = _launch_env(override)            # keep a prompted profile on the fallback launches
     try:
-        result, plan = _scoped_plan(passthrough, cwd, override)
+        result, plan, gate = _scoped_plan(passthrough, cwd, override)
     except Exception as exc:
         _warn(f"scoping failed ({exc}); launching full session")
         return subprocess.run(["claude", *passthrough], env=fallback_env).returncode
@@ -651,8 +1054,7 @@ def _run(argv: list[str] | None = None) -> int:
         _print_explain(scope, plan)
         _cleanup(plan.tmp_paths)
         return 0
-    if (scope.savings.dropped or scope.connectors) and _interactive(passthrough):  # skip on -p pipelines
-        _warn(_savings_line(scope))
+    scope, plan = _launch_gate(scope, plan, gate, passthrough)   # read/adjust before claude takes the screen
     try:
         return subprocess.run(plan.argv, env=plan.env).returncode
     finally:

@@ -1,4 +1,4 @@
-import json, sys
+import io, json, os, sys
 from pathlib import Path
 import pytest
 import smartctx.cli as cli
@@ -93,7 +93,8 @@ def test_rules_subcommand_authors_rule(tmp_path, monkeypatch):
     monkeypatch.setattr("builtins.input", lambda *a, **k: next(replies, ""))
     rc = cli.main(["rules"])
     assert rc == 0
-    assert "always_keep" in (root / "smartctx" / "rules.toml").read_text()
+    assert "always_keep" in (root / "smartctx" / "rules.toml").read_text()   # profile = the global path
+    assert not (tmp_path / ".smartctx" / "rules.toml").exists()              # `rules` writes profile, not repo rules
 
 def test_explain_shows_rule_forced_drop(tmp_path, monkeypatch, capsys):
     root = _drop_rule_root(tmp_path)                       # Gmail carries an always_drop rule
@@ -203,6 +204,23 @@ def test_dropped_skill_does_not_elicit(tmp_path, monkeypatch):
     joined = " ".join(prompts)
     assert "astro" not in joined                          # un-prunable skill never elicited
     assert "Gmail" in joined and "figma@x" in joined      # prunable kinds are elicited
+
+def test_explain_skills_shown_always_loaded_not_dropped(tmp_path, monkeypatch, capsys):
+    root = _skill_root(tmp_path)                          # figma@x plugin + Gmail mcp + astro skill
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
+    monkeypatch.setenv("SMARTCTX_THRESHOLD", "0.99")      # rank everything out
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "make_model2vec_embed", lambda name: cli.keyword_embed)
+    monkeypatch.setattr(cli, "_interactive", lambda p: False)   # no elicitation
+    rc = cli.main(["--explain"])
+    assert rc == 0
+    lines = capsys.readouterr().out.splitlines()
+    always_i = next(i for i, l in enumerate(lines) if "always loaded" in l)
+    astro_i = next(i for i, l in enumerate(lines) if "astro" in l)
+    assert astro_i > always_i                            # skill lands in always-loaded, not dropping
+    drop_i = next(i for i, l in enumerate(lines) if "dropping (" in l)
+    assert not any("astro" in l for l in lines[drop_i:always_i])   # never in the dropping section
+    assert "•" in lines[astro_i]                         # neutral marker, not the ✗ of a real drop
 
 def test_mcp_json_server_kept_appears_in_overlay(tmp_path, monkeypatch):
     root = _root(tmp_path)
@@ -373,7 +391,9 @@ def test_launch_elicitation_keeps_item_end_to_end(tmp_path, monkeypatch):
     rc = cli.main([])
     assert rc == 0
     assert "Gmail" in captured["mcp"]["mcpServers"]       # elicited always_keep re-kept the server
-    assert "always_keep" in (root / "smartctx" / "rules.toml").read_text()
+    assert "always_keep" in (tmp_path / ".smartctx" / "rules.toml").read_text()   # repo-scoped, not profile
+    assert (tmp_path / ".smartctx" / "config.toml").is_file()                     # first launch rule lightly seeds
+    assert not (root / "smartctx" / "rules.toml").exists()                        # profile left untouched
 
 def test_explain_reports_estimated_savings(tmp_path, monkeypatch, capsys):
     _root(tmp_path)                                       # 1 mcp + 1 plugin, no rules
@@ -402,6 +422,94 @@ def test_launch_prints_savings_line_to_stderr(tmp_path, monkeypatch, capsys):
     assert rc == 0
     err = capsys.readouterr().err
     assert "scoped out 2 of 2 prunable tools" in err and "tokens trimmed" in err
+
+def test_launch_nudges_when_unseeded(tmp_path, monkeypatch, capsys):
+    _root(tmp_path)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "root"))
+    monkeypatch.setenv("SMARTCTX_THRESHOLD", "0.99")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "make_model2vec_embed", lambda name: cli.keyword_embed)
+    monkeypatch.setattr(cli, "_interactive", lambda p: True)
+    monkeypatch.setattr("builtins.input", lambda *a, **k: "")     # skip elicitation -> stays unseeded
+    monkeypatch.setattr(cli.subprocess, "run", lambda *a, **k: _RC(0))
+    rc = cli.main([])
+    assert rc == 0
+    assert "smartctx init" in capsys.readouterr().err            # nudge to persist scoping
+
+def test_launch_no_nudge_when_seeded(tmp_path, monkeypatch, capsys):
+    _root(tmp_path)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "root"))
+    monkeypatch.setenv("SMARTCTX_THRESHOLD", "0.99")
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".smartctx").mkdir()
+    (tmp_path / ".smartctx" / "config.toml").write_text("threshold = 0.5\n")   # already seeded
+    monkeypatch.setattr(cli, "make_model2vec_embed", lambda name: cli.keyword_embed)
+    monkeypatch.setattr(cli, "_interactive", lambda p: True)
+    monkeypatch.setattr("builtins.input", lambda *a, **k: "")
+    monkeypatch.setattr(cli.subprocess, "run", lambda *a, **k: _RC(0))
+    rc = cli.main([])
+    assert rc == 0
+    err = capsys.readouterr().err
+    assert "smartctx init" not in err                            # seeded -> no nudge
+    assert "[enter] launch" not in err                           # seeded -> no gate prompt, fire-and-forget
+
+def test_launch_elicited_keep_auto_seeds_repo(tmp_path, monkeypatch):
+    root = _root(tmp_path)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
+    monkeypatch.setenv("SMARTCTX_THRESHOLD", "0.99")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "make_model2vec_embed", lambda name: cli.keyword_embed)
+    monkeypatch.setattr(cli, "_interactive", lambda p: True)
+    monkeypatch.setattr(cli, "_build_compiler", lambda cfg: None)   # no NL model -> k/d/s path
+    monkeypatch.setattr("builtins.input", lambda *a, **k: "d")      # drop always -> writes a repo rule
+    monkeypatch.setattr(cli.subprocess, "run", lambda *a, **k: _RC(0))
+    rc = cli.main([])
+    assert rc == 0
+    assert (tmp_path / ".smartctx" / "config.toml").is_file()       # first launch rule lightly seeds
+    assert "always_drop" in (tmp_path / ".smartctx" / "rules.toml").read_text()
+    assert (tmp_path / ".smartctx" / ".gitignore").read_text().strip().endswith("*")   # local, gitignored
+    assert not (root / "smartctx" / "rules.toml").exists()          # profile untouched
+
+def test_launch_gate_edit_recomposes_keep(tmp_path, monkeypatch):
+    root = _root(tmp_path)
+    (tmp_path / "README.md").write_text("# P\n\nA tool that does X.\n")   # goal from docs -> no goal prompt
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
+    monkeypatch.setenv("SMARTCTX_THRESHOLD", "0.99")     # everything dropped by default
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "make_model2vec_embed", lambda name: cli.keyword_embed)
+    monkeypatch.setattr(cli, "_interactive", lambda p: True)
+    monkeypatch.setattr(cli, "_elicit", lambda *a, **k: "undecided")   # skip per-item elicitation
+    monkeypatch.setattr(cli, "_can_raw", lambda: True)
+    answers = iter(["e", "n"])                            # gate: edit, then don't persist
+    monkeypatch.setattr("builtins.input", lambda *a, **k: next(answers, ""))
+    monkeypatch.setattr(cli, "_checkbox_select",
+                        lambda title, labels, **kw: [i for i, l in enumerate(labels) if "Gmail" in l])
+    captured = _capture_mcp_overlay(monkeypatch)
+    rc = cli.main([])
+    assert rc == 0
+    assert "Gmail" in captured["mcp"]["mcpServers"]       # edit re-kept the dropped server
+    assert not (tmp_path / ".smartctx" / "config.toml").exists()   # 'n' -> not persisted
+
+def test_launch_gate_edit_persists_seed(tmp_path, monkeypatch):
+    root = _root(tmp_path)
+    (tmp_path / "README.md").write_text("# P\n\nA tool that does X.\n")
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
+    monkeypatch.setenv("SMARTCTX_THRESHOLD", "0.99")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "make_model2vec_embed", lambda name: cli.keyword_embed)
+    monkeypatch.setattr(cli, "_interactive", lambda p: True)
+    monkeypatch.setattr(cli, "_elicit", lambda *a, **k: "undecided")
+    monkeypatch.setattr(cli, "_can_raw", lambda: True)
+    answers = iter(["e", "y"])                            # edit, then persist
+    monkeypatch.setattr("builtins.input", lambda *a, **k: next(answers, ""))
+    monkeypatch.setattr(cli, "_checkbox_select",
+                        lambda title, labels, **kw: [i for i, l in enumerate(labels) if "Gmail" in l])
+    monkeypatch.setattr(cli.subprocess, "run", lambda *a, **k: _RC(0))
+    rc = cli.main([])
+    assert rc == 0
+    assert (tmp_path / ".smartctx" / "config.toml").is_file()   # persisted -> seeded
+    rules = (tmp_path / ".smartctx" / "rules.toml").read_text()
+    assert "Gmail" in rules and "figma@x" in rules             # full keep/drop frozen as rules
 
 def test_doctor_reports_prunable_budget(tmp_path, monkeypatch, capsys):
     _root(tmp_path)                                       # 1 mcp + 1 plugin
@@ -538,6 +646,45 @@ def test_parse_selection():
     assert cli._parse_selection("1-", 3) is None          # malformed range
     assert cli._parse_selection("x", 3) is None
 
+def _keys(*seq):
+    it = iter(seq)
+    return lambda: next(it)
+
+def test_checkbox_default_all_selected_on_enter():
+    picks = cli._checkbox_select("t", ["a", "b", "c"], read_key=_keys("\r"), out=io.StringIO())
+    assert picks == [0, 1, 2]                             # everything on by default
+
+def test_checkbox_toggle_off_then_confirm():
+    picks = cli._checkbox_select("t", ["a", "b", "c"],
+                                 read_key=_keys("down", " ", "\r"), out=io.StringIO())
+    assert picks == [0, 2]                                # cursor to item 1, space deselects it
+
+def test_checkbox_all_none_toggle_returns_none():
+    picks = cli._checkbox_select("t", ["a", "b"], read_key=_keys("a", "\r"), out=io.StringIO())
+    assert picks is None                                  # 'a' clears all -> empty -> cancel
+
+def test_checkbox_quit_cancels():
+    assert cli._checkbox_select("t", ["a"], read_key=_keys("q"), out=io.StringIO()) is None
+
+def test_checkbox_ctrl_c_raises():
+    with pytest.raises(KeyboardInterrupt):               # Ctrl-C -> exit 130, not a quiet cancel
+        cli._checkbox_select("t", ["a"], read_key=_keys("\x03"), out=io.StringIO())
+
+def test_select_repos_falls_back_when_frame_taller_than_window(tmp_path, monkeypatch):
+    monkeypatch.setattr(cli, "_can_raw", lambda: True)   # pretend raw tty is available
+    import shutil
+    monkeypatch.setattr(shutil, "get_terminal_size", lambda default=(80, 24): os.terminal_size((80, 10)))
+    eligible = [tmp_path / f"p{i}" for i in range(20)]    # 20 + 4 > 10 rows -> typed fallback
+    monkeypatch.setattr(cli, "_ask", lambda prompt: "2")
+    picks = cli._select_repos(eligible, 0)
+    assert picks == [eligible[1]]                         # line path parsed the typed index
+
+def test_checkbox_wraps_and_reselects():
+    # up from top wraps to last, space selects it back after clearing all
+    picks = cli._checkbox_select("t", ["a", "b", "c"],
+                                 read_key=_keys("a", "up", " ", "\r"), out=io.StringIO())
+    assert picks == [2]
+
 def test_init_yes_seeds_config_and_rules(tmp_path, monkeypatch, capsys):
     import tomllib
     root = _root(tmp_path)                                # profile: Gmail mcp + figma@x plugin
@@ -619,3 +766,222 @@ def test_init_skip_repo_at_goal_prompt(tmp_path, monkeypatch):
     rc = cli.main(["init", str(repos)])
     assert rc == 0
     assert not (r1 / ".smartctx").exists()               # 's' skips before any write
+
+def test_init_no_arg_seeds_current_repo_not_children(tmp_path, monkeypatch):
+    root = _root(tmp_path); monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
+    monkeypatch.setattr(cli, "make_model2vec_embed", lambda name: cli.keyword_embed)
+    repo = tmp_path / "myrepo"; repo.mkdir()
+    child = _proj(repo, "subpkg")                         # a subfolder that must NOT be treated as a project
+    monkeypatch.chdir(repo)
+    rc = cli.main(["init", "--yes"])                      # no ROOT -> seed cwd itself
+    assert rc == 0
+    assert (repo / ".smartctx" / "config.toml").is_file()   # the repo itself is seeded
+    assert not (child / ".smartctx").exists()               # children are never descended into
+
+def test_init_no_arg_already_configured_nudges_update(tmp_path, monkeypatch, capsys):
+    root = _root(tmp_path); monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
+    repo = tmp_path / "myrepo"; repo.mkdir()
+    (repo / ".smartctx").mkdir(); (repo / ".smartctx" / "config.toml").write_text("threshold = 0.5\n")
+    monkeypatch.chdir(repo)
+    rc = cli.main(["init", "--yes"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "already configured" in out and "smartctx update" in out   # nudge toward update
+    assert not (repo / ".smartctx" / "rules.toml").exists()           # existing config untouched
+
+def test_init_dot_arg_bulk_seeds_children(tmp_path, monkeypatch):
+    root = _root(tmp_path); monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
+    monkeypatch.setattr(cli, "make_model2vec_embed", lambda name: cli.keyword_embed)
+    parent = tmp_path / "src"; parent.mkdir()
+    r1 = _proj(parent, "proj1"); r2 = _proj(parent, "proj2")
+    monkeypatch.chdir(parent)
+    rc = cli.main(["init", ".", "--yes"])                 # explicit ROOT '.' -> bulk over children
+    assert rc == 0
+    assert (r1 / ".smartctx" / "config.toml").is_file()
+    assert (r2 / ".smartctx" / "config.toml").is_file()
+
+def test_checkbox_preset_seeds_initial_ticks():
+    picks = cli._checkbox_select("t", ["a", "b", "c"], read_key=_keys("\r"),
+                                 out=io.StringIO(), preset=[True, False, True])
+    assert picks == [0, 2]                                # confirm respects the seeded state
+
+def test_checkbox_allow_empty_confirms_nothing():
+    picks = cli._checkbox_select("t", ["a", "b"], read_key=_keys("a", "\r"),
+                                 out=io.StringIO(), allow_empty=True)
+    assert picks == []                                   # 'a' clears all, Enter confirms keep-nothing
+
+def _prunable_items():
+    from smartctx.inventory import Item
+    return [Item(id="Gmail", kind="mcp", name="Gmail", description="Gmail"),
+            Item(id="figma@x", kind="plugin", name="figma@x", description="figma@x")]
+
+def test_review_keep_drop_toggle_flips_decision(monkeypatch):
+    import shutil
+    monkeypatch.setattr(cli, "_can_raw", lambda: True)
+    monkeypatch.setattr(shutil, "get_terminal_size", lambda default=(80, 24): os.terminal_size((80, 40)))
+    monkeypatch.setattr(cli, "_read_key", _keys("down", " ", "\r"))   # drop the 2nd (kept) item
+    prunable = _prunable_items()
+    kept = cli._review_keep_drop(Path("/x"), prunable, {"Gmail", "figma@x"})
+    assert kept == {"Gmail"}                              # figma@x toggled off
+
+def test_review_keep_drop_quit_skips_repo(monkeypatch):
+    import shutil
+    monkeypatch.setattr(cli, "_can_raw", lambda: True)
+    monkeypatch.setattr(shutil, "get_terminal_size", lambda default=(80, 24): os.terminal_size((80, 40)))
+    monkeypatch.setattr(cli, "_read_key", _keys("q"))
+    assert cli._review_keep_drop(Path("/x"), _prunable_items(), {"Gmail"}) is None
+
+def test_review_keep_drop_falls_back_to_auto_without_raw(monkeypatch):
+    monkeypatch.setattr(cli, "_can_raw", lambda: False)  # no raw tty -> accept auto, no key read
+    kept = cli._review_keep_drop(Path("/x"), _prunable_items(), {"Gmail"})
+    assert kept == {"Gmail"}
+
+def test_init_review_choice_is_what_gets_frozen(tmp_path, monkeypatch):
+    import tomllib
+    root = _root(tmp_path); monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
+    monkeypatch.setattr(cli, "make_model2vec_embed", lambda name: cli.keyword_embed)
+    monkeypatch.setattr(cli, "_discover_profiles", lambda active: [active])
+    repos = tmp_path / "repos"; r1 = _proj(repos, "proj1")
+    _fake_stdin(monkeypatch, tty=True)
+    monkeypatch.setattr(cli, "_select_repos", lambda eligible, already: eligible)
+    monkeypatch.setattr(cli, "_ask", lambda prompt: "")           # accept the goal
+    monkeypatch.setattr(cli, "_review_keep_drop", lambda repo, prunable, auto: {"Gmail"})
+    rc = cli.main(["init", str(repos)])
+    assert rc == 0
+    rules = tomllib.loads((r1 / ".smartctx" / "rules.toml").read_text())["rule"]
+    actions = {x["target"]: x["predicate"]["action"] for x in rules}
+    assert actions == {"Gmail": "always_keep", "figma@x": "always_drop"}  # review set frozen, not auto
+
+def test_init_summary_names_skipped_and_already(tmp_path, monkeypatch, capsys):
+    root = _root(tmp_path); monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
+    monkeypatch.setattr(cli, "make_model2vec_embed", lambda name: cli.keyword_embed)
+    monkeypatch.setattr(cli, "_discover_profiles", lambda active: [active])
+    repos = tmp_path / "repos"
+    _proj(repos, "proj1"); _proj(repos, "proj2")
+    pre = _proj(repos, "proj3")
+    (pre / ".smartctx").mkdir(); (pre / ".smartctx" / "config.toml").write_text("threshold = 0.5\n")
+    _fake_stdin(monkeypatch, tty=True)
+    monkeypatch.setattr(cli, "_select_repos", lambda eligible, already: [eligible[0]])  # only proj1
+    monkeypatch.setattr(cli, "_ask", lambda prompt: "")
+    monkeypatch.setattr(cli, "_review_keep_drop", lambda repo, prunable, auto: auto)
+    rc = cli.main(["init", str(repos)])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "proj2 (not selected)" in out                          # deselected repo named
+    assert "proj3 (already configured)" in out                    # pre-configured repo named
+
+def _seeded_repo(tmp_path, monkeypatch):
+    root = _root(tmp_path); monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
+    monkeypatch.setattr(cli, "make_model2vec_embed", lambda name: cli.keyword_embed)
+    repos = tmp_path / "repos"; r1 = _proj(repos, "proj1")
+    cli.main(["init", str(repos), "--yes"])              # seed proj1 first
+    return root, repos, r1
+
+def test_update_single_refreshes_machine_rules(tmp_path, monkeypatch):
+    import tomllib
+    _root_, _repos, r1 = _seeded_repo(tmp_path, monkeypatch)
+    monkeypatch.chdir(r1)
+    rc = cli.main(["update", "--yes"])
+    assert rc == 0
+    rules = tomllib.loads((r1 / ".smartctx" / "rules.toml").read_text())["rule"]
+    assert {x["target"] for x in rules} == {"Gmail", "figma@x"}
+    assert all("seeded by smartctx update" in x["nl"] for x in rules)   # regenerated by update
+
+def test_update_preserves_human_rule(tmp_path, monkeypatch):
+    import tomllib
+    _root_, _repos, r1 = _seeded_repo(tmp_path, monkeypatch)
+    human = ('[[rule]]\ntarget = "Gmail"\nnl = "team pins gmail"\n[rule.predicate]\n'
+             'action = "always_keep"\nmatch = []\nmatch_mode = "any"\n')
+    (r1 / ".smartctx" / "rules.toml").write_text(human)   # hand-authored, no seed marker
+    monkeypatch.chdir(r1)
+    rc = cli.main(["update", "--yes"])
+    assert rc == 0
+    rules = {x["target"]: x for x in tomllib.loads((r1 / ".smartctx" / "rules.toml").read_text())["rule"]}
+    assert rules["Gmail"]["nl"] == "team pins gmail"      # human rule untouched
+    assert "seeded by smartctx update" in rules["figma@x"]["nl"]   # the rest regenerated
+
+def test_update_flip_overrides_human_rule(tmp_path, monkeypatch):
+    import tomllib
+    _root_, _repos, r1 = _seeded_repo(tmp_path, monkeypatch)
+    human = ('[[rule]]\ntarget = "Gmail"\nnl = "team pins gmail"\n[rule.predicate]\n'
+             'action = "always_keep"\nmatch = []\nmatch_mode = "any"\n')
+    (r1 / ".smartctx" / "rules.toml").write_text(human)
+    monkeypatch.chdir(r1)
+    _fake_stdin(monkeypatch, tty=True)
+    monkeypatch.setattr(cli, "_discover_profiles", lambda active: [active])
+    monkeypatch.setattr(cli, "_ask", lambda prompt: "")   # accept the goal
+    seen = {}
+    def _stub(repo, prunable, kept, label=""):            # capture the preset, then drop everything
+        seen["kept"] = set(kept); return set()
+    monkeypatch.setattr(cli, "_review_keep_drop", _stub)
+    rc = cli.main(["update"])
+    assert rc == 0
+    assert "Gmail" in seen["kept"]                        # preset honored the human keep rule ("mostrale")
+    rules = [x for x in tomllib.loads((r1 / ".smartctx" / "rules.toml").read_text())["rule"]
+             if x["target"] == "Gmail"]
+    assert len(rules) == 1                                # human rule replaced, not duplicated
+    assert rules[0]["predicate"]["action"] == "always_drop"
+    assert "seeded by smartctx update" in rules[0]["nl"]  # now a machine rule
+
+def test_update_keeps_config_pinned_even_if_unticked(tmp_path, monkeypatch):
+    import tomllib
+    root = _root(tmp_path); monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
+    monkeypatch.setenv("SMARTCTX_ALWAYS_KEEP", "Gmail")   # config pin — wins over rules at launch
+    monkeypatch.setattr(cli, "make_model2vec_embed", lambda name: cli.keyword_embed)
+    repos = tmp_path / "repos"; r1 = _proj(repos, "proj1")
+    cli.main(["init", str(repos), "--yes"])
+    monkeypatch.chdir(r1)
+    _fake_stdin(monkeypatch, tty=True)
+    monkeypatch.setattr(cli, "_discover_profiles", lambda active: [active])
+    monkeypatch.setattr(cli, "_ask", lambda prompt: "")
+    seen = {}
+    def _stub(repo, prunable, kept, label=""):
+        seen["ids"] = {i.id for i in prunable}; return set()   # untick everything offered
+    monkeypatch.setattr(cli, "_review_keep_drop", _stub)
+    rc = cli.main(["update"])
+    assert rc == 0
+    assert "Gmail" not in seen["ids"]                    # pinned tool never offered in the picker
+    rules = {x["target"]: x["predicate"]["action"] for x in
+             tomllib.loads((r1 / ".smartctx" / "rules.toml").read_text())["rule"]}
+    assert rules.get("Gmail") != "always_drop"           # config pin not overridden to a phantom drop
+
+def test_update_bulk_reports_unseeded(tmp_path, monkeypatch, capsys):
+    root = _root(tmp_path); monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
+    monkeypatch.setattr(cli, "make_model2vec_embed", lambda name: cli.keyword_embed)
+    repos = tmp_path / "repos"; r1 = _proj(repos, "proj1"); _proj(repos, "proj2")
+    cli.main(["init", str(repos), "--yes"])              # seeds both
+    import shutil as _sh; _sh.rmtree(repos / "proj2" / ".smartctx")   # proj2 no longer seeded
+    rc = cli.main(["update", str(repos), "--yes"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "updated 1 project" in out
+    assert "proj2 (not seeded — run init)" in out
+
+def test_update_single_refuses_unseeded(tmp_path, monkeypatch, capsys):
+    root = _root(tmp_path); monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
+    bare = tmp_path / "bare"; bare.mkdir()
+    monkeypatch.chdir(bare)
+    rc = cli.main(["update", "--yes"])
+    assert rc == 0
+    assert "isn't smartctx-seeded" in capsys.readouterr().err
+    assert not (bare / ".smartctx").exists()
+
+def test_update_redetects_goal_fresh(tmp_path, monkeypatch):
+    _root_, _repos, r1 = _seeded_repo(tmp_path, monkeypatch)
+    (r1 / ".smartctx" / "goal").write_text("stale cached goal\n")   # what a launch would reuse
+    (r1 / "pyproject.toml").write_text('[project]\ndescription = "a fresh purpose"\n')
+    monkeypatch.chdir(r1)
+    rc = cli.main(["update", "--yes"])
+    assert rc == 0
+    goal = (r1 / ".smartctx" / "goal").read_text().strip()
+    assert "fresh purpose" in goal and "stale" not in goal   # cache bypassed, re-inferred
+
+def test_init_verbose_report_lists_each_tool(tmp_path, monkeypatch, capsys):
+    root = _root(tmp_path); monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
+    monkeypatch.setattr(cli, "make_model2vec_embed", lambda name: cli.keyword_embed)
+    repos = tmp_path / "repos"; _proj(repos, "proj1")
+    rc = cli.main(["init", str(repos), "--yes"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Gmail" in out and "figma@x" in out            # every prunable tool named in the receipt
+    assert "kept /" in out and "dropped)" in out          # per-repo count line present

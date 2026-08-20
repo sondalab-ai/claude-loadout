@@ -50,6 +50,9 @@ def _rules_for(item: Item, rules: list[Rule]) -> list[Rule]:
 def has_rule(item: Item, rules: list[Rule]) -> bool:
     return bool(_rules_for(item, rules))
 
+def rules_for(item: Item, rules: list[Rule]) -> list[Rule]:   # public: governing rules, most specific first
+    return _rules_for(item, rules)
+
 def apply_rules(items: list[Item], rules: list[Rule], context: str) -> RuleOutcome:
     keep, drop, undecided = [], [], []
     for item in items:
@@ -63,6 +66,9 @@ def apply_rules(items: list[Item], rules: list[Rule], context: str) -> RuleOutco
 
 def _rules_file(config_root: Path) -> Path:
     return config_root / "smartctx" / "rules.toml"
+
+def profile_rules_file(config_root: Path) -> Path:   # public accessor for the profile-level rules file
+    return _rules_file(config_root)
 
 def _parse(path: Path) -> list[Rule]:
     try:
@@ -86,6 +92,9 @@ def _parse(path: Path) -> list[Rule]:
                                             match_mode=p.get("match_mode", "any"))))
     return out
 
+def read_rules(path: Path) -> list[Rule]:            # public: parse one rules.toml (absent -> [])
+    return _parse(path)
+
 def load_rules(config_root: Path, cwd: Path) -> list[Rule]:
     user = {r.target: r for r in _parse(_rules_file(config_root))}
     repo = {r.target: r for r in _parse(cwd / ".smartctx" / "rules.toml")}
@@ -106,11 +115,14 @@ def _rule_block(rule: Rule) -> str:
             f'match = [{match_list}]\n'
             f'match_mode = "{p.match_mode}"\n')
 
-def save_rule(config_root: Path, rule: Rule) -> None:
-    path = _rules_file(config_root)
+def append_rule(path: Path, rule: Rule) -> None:
+    # Append one rule to an arbitrary rules.toml (profile or a repo's local file).
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a") as fh:
         fh.write(_rule_block(rule))
+
+def save_rule(config_root: Path, rule: Rule) -> None:
+    append_rule(_rules_file(config_root), rule)   # profile-scoped: applies across the profile's repos
 
 def write_rules(path: Path, rules: list[Rule], header: str = "") -> None:
     # Full write to an arbitrary rules.toml (init seeds a fresh repo file, not the profile).
