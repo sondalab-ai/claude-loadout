@@ -174,17 +174,16 @@ def _scoped_plan(passthrough: list[str], cwd: Path, config_root_override: Path |
     # Launch-time keep/drop review is the pre-launch gate (a single checkbox over every prunable
     # tool), not a per-item prompt — see _launch_gate. `smartctx rules` remains the per-item /
     # natural-language authoring path.
-    def _finish(kept, dropped):                    # cost accounting + compose for a keep/drop decision
+    def _finish(kept, dropped):                    # compose + cost accounting for a keep/drop decision
+        plan = compose(kept, items, cfg.config_root, passthrough, cwd=cwd,
+                       global_config_path=cfg.global_config_path,
+                       launch_config_dir=_explicit_profile(config_root_override))
         measured = _measure.load_costs(cfg.config_root)
         saved = _savings.estimate_savings(kept, [i for i, _ in dropped], cfg.token_costs, measured)
         mcp_ids = {i.id for i in items if i.kind == "mcp"}
         connectors = sorted(_measure.connector_costs(measured, mcp_ids).items(), key=lambda kv: -kv[1])
         scope = _Scope(context, gsource, gconf, cfg.threshold, kept, dropped,
                        saved, connectors, bool(measured))
-        plan = compose(kept, items, cfg.config_root, passthrough, cwd=cwd,
-                       global_config_path=cfg.global_config_path,
-                       launch_config_dir=_explicit_profile(config_root_override),
-                       session_header=f"smartctx: {_savings_line(scope)}")   # shown inside the session
         return scope, plan
     prunable = [i for i in items if i.kind in _savings.PRUNABLE]
     editable = [i for i in prunable if i.id not in pinned_ids]     # pinned always stay; not offered
@@ -957,15 +956,14 @@ def _maybe_persist_edit(gate: _EditGate, selected_ids: set) -> None:
 def _launch_gate(scope: _Scope, plan, gate: _EditGate, passthrough: list[str], no_gate: bool = False):
     # Interactive pre-launch review: read the summary, optionally edit keep/drop, then launch.
     # Returns the (possibly re-composed) (scope, plan) to run. Non-interactive -> pass through.
-    # The scoping summary itself is shown inside the session (SessionStart hook), not flashed here.
     if gate is None or not (_interactive(passthrough) and (scope.savings.dropped or scope.connectors)):
         return scope, plan
+    _warn(_savings_line(scope))
     seeded = _is_seeded(gate.cwd)
     if not seeded:
         _warn("this repo isn't seeded — run `smartctx init` to persist scoping for it")
     if seeded or no_gate:                            # settled config, or opted out — no prompt, just launch
         return scope, plan
-    _warn(_savings_line(scope))                      # unseeded gate: show the summary for the decision
     while True:
         choice = _ask("  [enter] launch · [e] edit keep/drop · [q] cancel? ").strip().lower()
         if choice == "q":

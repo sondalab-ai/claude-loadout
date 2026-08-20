@@ -304,17 +304,12 @@ this repo isn't seeded — run `smartctx init` to persist scoping for it
   launches and `smartctx update` respect them) — decline to keep the edit to just this session.
 - **q** cancels without launching.
 
-**Once the repo is seeded** — you saved from the gate, or ran `smartctx init` — the pause stops and
-smartctx launches straight through. Re-tune a seeded repo with `smartctx update`. Non-interactive
-launches (`-p`, pipelines) never pause.
+**Once the repo is seeded** — you saved from the gate, or ran `smartctx init` — the pause stops:
+smartctx prints the one-line estimate and launches straight through. Re-tune a seeded repo with
+`smartctx update`. Non-interactive launches (`-p`, pipelines) never pause.
 
-The scoping summary isn't lost when there's no pause: smartctx surfaces it **inside the session**
-via a `SessionStart` hook (the same mechanism your own hooks use), so it shows up as start-of-session
-context instead of flashing past on stderr before Claude's UI takes the screen.
-
-To skip the pause without seeding, pass `--no-gate` (or set `SMARTCTX_NO_GATE=1`): the *not seeded*
-nudge still prints, but smartctx launches immediately without prompting (the summary still shows
-in-session).
+To skip the pause without seeding, pass `--no-gate` (or set `SMARTCTX_NO_GATE=1`): smartctx still
+prints the estimate and the *not seeded* nudge, but launches immediately without prompting.
 
 ### Seeding repos — `smartctx init`
 

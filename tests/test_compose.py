@@ -33,24 +33,3 @@ def test_compose_emits_project_scoped_server_def(tmp_path: Path):
     mcp = json.loads(mcp_path.read_text())
     assert mcp["mcpServers"] == {"Scoped": {"command": "z"}}   # kept server survives to launch
     mcp_path.unlink(); Path(plan.argv[plan.argv.index("--settings") + 1]).unlink()
-
-def test_compose_session_header_injects_start_hook(tmp_path: Path):
-    root = tmp_path / "root"; root.mkdir()
-    (root / ".claude.json").write_text('{"mcpServers": {}}')
-    item = Item("figma@x", "plugin", "figma", "")
-    plan = compose([], [item], root, passthrough=[], session_header="smartctx: scoped out 1 of 1")
-    settings = json.loads(Path(plan.argv[plan.argv.index("--settings") + 1]).read_text())
-    cmd = settings["hooks"]["SessionStart"][0]["hooks"][0]["command"]
-    import shlex
-    header_file = Path(shlex.split(cmd)[1])                 # `cat <header_file>`
-    assert cmd.startswith("cat ")
-    assert header_file.read_text() == "smartctx: scoped out 1 of 1"   # summary carried into the session
-    assert header_file in plan.tmp_paths                    # cleaned up after launch
-
-def test_compose_without_header_has_no_hooks(tmp_path: Path):
-    root = tmp_path / "root"; root.mkdir()
-    (root / ".claude.json").write_text('{"mcpServers": {}}')
-    item = Item("figma@x", "plugin", "figma", "")
-    plan = compose([], [item], root, passthrough=[])
-    settings = json.loads(Path(plan.argv[plan.argv.index("--settings") + 1]).read_text())
-    assert "hooks" not in settings                          # no header -> no injected hook
