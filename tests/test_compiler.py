@@ -2,17 +2,17 @@ import json
 from smartctx.inventory import Item
 from smartctx.compiler import compile_rule, build_prompt
 
-_ITEM = Item("camunda-ds", "plugin", "camunda-ds", "corporate design system")
+_ITEM = Item("design-system-ds", "plugin", "design-system-ds", "corporate design system")
 
 def test_build_prompt_mentions_item_and_actions():
-    p = build_prompt("corporate, only for camunda work", _ITEM)
-    assert "camunda-ds" in p and "keep_if" in p and "drop_if" in p
+    p = build_prompt("corporate, only for design system work", _ITEM)
+    assert "design-system-ds" in p and "keep_if" in p and "drop_if" in p
 
 def test_compile_rule_parses_valid_json():
     def fake(_prompt):
-        return json.dumps({"action": "keep_if", "match": ["camunda", "bpmn"], "match_mode": "any"})
-    pred = compile_rule("corporate only for camunda", _ITEM, compile_fn=fake)
-    assert pred.action == "keep_if" and pred.match == ("camunda", "bpmn")
+        return json.dumps({"action": "keep_if", "match": ["design system", "frontend"], "match_mode": "any"})
+    pred = compile_rule("corporate only for design system", _ITEM, compile_fn=fake)
+    assert pred.action == "keep_if" and pred.match == ("design system", "frontend")
 
 def test_compile_rule_retries_then_gives_up():
     calls = {"n": 0}

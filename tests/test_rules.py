@@ -3,30 +3,30 @@ from smartctx.inventory import Item
 from smartctx.rules import Predicate, Rule, evaluate, apply_rules, has_rule, load_rules, save_rule
 
 def _items():
-    return [Item("camunda-ds", "plugin", "camunda-ds", "corporate design system"),
+    return [Item("design-system-ds", "plugin", "design-system-ds", "corporate design system"),
             Item("astro", "skill", "astro", "astrophotography")]
 
 def test_evaluate_semantics():
-    keep_if = Predicate("keep_if", ("camunda", "bpmn"), "any")
-    assert evaluate(keep_if, "camunda frontend work") == "keep"
+    keep_if = Predicate("keep_if", ("design system", "frontend"), "any")
+    assert evaluate(keep_if, "design system frontend work") == "keep"
     assert evaluate(keep_if, "astro imaging") == "drop"          # keep_if no-match -> drop
     drop_if = Predicate("drop_if", ("astro",), "any")
     assert evaluate(drop_if, "astro imaging") == "drop"
-    assert evaluate(drop_if, "camunda work") == "undecided"      # drop_if no-match -> undecided
+    assert evaluate(drop_if, "design system work") == "undecided"      # drop_if no-match -> undecided
     assert evaluate(Predicate("always_keep", (), "any"), "anything") == "keep"
 
 def test_apply_rules_partitions_items():
-    rules = [Rule("camunda-*", "corp", Predicate("keep_if", ("camunda",), "any"))]
+    rules = [Rule("design-system-*", "corp", Predicate("keep_if", ("design system",), "any"))]
     out = apply_rules(_items(), rules, context="astro imaging")
-    assert [i.id for i in out.forced_drop] == ["camunda-ds"]     # keep_if no-match -> drop
+    assert [i.id for i in out.forced_drop] == ["design-system-ds"]     # keep_if no-match -> drop
     assert [i.id for i in out.undecided] == ["astro"]            # no rule -> undecided
     assert out.forced_keep == ()
 
 def test_exact_id_beats_glob():
-    rules = [Rule("camunda-*", "g", Predicate("always_drop", (), "any")),
-             Rule("camunda-ds", "e", Predicate("always_keep", (), "any"))]
+    rules = [Rule("design-system-*", "g", Predicate("always_drop", (), "any")),
+             Rule("design-system-ds", "e", Predicate("always_keep", (), "any"))]
     out = apply_rules(_items()[:1], rules, context="x")
-    assert [i.id for i in out.forced_keep] == ["camunda-ds"]
+    assert [i.id for i in out.forced_keep] == ["design-system-ds"]
 
 def test_load_and_save_roundtrip(tmp_path: Path):
     root = tmp_path / "root"; (root / "smartctx").mkdir(parents=True)

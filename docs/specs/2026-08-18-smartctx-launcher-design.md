@@ -217,11 +217,11 @@ A rule binds an item id/glob to NL text and a compiled predicate:
 ```toml
 # $CLAUDE_CONFIG_DIR/smartctx/rules.toml  (user)  and/or  ./.smartctx/rules.toml (repo)
 [[rule]]
-target = "camunda-*"
-nl = "corporate design-system plugin — only for camunda / bpmn / work sessions"
+target = "design-system-*"
+nl = "corporate design-system plugin — only for work sessions"
 [rule.predicate]
 action = "keep_if"          # keep_if | drop_if | always_keep | always_drop
-match = ["camunda", "bpmn", "work", "orchestration"]
+match = ["design system", "frontend", "work", "ui"]
 match_mode = "any"          # any | all
 ```
 

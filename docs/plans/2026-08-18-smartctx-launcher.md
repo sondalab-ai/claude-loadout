@@ -728,30 +728,30 @@ from smartctx.inventory import Item
 from smartctx.rules import Predicate, Rule, evaluate, apply_rules, has_rule, load_rules, save_rule
 
 def _items():
-    return [Item("camunda-ds", "plugin", "camunda-ds", "corporate design system"),
+    return [Item("design-system-ds", "plugin", "design-system-ds", "corporate design system"),
             Item("astro", "skill", "astro", "astrophotography")]
 
 def test_evaluate_semantics():
-    keep_if = Predicate("keep_if", ("camunda", "bpmn"), "any")
-    assert evaluate(keep_if, "camunda frontend work") == "keep"
+    keep_if = Predicate("keep_if", ("design system", "frontend"), "any")
+    assert evaluate(keep_if, "design system frontend work") == "keep"
     assert evaluate(keep_if, "astro imaging") == "drop"          # keep_if no-match -> drop
     drop_if = Predicate("drop_if", ("astro",), "any")
     assert evaluate(drop_if, "astro imaging") == "drop"
-    assert evaluate(drop_if, "camunda work") == "undecided"      # drop_if no-match -> undecided
+    assert evaluate(drop_if, "design system work") == "undecided"      # drop_if no-match -> undecided
     assert evaluate(Predicate("always_keep", (), "any"), "anything") == "keep"
 
 def test_apply_rules_partitions_items():
-    rules = [Rule("camunda-*", "corp", Predicate("keep_if", ("camunda",), "any"))]
+    rules = [Rule("design-system-*", "corp", Predicate("keep_if", ("design system",), "any"))]
     out = apply_rules(_items(), rules, context="astro imaging")
-    assert [i.id for i in out.forced_drop] == ["camunda-ds"]     # keep_if no-match -> drop
+    assert [i.id for i in out.forced_drop] == ["design-system-ds"]     # keep_if no-match -> drop
     assert [i.id for i in out.undecided] == ["astro"]            # no rule -> undecided
     assert out.forced_keep == ()
 
 def test_exact_id_beats_glob():
-    rules = [Rule("camunda-*", "g", Predicate("always_drop", (), "any")),
-             Rule("camunda-ds", "e", Predicate("always_keep", (), "any"))]
+    rules = [Rule("design-system-*", "g", Predicate("always_drop", (), "any")),
+             Rule("design-system-ds", "e", Predicate("always_keep", (), "any"))]
     out = apply_rules(_items()[:1], rules, context="x")
-    assert [i.id for i in out.forced_keep] == ["camunda-ds"]
+    assert [i.id for i in out.forced_keep] == ["design-system-ds"]
 
 def test_load_and_save_roundtrip(tmp_path: Path):
     root = tmp_path / "root"; (root / "smartctx").mkdir(parents=True)
@@ -904,17 +904,17 @@ import json
 from smartctx.inventory import Item
 from smartctx.compiler import compile_rule, build_prompt
 
-_ITEM = Item("camunda-ds", "plugin", "camunda-ds", "corporate design system")
+_ITEM = Item("design-system-ds", "plugin", "design-system-ds", "corporate design system")
 
 def test_build_prompt_mentions_item_and_actions():
-    p = build_prompt("corporate, only for camunda work", _ITEM)
-    assert "camunda-ds" in p and "keep_if" in p and "drop_if" in p
+    p = build_prompt("corporate, only for design system work", _ITEM)
+    assert "design-system-ds" in p and "keep_if" in p and "drop_if" in p
 
 def test_compile_rule_parses_valid_json():
     def fake(_prompt):
-        return json.dumps({"action": "keep_if", "match": ["camunda", "bpmn"], "match_mode": "any"})
-    pred = compile_rule("corporate only for camunda", _ITEM, compile_fn=fake)
-    assert pred.action == "keep_if" and pred.match == ("camunda", "bpmn")
+        return json.dumps({"action": "keep_if", "match": ["design system", "frontend"], "match_mode": "any"})
+    pred = compile_rule("corporate only for design system", _ITEM, compile_fn=fake)
+    assert pred.action == "keep_if" and pred.match == ("design system", "frontend")
 
 def test_compile_rule_retries_then_gives_up():
     calls = {"n": 0}
