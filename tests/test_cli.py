@@ -394,11 +394,20 @@ def test_launch_no_gate_env_suppresses_prompt(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(cli, "make_model2vec_embed", lambda name: cli.keyword_embed)
     monkeypatch.setattr(cli, "_interactive", lambda p: True)
     monkeypatch.setattr("builtins.input", lambda *a, **k: pytest.fail("no-gate must not prompt"))
-    monkeypatch.setattr(cli.subprocess, "run", lambda *a, **k: _RC(0))
+    seen = {}
+    def _capture(argv, **k):
+        import shlex
+        settings = json.loads(Path(argv[argv.index("--settings") + 1]).read_text())
+        hook = settings["hooks"]["SessionStart"][0]["hooks"][0]["command"]   # `cat <header_file>`
+        seen["header"] = Path(shlex.split(hook)[1]).read_text()   # read before finally-cleanup
+        return _RC(0)
+    monkeypatch.setattr(cli.subprocess, "run", _capture)
     rc = cli.main([])
     assert rc == 0
     err = capsys.readouterr().err
-    assert "scoped out" in err and "smartctx init" in err   # summary + nudge still shown
+    assert "smartctx init" in err                        # nudge still on stderr
+    assert "scoped out" not in err                        # summary no longer flashed pre-launch
+    assert "scoped out" in seen["header"]                 # summary carried into the session instead
     assert "[enter] launch" not in err                      # but no interactive gate
 
 def test_explain_reports_estimated_savings(tmp_path, monkeypatch, capsys):
