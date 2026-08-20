@@ -520,3 +520,102 @@ def test_elicit_without_rule_model_skips_nl_prompt(tmp_path, monkeypatch, capsys
     assert "[k]eep always" in joined                     # goes straight to structured choice
     assert "no rule model configured" in capsys.readouterr().err   # upfront guidance shown
     assert "Gmail" in captured["mcp"]["mcpServers"]       # [k]eep re-kept the server
+
+def _proj(base, name):
+    r = base / name; r.mkdir(parents=True); return r        # any subdir is a project (no .git needed)
+
+def _fake_stdin(monkeypatch, *, tty):
+    monkeypatch.setattr(cli.sys, "stdin",
+                        type("S", (), {"isatty": lambda self: tty})())
+
+def test_parse_selection():
+    assert cli._parse_selection("all", 3) == {1, 2, 3}
+    assert cli._parse_selection("1,3", 3) == {1, 3}
+    assert cli._parse_selection("2-4", 5) == {2, 3, 4}
+    assert cli._parse_selection("1 2", 3) == {1, 2}
+    assert cli._parse_selection("", 3) is None
+    assert cli._parse_selection("9", 3) is None          # out of range
+    assert cli._parse_selection("1-", 3) is None          # malformed range
+    assert cli._parse_selection("x", 3) is None
+
+def test_init_yes_seeds_config_and_rules(tmp_path, monkeypatch, capsys):
+    import tomllib
+    root = _root(tmp_path)                                # profile: Gmail mcp + figma@x plugin
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
+    monkeypatch.setattr(cli, "make_model2vec_embed", lambda name: cli.keyword_embed)
+    repos = tmp_path / "repos"; r1 = _proj(repos, "proj1")
+    rc = cli.main(["init", str(repos), "--yes"])
+    assert rc == 0
+    cfg = (r1 / ".smartctx" / "config.toml").read_text()
+    assert "threshold" in cfg and "model_name" in cfg
+    rules = tomllib.loads((r1 / ".smartctx" / "rules.toml").read_text())["rule"]
+    actions = {x["target"]: x["predicate"]["action"] for x in rules}
+    assert set(actions) == {"Gmail", "figma@x"}          # only prunable kinds frozen
+    assert (r1 / ".smartctx" / ".gitignore").read_text().strip().endswith("*")   # local, gitignored
+    assert all(a in ("always_keep", "always_drop") for a in actions.values())
+    assert (r1 / ".smartctx" / "goal").is_file()
+
+def test_init_skips_already_configured(tmp_path, monkeypatch, capsys):
+    root = _root(tmp_path); monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
+    repos = tmp_path / "repos"; r1 = _proj(repos, "proj1")
+    (r1 / ".smartctx").mkdir(); (r1 / ".smartctx" / "config.toml").write_text("threshold = 0.5\n")
+    rc = cli.main(["init", str(repos), "--yes"])
+    assert rc == 0
+    assert "already configured" in capsys.readouterr().out
+    assert not (r1 / ".smartctx" / "rules.toml").exists()  # existing config left untouched
+
+def test_init_skips_repo_with_only_authored_rules(tmp_path, monkeypatch, capsys):
+    root = _root(tmp_path); monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
+    repos = tmp_path / "repos"; r1 = _proj(repos, "proj1")
+    (r1 / ".smartctx").mkdir()
+    authored = '[[rule]]\ntarget = "Gmail"\nnl = "team"\n[rule.predicate]\naction = "always_keep"\nmatch = []\nmatch_mode = "any"\n'
+    (r1 / ".smartctx" / "rules.toml").write_text(authored)   # committed rules, no config.toml
+    rc = cli.main(["init", str(repos), "--yes"])
+    assert rc == 0
+    assert (r1 / ".smartctx" / "rules.toml").read_text() == authored   # never clobbered
+    assert not (r1 / ".smartctx" / "config.toml").exists()
+
+def test_init_non_tty_without_yes_is_noop(tmp_path, monkeypatch, capsys):
+    root = _root(tmp_path); monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
+    repos = tmp_path / "repos"; r1 = _proj(repos, "proj1")
+    _fake_stdin(monkeypatch, tty=False)
+    rc = cli.main(["init", str(repos)])
+    assert rc == 0 and "interactive terminal" in capsys.readouterr().err
+    assert not (r1 / ".smartctx").exists()
+
+def test_init_interactive_selects_subset(tmp_path, monkeypatch):
+    root = _root(tmp_path); monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
+    monkeypatch.setattr(cli, "make_model2vec_embed", lambda name: cli.keyword_embed)
+    monkeypatch.setattr(cli, "_discover_profiles", lambda active: [active])
+    repos = tmp_path / "repos"; r1 = _proj(repos, "proj1"); r2 = _proj(repos, "proj2")
+    _fake_stdin(monkeypatch, tty=True)
+    answers = iter(["1", ""])                            # pick repo 1, then accept its goal
+    monkeypatch.setattr(cli, "_ask", lambda prompt: next(answers))
+    rc = cli.main(["init", str(repos)])
+    assert rc == 0
+    assert (r1 / ".smartctx" / "config.toml").is_file()
+    assert not (r2 / ".smartctx" / "config.toml").exists()   # unselected repo untouched
+
+def test_init_goal_override_persists(tmp_path, monkeypatch):
+    root = _root(tmp_path); monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
+    monkeypatch.setattr(cli, "make_model2vec_embed", lambda name: cli.keyword_embed)
+    monkeypatch.setattr(cli, "_discover_profiles", lambda active: [active])
+    repos = tmp_path / "repos"; r1 = _proj(repos, "proj1")
+    _fake_stdin(monkeypatch, tty=True)
+    answers = iter(["all", "frontend work"])             # select all, override goal
+    monkeypatch.setattr(cli, "_ask", lambda prompt: next(answers))
+    rc = cli.main(["init", str(repos)])
+    assert rc == 0
+    assert (r1 / ".smartctx" / "goal").read_text().strip() == "frontend work"
+
+def test_init_skip_repo_at_goal_prompt(tmp_path, monkeypatch):
+    root = _root(tmp_path); monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
+    monkeypatch.setattr(cli, "make_model2vec_embed", lambda name: cli.keyword_embed)
+    monkeypatch.setattr(cli, "_discover_profiles", lambda active: [active])
+    repos = tmp_path / "repos"; r1 = _proj(repos, "proj1")
+    _fake_stdin(monkeypatch, tty=True)
+    answers = iter(["all", "s"])                         # select all, then skip the repo
+    monkeypatch.setattr(cli, "_ask", lambda prompt: next(answers))
+    rc = cli.main(["init", str(repos)])
+    assert rc == 0
+    assert not (r1 / ".smartctx").exists()               # 's' skips before any write

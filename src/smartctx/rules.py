@@ -98,14 +98,21 @@ def _esc(s: str) -> str:                            # keep appended TOML basic s
         _ESC.get(c, f"\\u{ord(c):04x}" if ord(c) < 0x20 or ord(c) == 0x7f else c)
         for c in s)                                 # escape C0 controls + DEL (TOML forbids raw)
 
+def _rule_block(rule: Rule) -> str:
+    p = rule.predicate
+    match_list = ", ".join(f'"{_esc(m)}"' for m in p.match)
+    return (f'\n[[rule]]\ntarget = "{_esc(rule.target)}"\nnl = "{_esc(rule.nl)}"\n'
+            f'[rule.predicate]\naction = "{p.action}"\n'
+            f'match = [{match_list}]\n'
+            f'match_mode = "{p.match_mode}"\n')
+
 def save_rule(config_root: Path, rule: Rule) -> None:
     path = _rules_file(config_root)
     path.parent.mkdir(parents=True, exist_ok=True)
-    p = rule.predicate
-    match_list = ", ".join(f'"{_esc(m)}"' for m in p.match)
-    block = (f'\n[[rule]]\ntarget = "{_esc(rule.target)}"\nnl = "{_esc(rule.nl)}"\n'
-             f'[rule.predicate]\naction = "{p.action}"\n'
-             f'match = [{match_list}]\n'
-             f'match_mode = "{p.match_mode}"\n')
     with path.open("a") as fh:
-        fh.write(block)
+        fh.write(_rule_block(rule))
+
+def write_rules(path: Path, rules: list[Rule], header: str = "") -> None:
+    # Full write to an arbitrary rules.toml (init seeds a fresh repo file, not the profile).
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(header + "".join(_rule_block(r) for r in rules))

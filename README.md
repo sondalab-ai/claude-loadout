@@ -275,6 +275,50 @@ You rarely need to hand-write the TOML. Two ways to author rules interactively:
 With both in place, your plain-language answer is compiled into a rule by the local model. If a
 particular answer can't be translated, that one item falls back to the *keep / drop / skip* choice.
 
+### Seeding many repos at once — `smartctx init`
+
+`smartctx rules` scopes one repo interactively. When you have a directory full of projects,
+`smartctx init` seeds them in bulk — writing each project's `.smartctx/config.toml` and
+`.smartctx/rules.toml` so a whole machine gets sensible scoping without launching Claude in every
+checkout first.
+
+```sh
+smartctx init            # seed every project folder under the current directory
+smartctx init ~/src      # seed under a specific root
+```
+
+Discovery is deliberately simple: **every direct subfolder of `ROOT`** is treated as a project
+(dotfile dirs like `.git` are ignored). For each project you keep:
+
+1. **Picks the subset.** Projects that already carry a `.smartctx/config.toml` *or* an authored
+   `.smartctx/rules.toml` are shown as *already configured* and skipped (never clobbered). From the
+   rest you choose which to seed (`1,3`, ranges like `2-4`, or `all`; empty cancels).
+2. **Confirms the profile.** If you run more than one Claude profile (`~/.claude`,
+   `~/.claude-perso`, …), each project asks which one to inventory against — with a sticky default,
+   so a work cluster and a personal cluster each take one keypress to switch. The chosen profile
+   decides which tools exist, and therefore which rules get written.
+3. **Confirms the goal.** smartctx shows the goal it auto-detected for the project; press enter to
+   accept, type to override, or `s` to skip that project.
+
+Seeded files are **local, not committed**: init writes a `.smartctx/.gitignore` that ignores the
+whole directory, so the generated (machine-derived) config never lands in git. This is the opposite
+of a rule you author by hand with `smartctx rules`, which stays shareable — bulk-seeded scoping is
+per-machine, hand-authored scoping is for the team.
+
+For each seeded project it ranks the profile's tools against that goal and freezes the keep/drop
+decision into `rules.toml` (only for the kinds launches actually prune — MCP servers and plugins).
+`config.toml` gets the resolved `threshold` and `model_name`. Pass **`--yes`** to run
+non-interactively (every eligible project, auto-detected goals, active profile) — required when
+there's no terminal, e.g. in a script.
+
+> [!NOTE]
+> The frozen decisions come from the *auto-detected* goal, which can be low-confidence for a project
+> with few signals. Because they're written as `always_keep` / `always_drop` rules, they override
+> per-session ranking for that project until you edit them — so review the seeded `rules.toml`, or
+> re-run `smartctx rules` where you want a sharper goal. Note too that `--yes` assumes a single
+> profile: it seeds every project against the *active* one, so with several profiles run it
+> interactively, or once per profile with `CLAUDE_CONFIG_DIR` set and a narrower `ROOT`.
+
 ## Design guarantees
 
 - **Session-local.** Scoping affects only the session it launches. Your Claude configuration is
