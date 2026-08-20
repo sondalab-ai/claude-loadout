@@ -19,7 +19,7 @@ def test_env_overrides_repo_and_defaults(tmp_path: Path):
 def test_defaults_when_nothing_set(tmp_path: Path):
     cfg = load_config(cwd=tmp_path, environ={"CLAUDE_CONFIG_DIR": str(tmp_path)})
     assert cfg.always_keep == ()
-    assert cfg.threshold == 0.20
+    assert cfg.threshold == 0.24
     assert cfg.model_name == "minishlab/potion-base-8M"
 
 def test_config_root_override_wins_over_env(tmp_path: Path):

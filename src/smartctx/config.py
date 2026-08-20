@@ -5,7 +5,9 @@ from pathlib import Path
 from typing import Mapping
 from smartctx.savings import DEFAULT_TOKEN_COSTS
 
-DEFAULT_THRESHOLD = 0.20   # calibrated against potion-base-8M score distribution (see --explain)
+DEFAULT_THRESHOLD = 0.24   # potion-base-8M; re-centered from 0.20 when plugin items gained real
+                           # manifest descriptions (richer text shifts scores up) — holds the prior
+                           # keep-rate constant rather than pruning less. See inventory._plugin_description.
 DEFAULT_MODEL = "minishlab/potion-base-8M"
 
 def _warn(msg: str) -> None:                       # local, avoids importing cli (cycle)

@@ -89,7 +89,7 @@ automatically. Rejected.
 4. **Relevance ranker (local model)** — model2vec static embeddings (`potion-base-8M`, ~30MB,
    pure-numpy, no torch, CPU, offline, deterministic). Embeds the goal and each item
    description; ranks by cosine similarity; keeps items with score ≥ threshold, unioned with an
-   **always-keep set**. Threshold is an **absolute cosine cutoff, default `0.20`** (not top-k —
+   **always-keep set**. Threshold is an **absolute cosine cutoff, default `0.24`** (not top-k —
    top-k is fragile as inventory size varies), overridable via the config chain (§6) and
    calibrated during build via `--explain`. Model cached under `~/.cache`.
 5. **Launch composer** — writes a curated `mcp.json` (kept MCP servers) and an ephemeral
@@ -193,8 +193,9 @@ The tool is built to be **distributed**, not tied to one machine.
 
 ## 11. Resolved defaults (confirmed 2026-08-18)
 
-1. **Threshold** — absolute cosine cutoff, default `0.20` (calibrated against the
-   `potion-base-8M` score distribution on real inventories); calibrate further via `--explain` (§4).
+1. **Threshold** — absolute cosine cutoff, default `0.24` (calibrated against the
+   `potion-base-8M` score distribution on real inventories, re-centered from `0.20` when plugin
+   items gained manifest descriptions); calibrate further via `--explain` (§4).
 2. **Wrap scope** — v1 wraps profile aliases only; bare `claude` stays full unless the user
    opts in by aliasing it to `smartctx`.
 3. **Config format** — TOML.

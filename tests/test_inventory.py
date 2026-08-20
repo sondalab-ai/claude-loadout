@@ -22,6 +22,25 @@ def test_inventory_collects_enabled_plugins_mcp_and_skills(tmp_path: Path):
     assert skill.id == "astro-visibility"
     assert "visible sky" in skill.description
 
+def test_plugin_description_read_from_manifest(tmp_path: Path):
+    root = tmp_path / "root"; root.mkdir()
+    (root / "settings.json").write_text('{"enabledPlugins": {"mytool@mkt": true}}')
+    install = tmp_path / "install" / "mytool"; (install / ".claude-plugin").mkdir(parents=True)
+    (install / ".claude-plugin" / "plugin.json").write_text(
+        '{"name": "mytool", "description": "browser automation and e2e testing"}')
+    (root / "plugins").mkdir()
+    (root / "plugins" / "installed_plugins.json").write_text(
+        '{"plugins": {"mytool@mkt": [{"installPath": "%s"}]}}' % install)
+    plugin = next(i for i in claude_code_inventory(root) if i.kind == "plugin")
+    assert plugin.id == "mytool@mkt"
+    assert plugin.description == "browser automation and e2e testing"   # manifest, not id-noise
+
+def test_plugin_description_falls_back_to_id_without_manifest(tmp_path: Path):
+    root = tmp_path / "root"; root.mkdir()
+    (root / "settings.json").write_text('{"enabledPlugins": {"mytool@mkt": true}}')
+    plugin = next(i for i in claude_code_inventory(root) if i.kind == "plugin")
+    assert plugin.description == "mytool@mkt"               # no registry -> id fallback, never crashes
+
 def test_inventory_missing_files_returns_empty(tmp_path: Path):
     assert claude_code_inventory(tmp_path) == []
 
