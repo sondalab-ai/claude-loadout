@@ -106,19 +106,23 @@ alias + `--explain` + `rules` cheat sheet to get going.
 
 ## How much it saves
 
-Every place that shows a plan also shows how much context it trims:
+The plan reports two different kinds of saving, kept separate on purpose:
 
-- **`--explain`** and **each scoped launch** report the tools pruned this session and an
-  estimated token saving (`≈ 2.4k tokens trimmed`).
-- **`smartctx doctor`** shows the *ceiling* per profile — the most a session could prune —
-  since the actual amount depends on the goal.
-- **`smartctx rules`** closes with the same ceiling once you're done authoring.
+- **Up front** — skill and plugin descriptions (and the agent lists plugins carry) sit in the
+  system prompt from the first turn, so dropping them trims context immediately. This is the
+  `trimmed up front` figure in `--explain` and each launch.
+- **On demand** — MCP tool schemas, claude.ai connectors included, load lazily: Claude Code lists
+  them as *loaded on-demand*, so their cost lands only if a tool is actually used. Dropping them
+  (via `--strict-mcp-config`) avoids that potential cost and blocks the invocation, but frees
+  ~nothing up front. It's reported separately as `on-demand avoided` — don't add it to the
+  up-front number.
+- **`smartctx doctor`** shows the *ceiling* per profile for both; **`smartctx rules`** closes with
+  the same once you're done authoring.
 
 > [!NOTE]
-> By default these figures are **estimates**. The real cost of an MCP server is the tool
-> schemas it injects once connected, which smartctx can't see at plan time — so it uses a
-> flat per-kind figure (MCP server ≈ 1200 tokens, plugin ≈ 600, standalone skill ≈ 50) over the
-> items it actually removes. Tune the constants per kind:
+> These are **estimates** over the items actually removed — flat per-kind figures
+> (skill ≈ 50, plugin ≈ 600 up front; MCP server ≈ 1200 on-demand) — unless `smartctx measure`
+> has recorded a real per-server cost. Tune the constants per kind:
 
 ```toml
 # .smartctx/config.toml
@@ -147,7 +151,7 @@ including claude.ai connectors and plugin-bundled servers. Once cached, those me
 numbers feed the savings display in two ways:
 
 - for MCP servers declared in your `.claude.json`/`.mcp.json` (matched by bare name), the
-  measured cost replaces the per-kind estimate in the ranked-tools total;
+  measured cost replaces the per-kind estimate in the on-demand figure;
 - for **claude.ai connectors**, the measured cost is what `--explain`, `doctor`, and each
   launch report as dropped by strict mode (see the pruning table below) — before you run
   `measure` there's no offline way to know they exist, so they only appear afterwards.
@@ -291,7 +295,7 @@ session), smartctx pauses on a one-line summary before handing the terminal to C
 estimate and the *not seeded* nudge don't flash past, and you get a chance to adjust:
 
 ```
-scoped out 4 of 11 prunable tools + 9 connectors · ~87.7k tokens trimmed (estimate)
+scoped out 4 of 11 tools + 9 connectors · ~2.4k trimmed up front · ~85.3k on-demand avoided
 this repo isn't seeded — run `smartctx init` to persist scoping for it
   [enter] launch · [e] edit keep/drop · [q] cancel?
 ```

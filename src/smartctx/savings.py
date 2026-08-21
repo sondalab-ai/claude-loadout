@@ -19,13 +19,30 @@ DEFAULT_TOKEN_COSTS: dict[str, int] = {"mcp": 1200, "plugin": 600, "skill": 50}
 # a real per-skill measurement (measured[id], from `smartctx measure`) wins over it.
 PRUNABLE = frozenset(DEFAULT_TOKEN_COSTS)
 
+# How a dropped item's cost lands in a session. EAGER kinds (skill/plugin descriptions and the
+# agent lists they carry) sit in the system prompt from the first turn, so dropping them trims
+# context up front. DEFERRED kinds (MCP tool schemas) load on demand — Claude Code lists them as
+# "loaded on-demand", so their cost materializes only if a tool is actually used. Dropping them
+# avoids that potential cost and blocks the invocation, but frees ~nothing up front.
+EAGER_KINDS = frozenset({"skill", "plugin"})
+DEFERRED_KINDS = frozenset({"mcp"})
+
 class Savings(NamedTuple):
     dropped: int        # prunable items pruned this session
     total: int          # prunable items in scope (kept + dropped)
-    tokens: int         # estimated tokens trimmed
+    tokens: int         # estimated tokens (eager + deferred)
+    eager: int = 0      # trimmed from context up front (skill + plugin)
+    deferred: int = 0   # on-demand cost avoided only if the tool is used (mcp)
 
 def _prunable(items: Iterable[_Kinded]) -> list[_Kinded]:
     return [i for i in items if i.kind in PRUNABLE]
+
+def _split_by_load(items: Iterable[_Kinded], costs: Mapping[str, int],
+                   measured: Mapping[str, int] | None) -> tuple[int, int]:
+    items = list(items)
+    eager = sum(_item_cost(i, costs, measured) for i in items if i.kind in EAGER_KINDS)
+    deferred = sum(_item_cost(i, costs, measured) for i in items if i.kind in DEFERRED_KINDS)
+    return eager, deferred
 
 def _item_cost(item: _Kinded, costs: Mapping[str, int],
                measured: Mapping[str, int] | None) -> int:
@@ -45,17 +62,18 @@ def estimate_savings(kept: Iterable[_Kinded], dropped: Iterable[_Kinded],
                      measured: Mapping[str, int] | None = None) -> Savings:
     # kept/dropped are the plain Item lists (callers strip any score tuples first).
     kept_p, dropped_p = _prunable(kept), _prunable(dropped)
-    return Savings(dropped=len(dropped_p),
-                   total=len(kept_p) + len(dropped_p),
-                   tokens=token_estimate(dropped_p, costs, measured))
+    eager, deferred = _split_by_load(dropped_p, costs or DEFAULT_TOKEN_COSTS, measured)
+    return Savings(dropped=len(dropped_p), total=len(kept_p) + len(dropped_p),
+                   tokens=eager + deferred, eager=eager, deferred=deferred)
 
 def budget(items: Iterable[_Kinded], costs: Mapping[str, int] | None = None,
            measured: Mapping[str, int] | None = None) -> Savings:
     # Ceiling view for non-ranking contexts (doctor, post-authoring): what a session
     # could prune at most, before the goal decides how much actually goes.
     prunable = _prunable(items)
+    eager, deferred = _split_by_load(prunable, costs or DEFAULT_TOKEN_COSTS, measured)
     return Savings(dropped=0, total=len(prunable),
-                   tokens=token_estimate(prunable, costs, measured))
+                   tokens=eager + deferred, eager=eager, deferred=deferred)
 
 def human_tokens(n: int) -> str:
     if n < 1000:

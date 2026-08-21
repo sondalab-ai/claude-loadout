@@ -424,9 +424,9 @@ def test_explain_reports_estimated_savings(tmp_path, monkeypatch, capsys):
     rc = cli.main(["--explain"])
     assert rc == 0
     out = capsys.readouterr().out
-    assert "savings" in out
-    assert "ranked tools:" in out and "2 of 2 pruned" in out   # mcp + plugin, skills excluded
-    assert "1.8k tokens" in out                          # 1200 (mcp) + 600 (plugin)
+    assert "savings" in out and "pruned:" in out and "2 of 2 tools" in out
+    assert "up front:" in out and "600 tokens" in out    # plugin (eager) trimmed from context now
+    assert "on-demand:" in out and "1.2k tokens" in out  # mcp (deferred) — avoided only if used
 
 def test_launch_prints_savings_line_to_stderr(tmp_path, monkeypatch, capsys):
     _root(tmp_path)
@@ -440,7 +440,8 @@ def test_launch_prints_savings_line_to_stderr(tmp_path, monkeypatch, capsys):
     rc = cli.main([])
     assert rc == 0
     err = capsys.readouterr().err
-    assert "scoped out 2 of 2 prunable tools" in err and "tokens trimmed" in err
+    assert "scoped out 2 of 2 tools" in err and "trimmed up front" in err
+    assert "on-demand avoided" in err                    # mcp deferred cost shown separately
 
 def test_launch_nudges_when_unseeded(tmp_path, monkeypatch, capsys):
     _root(tmp_path)
@@ -539,7 +540,8 @@ def test_doctor_reports_prunable_budget(tmp_path, monkeypatch, capsys):
     rc = cli.main(["doctor"])
     assert rc == 0
     out = capsys.readouterr().out
-    assert "prunable:" in out and "1.8k tokens" in out   # budget ceiling line present
+    assert "up front:" in out and "600 tokens" in out    # eager ceiling (plugin), not the deferred mcp
+    assert "on-demand:" in out and "1.2k tokens" in out  # mcp schemas shown as lazy/on-demand
 
 def test_token_costs_config_override_changes_estimate(tmp_path, monkeypatch, capsys):
     _root(tmp_path)
@@ -581,7 +583,9 @@ def test_explain_prefers_measured_cost_over_constant(tmp_path, monkeypatch, caps
     monkeypatch.setattr(cli.subprocess, "run", lambda *a, **k: pytest.fail("must not launch"))
     rc = cli.main(["--explain"])
     assert rc == 0
-    assert "9.6k tokens" in capsys.readouterr().out      # 9000 measured (Gmail) + 600 (figma plugin)
+    out = capsys.readouterr().out
+    assert "up front:" in out and "600 tokens" in out    # figma plugin (eager)
+    assert "on-demand:" in out and "9k tokens" in out    # Gmail mcp measured 9000 (deferred)
 
 def test_explain_surfaces_connectors_dropped_by_strict_mode(tmp_path, monkeypatch, capsys):
     root = _root(tmp_path)                                # mcp "Gmail" + plugin "figma@x"
@@ -602,7 +606,8 @@ def test_explain_surfaces_connectors_dropped_by_strict_mode(tmp_path, monkeypatc
     assert "connectors dropped (all-or-nothing" in out
     assert "claude.ai Calendar" in out and "21k" in out
     assert "plugin:playwright:playwright" not in out      # plugin-bundled server is not a connector
-    assert "30.6k tokens" in out                          # 9000 (Gmail measured) + 600 (figma) + 21000
+    assert "up front:" in out and "600 tokens" in out     # figma plugin (eager) trimmed now
+    assert "on-demand:" in out and "30k tokens" in out    # 9000 (Gmail mcp) + 21000 (Calendar connector)
 
 def test_help_prints_usage_without_prompting_or_launching(tmp_path, monkeypatch, capsys):
     _two_profiles(tmp_path)                               # two profiles -> would prompt if not bypassed

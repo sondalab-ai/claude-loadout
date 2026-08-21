@@ -226,12 +226,13 @@ def _cmd_rules(cwd: Path, config_root_override: Path | None = None) -> int:
     print(f"{_paint('smartctx:', 'green')} authored {_plural(authored, 'rule')}")
     cache = _measure.load_costs(cfg.config_root)
     b = _savings.budget(items, cfg.token_costs, cache)
-    print(f"{_paint('smartctx:', 'green')} up to ~{_savings.human_tokens(b.tokens)} tokens "
-          "prunable per session — run `smartctx --explain` for this session's estimate")
+    print(f"{_paint('smartctx:', 'green')} up to ~{_savings.human_tokens(b.eager)} tokens trimmed up "
+          "front per session (skill + plugin context) — run `smartctx --explain` for this session")
     conns = _measure.connector_costs(cache, {i.id for i in items if i.kind == "mcp"})
-    if conns:
-        print(f"{_paint('smartctx:', 'green')} plus ~{_savings.human_tokens(sum(conns.values()))} "
-              f"tokens from {_plural(len(conns), 'claude.ai connector')} dropped by strict mode")
+    on_demand = b.deferred + sum(conns.values())
+    if on_demand:
+        print(f"{_paint('smartctx:', 'green')} plus ~{_savings.human_tokens(on_demand)} tokens of "
+              "MCP/connector schemas that load on demand — avoided only if those tools are used")
     return 0
 
 def _discover_profiles(active_root: Path) -> list[Path]:
@@ -815,13 +816,14 @@ def _profile_report(root: Path, cwd: Path, active: bool,
           f"{_plural(counts['skill'], 'skill')}")
     cache = _measure.load_costs(root)
     b = _savings.budget(items, token_costs, cache)
-    print(f"    prunable:     up to ~{_savings.human_tokens(b.tokens)} tokens "
-          f"{_paint('(estimate; actual depends on the session goal)', 'dim')}")
+    print(f"    up front:     up to ~{_savings.human_tokens(b.eager)} tokens "
+          f"{_paint('(skill + plugin context; actual depends on the goal)', 'dim')}")
     conns = _measure.connector_costs(cache, {i.id for i in items if i.kind == "mcp"})
-    if conns:
-        print(f"    connectors:   {_plural(len(conns), 'server')} dropped by strict mode, "
-              f"~{_savings.human_tokens(sum(conns.values()))} tokens "
-              f"{_paint('(measured; not selectable)', 'dim')}")
+    on_demand = b.deferred + sum(conns.values())
+    if on_demand:
+        detail = f"{_plural(len(conns), 'connector')} + MCP schemas" if conns else "MCP schemas"
+        print(f"    on-demand:    ~{_savings.human_tokens(on_demand)} tokens, {detail} "
+              f"{_paint('(load lazily; avoided only if used)', 'dim')}")
 
 def _cmd_doctor(cwd: Path) -> int:
     cfg = load_config(cwd=cwd)
@@ -960,28 +962,33 @@ def _print_explain(scope: _Scope, plan) -> None:
             print(f"    {_paint('✗', 'red')} {cid:<{w}}  {_paint('~' + _savings.human_tokens(tok), 'dim')}")
         print()
     s = scope.savings
+    on_demand = s.deferred + conn_tok
     print(_paint("  savings", "bold"))
-    print(f"    ranked tools:   {s.dropped} of {s.total} pruned "
-          f"{_paint('(≈ ' + _savings.human_tokens(s.tokens) + ' tokens)', 'dim')}")
-    if scope.connectors:
-        print(f"    connectors:     {len(scope.connectors)} dropped "
-              f"{_paint('(≈ ' + _savings.human_tokens(conn_tok) + ' tokens, measured)', 'dim')}")
+    print(f"    pruned:         {s.dropped} of {s.total} tools")
+    print(f"    up front:       "
+          f"{_paint('≈ ' + _savings.human_tokens(s.eager) + ' tokens', 'green', 'bold')} "
+          f"{_paint('— skill + plugin context, gone from turn one', 'dim')}")
+    if on_demand:
+        note = "measured" if scope.connectors else "estimate"
+        print(f"    on-demand:      {_paint('≈ ' + _savings.human_tokens(on_demand) + ' tokens', 'dim')} "
+              f"{_paint(f'— MCP/connector schemas load lazily; avoided only if used ({note})', 'dim')}")
     elif not scope.measured:
-        print(_paint("    connectors:     run `smartctx measure` to quantify the claude.ai "
-                     "connectors strict mode drops", "dim"))
-    print(f"    {_paint('≈ ' + _savings.human_tokens(s.tokens + conn_tok) + ' tokens', 'green', 'bold')} "
-          "trimmed this session (estimate)")
+        print(_paint("    on-demand:      run `smartctx measure` to quantify the claude.ai "
+                     "connectors strict mode blocks", "dim"))
     print()
     print(_paint("  command", "bold"))
     print(f"    {_paint(' '.join(plan.argv), 'dim')}")
 
 def _savings_line(scope: _Scope) -> str:
     s = scope.savings
-    conn_tok = sum(t for _, t in scope.connectors)
-    core = f"scoped out {s.dropped} of {s.total} prunable tools"
+    on_demand = s.deferred + sum(t for _, t in scope.connectors)
+    core = f"scoped out {s.dropped} of {s.total} tools"
     if scope.connectors:
         core += f" + {len(scope.connectors)} connectors"
-    return f"{core} · ~{_savings.human_tokens(s.tokens + conn_tok)} tokens trimmed (estimate)"
+    parts = [core, f"~{_savings.human_tokens(s.eager)} trimmed up front"]
+    if on_demand:                                   # MCP schemas load lazily — cost only if used
+        parts.append(f"~{_savings.human_tokens(on_demand)} on-demand avoided")
+    return " · ".join(parts)
 
 def _maybe_persist_edit(gate: _EditGate, selected_ids: set) -> None:
     # Offer to freeze the edited keep/drop as a repo seed so future launches respect it.
