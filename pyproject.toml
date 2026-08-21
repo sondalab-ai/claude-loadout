@@ -1,17 +1,16 @@
 [project]
 name = "ccloadout"
 version = "0.1.0"
-description = "Goal-aware launcher for Claude Code — load only the MCP servers, plugins, and skills each session needs."
+description = "Goal-aware launcher for Claude Code: load only the MCP servers, plugins, and skills each session needs."
 readme = "README.md"
 requires-python = ">=3.11"
-license = "Apache-2.0"
-license-files = ["LICENSE"]
 authors = [{ name = "Marcello Barile" }]
 keywords = ["claude-code", "claude", "mcp", "llm", "cli", "developer-tools", "context-engineering"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Environment :: Console",
     "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
     "Operating System :: MacOS",
     "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3",
@@ -32,7 +31,9 @@ dev = ["pytest>=8"]
 rules = ["llama-cpp-python>=0.2"]
 
 [build-system]
-requires = ["hatchling"]
+# Pin below the hatchling that emits core-metadata 2.5; PyPI's upload endpoint only
+# accepts up to 2.4 (PEP 639) and 500s on 2.5.
+requires = ["hatchling>=1.24,<1.26"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
