@@ -1,0 +1,48 @@
+name: Publish to PyPI
+
+# Runs on every merge to master (a merged PR is a push to master). It publishes only when
+# pyproject's version is not already on PyPI, so bump `version` in the PR you want to release;
+# merges that don't change the version are a no-op. Uses PyPI Trusted Publishing (OIDC) - no
+# API token is stored in the repo. Configure the trusted publisher once on PyPI (see README).
+
+on:
+  push:
+    branches: [master]
+
+# Avoid overlapping publishes if several merges land quickly.
+concurrency:
+  group: publish-pypi
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write   # required for Trusted Publishing
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve version and check whether it is already on PyPI
+        id: v
+        run: |
+          version=$(grep -m1 -E '^version = ' pyproject.toml | sed -E 's/version = "(.*)"/\1/')
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if curl -fsS "https://pypi.org/pypi/ccloadout/$version/json" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::ccloadout $version is already on PyPI; skipping publish."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Publishing ccloadout $version."
+          fi
+
+      - name: Set up uv
+        if: steps.v.outputs.exists == 'false'
+        uses: astral-sh/setup-uv@v6
+
+      - name: Build
+        if: steps.v.outputs.exists == 'false'
+        run: uv build
+
+      - name: Publish to PyPI
+        if: steps.v.outputs.exists == 'false'
+        uses: pypa/gh-action-pypi-publish@release/v1

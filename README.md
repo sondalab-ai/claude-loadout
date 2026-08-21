@@ -1,5 +1,9 @@
 # Claude Loadout
 
+[![PyPI](https://img.shields.io/pypi/v/ccloadout.svg)](https://pypi.org/project/ccloadout/)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://pypi.org/project/ccloadout/)
+[![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
+
 **Start each Claude Code session with only the tools it needs.**
 
 `loadout` is a small launcher that sits in front of Claude Code. It looks at what you are working
@@ -457,3 +461,14 @@ directory found, and removes them only after a single confirmation. A directory 
 loadout's only when it carries an artifact loadout wrote (`goal`, `config.toml`,
 `rules.toml`, or a self-ignore `.gitignore`), so an unrelated `.loadout/` is left alone. It
 never touches your shell rc, alias lines you added are listed for you to remove by hand.
+
+## Releasing (maintainers)
+
+Publishing to PyPI is automated. `.github/workflows/publish.yml` runs on every merge to `master`
+and publishes only when `version` in `pyproject.toml` is not already on PyPI, so a release is just
+a PR that bumps the version. Merges that leave the version unchanged are a no-op.
+
+The workflow uses [PyPI Trusted Publishing](https://docs.pypi.org/trusted-publishers/) (OIDC), so
+no API token is stored in the repo. Configure it once on PyPI: project `ccloadout` -> Manage ->
+Publishing -> add a GitHub trusted publisher with owner `marcellobarile`, repository
+`claude-loadout`, and workflow `publish.yml`.
