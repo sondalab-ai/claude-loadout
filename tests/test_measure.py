@@ -1,6 +1,6 @@
 import json
 import pytest
-from smartctx import measure
+from ccloadout import measure
 
 def _list_output():
     return (
@@ -61,7 +61,7 @@ def test_parse_sse_matches_requested_id_over_earlier_frames():
     assert measure._parse_sse(body, 99) is None                     # no frame answers id 99
 
 def test_cache_roundtrip_skips_unmeasured(tmp_path):
-    root = tmp_path / "root"; (root / "smartctx").mkdir(parents=True)
+    root = tmp_path / "root"; (root / "loadout").mkdir(parents=True)
     results = [measure.Result("A", 1200, ""), measure.Result("B", None, "needs auth")]
     measure.save_costs(root, results)
     on_disk = json.loads(measure.costs_path(root).read_text())["servers"]

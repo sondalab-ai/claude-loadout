@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
-from smartctx.inventory import Item
-from smartctx.compose import compose
+from ccloadout.inventory import Item
+from ccloadout.compose import compose
 
 def _settings_of(plan):
     return json.loads(Path(plan.argv[plan.argv.index("--settings") + 1]).read_text())

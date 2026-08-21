@@ -3,8 +3,8 @@ import json, os, tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping
-from smartctx.config import default_global_config_path
-from smartctx.inventory import resolve_mcp_servers
+from ccloadout.config import default_global_config_path
+from ccloadout.inventory import resolve_mcp_servers
 
 @dataclass(frozen=True)
 class LaunchPlan:
@@ -13,7 +13,7 @@ class LaunchPlan:
     tmp_paths: list[Path]
 
 def _write_tmp(prefix: str, data: dict) -> Path:
-    fd, name = tempfile.mkstemp(prefix=f"smartctx-{prefix}-", suffix=".json")
+    fd, name = tempfile.mkstemp(prefix=f"loadout-{prefix}-", suffix=".json")
     with os.fdopen(fd, "w") as fh:
         json.dump(data, fh)
     return Path(name)

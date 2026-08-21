@@ -4,17 +4,17 @@ from fnmatch import fnmatch
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import NamedTuple
-from smartctx.config import load_config
-from smartctx.inventory import claude_code_inventory, Item
-from smartctx.goal import detect_goal, write_goal_cache
-from smartctx.ranker import Ranker, make_model2vec_embed, keyword_embed, bundled_model_path, resolve_model_source
-from smartctx.compose import compose
-from smartctx.rules import (load_rules, apply_rules, has_rule, save_rule, write_rules,
+from ccloadout.config import load_config
+from ccloadout.inventory import claude_code_inventory, Item
+from ccloadout.goal import detect_goal, write_goal_cache
+from ccloadout.ranker import Ranker, make_model2vec_embed, keyword_embed, bundled_model_path, resolve_model_source
+from ccloadout.compose import compose
+from ccloadout.rules import (load_rules, apply_rules, has_rule, save_rule, write_rules,
                             read_rules, profile_rules_file, rules_for,
                             Rule, Predicate, evaluate)
-from smartctx.compiler import compile_rule, make_local_instruct
-from smartctx import savings as _savings
-from smartctx import measure as _measure
+from ccloadout.compiler import compile_rule, make_local_instruct
+from ccloadout import savings as _savings
+from ccloadout import measure as _measure
 
 _LAUNCH_PAUSE_S = 1.5   # seeded launch: hold the scoping summary on screen before claude's TUI takes over
 
@@ -25,7 +25,7 @@ _SGR = {"dim": "2", "bold": "1", "green": "32", "red": "31", "cyan": "36", "yell
 
 def _supports_color(err: bool) -> bool:
     # Looked up lazily (not cached at import) so pytest's capsys stream swap is honoured.
-    if os.environ.get("NO_COLOR") or os.environ.get("SMARTCTX_NO_COLOR"):
+    if os.environ.get("NO_COLOR") or os.environ.get("LOADOUT_NO_COLOR"):
         return False
     stream = sys.stderr if err else sys.stdout
     return stream.isatty()
@@ -39,7 +39,7 @@ def _yn(flag: bool, *, err: bool = False) -> str:
     return _paint("present", "green", err=err) if flag else _paint("absent", "dim", err=err)
 
 def _warn(msg: str) -> None:
-    print(f"{_paint('smartctx:', 'yellow', err=True)} {msg}", file=sys.stderr)
+    print(f"{_paint('loadout:', 'yellow', err=True)} {msg}", file=sys.stderr)
 
 def _plural(n: int, noun: str) -> str:
     return f"{n} {noun}" if n == 1 else f"{n} {noun}s"
@@ -79,7 +79,7 @@ def _build_compiler(cfg):
 def _resolve_goal(cwd: Path, passthrough: list[str]) -> tuple[str, str, float]:
     goal = detect_goal(cwd)                          # returns (text, source, confidence)
     if goal.confidence < 0.15 and _interactive(passthrough):
-        entered = _ask(f"smartctx: session goal? [{goal.goal}] ").strip()
+        entered = _ask(f"loadout: session goal? [{goal.goal}] ").strip()
         if entered:
             write_goal_cache(cwd, entered)         # preflight ruling: persist, don't re-ask
             return entered, "prompt", 1.0
@@ -92,7 +92,7 @@ def _rules_intro(compile_fn, scope: str) -> None:
     dim = lambda s: _paint(s, "dim", err=True)
     p("")
     if compile_fn:
-        p(f"{_paint('smartctx:', 'yellow', err=True)} for each tool, describe in plain "
+        p(f"{_paint('loadout:', 'yellow', err=True)} for each tool, describe in plain "
           "language when to keep or drop it.")
         p(dim('    e.g.  "keep only when the goal is frontend"'))
         p(dim('          "drop unless it mentions email"'))
@@ -100,7 +100,7 @@ def _rules_intro(compile_fn, scope: str) -> None:
         p(dim("    press enter to skip; if a description can't be translated "
               "you'll get keep/drop/skip choices."))
     else:
-        p(f"{_paint('smartctx:', 'yellow', err=True)} no rule model configured — "
+        p(f"{_paint('loadout:', 'yellow', err=True)} no rule model configured — "
           "natural-language rules are unavailable.")
         p(dim("    [k]eep always / [d]rop always write a permanent rule; "
               "[s]kip (enter) decides nothing and asks again next time."))
@@ -116,7 +116,7 @@ def _elicit(item: Item, context: str, compile_fn, save) -> str:
     # `save(Rule)` persists an authored rule to the chosen scope (profile or a repo's local file).
     nl = ""
     if compile_fn:                                 # natural-language authoring path
-        nl = _ask(f"smartctx: rule for '{item.id}' ({item.kind})? [enter=skip] ").strip()
+        nl = _ask(f"loadout: rule for '{item.id}' ({item.kind})? [enter=skip] ").strip()
         if not nl:
             return "undecided"
         pred = compile_rule(nl, item, compile_fn)
@@ -176,7 +176,7 @@ def _scoped_plan(passthrough: list[str], cwd: Path, config_root_override: Path |
     dropped = ([(i, s) for i, s in ranked.dropped if not force_keep(i)]
                + [(i, "rule") for i in outcome.forced_drop if not force_keep(i)])
     # Launch-time keep/drop review is the pre-launch gate (a single checkbox over every prunable
-    # tool), not a per-item prompt — see _launch_gate. `smartctx rules` remains the per-item /
+    # tool), not a per-item prompt — see _launch_gate. `loadout rules` remains the per-item /
     # natural-language authoring path.
     def _finish(kept, dropped):                    # compose + cost accounting for a keep/drop decision
         plan = compose(kept, items, cfg.config_root, passthrough, cwd=cwd,
@@ -214,7 +214,7 @@ def _cmd_rules(cwd: Path, config_root_override: Path | None = None) -> int:
     context, _src, _conf = _resolve_goal(cwd, [])   # goal string for conditional-rule evaluation
     pending = [i for i in items if not has_rule(i, rules)]
     if not pending:
-        print(f"{_paint('smartctx:', 'green')} every tool already has a rule")
+        print(f"{_paint('loadout:', 'green')} every tool already has a rule")
         return 0
     _rules_intro(compile_fn, "to every repo in this profile")
     save = lambda r: save_rule(cfg.config_root, r)   # profile-scoped: the deliberate global path
@@ -223,15 +223,15 @@ def _cmd_rules(cwd: Path, config_root_override: Path | None = None) -> int:
         if _elicit(item, context, compile_fn, save) != "undecided":
             authored += 1
     print()
-    print(f"{_paint('smartctx:', 'green')} authored {_plural(authored, 'rule')}")
+    print(f"{_paint('loadout:', 'green')} authored {_plural(authored, 'rule')}")
     cache = _measure.load_costs(cfg.config_root)
     b = _savings.budget(items, cfg.token_costs, cache)
-    print(f"{_paint('smartctx:', 'green')} up to ~{_savings.human_tokens(b.eager)} tokens trimmed up "
-          "front per session (skill + plugin context) — run `smartctx --explain` for this session")
+    print(f"{_paint('loadout:', 'green')} up to ~{_savings.human_tokens(b.eager)} tokens trimmed up "
+          "front per session (skill + plugin context) — run `loadout --explain` for this session")
     conns = _measure.connector_costs(cache, {i.id for i in items if i.kind == "mcp"})
     on_demand = b.deferred + sum(conns.values())
     if on_demand:
-        print(f"{_paint('smartctx:', 'green')} plus ~{_savings.human_tokens(on_demand)} tokens of "
+        print(f"{_paint('loadout:', 'green')} plus ~{_savings.human_tokens(on_demand)} tokens of "
               "MCP/connector schemas that load on demand — avoided only if those tools are used")
     return 0
 
@@ -265,13 +265,13 @@ def _resolve_config_root(environ, passthrough: list[str]) -> Path | None:
     if len(profiles) <= 1:
         return None
     print("", file=sys.stderr)
-    print(f"{_paint('smartctx:', 'yellow', err=True)} CLAUDE_CONFIG_DIR not set — "
+    print(f"{_paint('loadout:', 'yellow', err=True)} CLAUDE_CONFIG_DIR not set — "
           "pick a Claude profile:", file=sys.stderr)
     print("", file=sys.stderr)
     for idx, prof in enumerate(profiles, 1):
-        has_cfg = (prof / "smartctx" / "config.toml").is_file()
+        has_cfg = (prof / "loadout" / "config.toml").is_file()
         num = _paint(f"{idx})", "bold", err=True)
-        print(f"  {num} {prof}  {_paint(f'(smartctx config: {_yn(has_cfg, err=True)})', 'dim', err=True)}",
+        print(f"  {num} {prof}  {_paint(f'(loadout config: {_yn(has_cfg, err=True)})', 'dim', err=True)}",
               file=sys.stderr)
     print("", file=sys.stderr)
     while True:                                          # no default (spec B): Enter re-asks
@@ -286,12 +286,12 @@ def _resolve_config_root(environ, passthrough: list[str]) -> Path | None:
         _warn(f"invalid choice {raw!r}")
 
 _CONFIG_HEADER = (
-    "# generated by smartctx init — local, gitignored; layers over your profile config\n"
-    "# (~/.claude*/smartctx/config.toml). Edit or extend freely.\n")
+    "# generated by loadout init — local, gitignored; layers over your profile config\n"
+    "# (~/.claude*/loadout/config.toml). Edit or extend freely.\n")
 
 # init writes machine-derived config it treats as local; ignore the whole dir so
-# nothing lands in git. Hand-authored config (via `smartctx rules`) stays shareable.
-_LOCAL_GITIGNORE = "# generated by smartctx init — local machine config, do not commit\n*\n"
+# nothing lands in git. Hand-authored config (via `loadout rules`) stays shareable.
+_LOCAL_GITIGNORE = "# generated by loadout init — local machine config, do not commit\n*\n"
 
 def _discover_projects(root: Path) -> list[Path]:
     # A project is any direct subdirectory of ROOT; skip dotfile dirs (.git, .venv, …).
@@ -398,7 +398,7 @@ def _can_raw() -> bool:
         return False
 
 def _select_repos(eligible: list[Path], already: int,
-                  label: str = "smartctx init:", action: str = "seed") -> list[Path] | None:
+                  label: str = "loadout init:", action: str = "seed") -> list[Path] | None:
     import shutil
     rows = shutil.get_terminal_size((80, 24)).lines
     if not _can_raw() or len(eligible) + 4 > rows:  # no raw tty / frame taller than the window
@@ -411,7 +411,7 @@ def _select_repos(eligible: list[Path], already: int,
     return [eligible[i] for i in picks] if picks else None
 
 def _select_repos_line(eligible: list[Path], already: int,
-                       label: str = "smartctx init:", action: str = "seed") -> list[Path] | None:
+                       label: str = "loadout init:", action: str = "seed") -> list[Path] | None:
     print("", file=sys.stderr)
     head = _plural(len(eligible), "project") + " eligible"
     if already:
@@ -431,7 +431,7 @@ def _select_repos_line(eligible: list[Path], already: int,
         _warn(f"invalid selection {raw!r}")
 
 def _pick_profile(profiles: list[Path], default: Path, repo: Path,
-                  label: str = "smartctx init:") -> Path:
+                  label: str = "loadout init:") -> Path:
     print("", file=sys.stderr)
     print(f"{_paint(label, 'yellow', err=True)} profile for "
           f"{_paint(str(repo), 'cyan', err=True)}", file=sys.stderr)
@@ -446,7 +446,7 @@ def _pick_profile(profiles: list[Path], default: Path, repo: Path,
             return profiles[int(raw) - 1]
         _warn(f"invalid choice {raw!r}")
 
-def _confirm_goal(repo: Path, use_cache: bool = True, label: str = "smartctx init:") -> str | None:
+def _confirm_goal(repo: Path, use_cache: bool = True, label: str = "loadout init:") -> str | None:
     # Returns the accepted/overridden goal, or None to skip this repo. update re-infers fresh.
     g = detect_goal(repo, use_cache=use_cache)
     print("", file=sys.stderr)
@@ -470,8 +470,8 @@ def _decide_keep(items, cfg, context: str, rules: list[Rule]) -> set[str]:
     return pinned_ids | {i.id for i in outcome.forced_keep} | {i.id for i in ranked.kept}
 
 # Machine-materialized rules carry this nl prefix so `update` can tell them from rules a human
-# authored (via `smartctx rules` or by hand) and regenerate only the machine ones.
-_SEED_NL_PREFIX = "seeded by smartctx"
+# authored (via `loadout rules` or by hand) and regenerate only the machine ones.
+_SEED_NL_PREFIX = "seeded by loadout"
 
 def _is_seeded_rule(rule: Rule) -> bool:
     return rule.nl.startswith(_SEED_NL_PREFIX)
@@ -515,7 +515,7 @@ def _short_desc(text: str, width: int) -> str:
     return s if len(s) <= width else s[: width - 1].rstrip() + "…"
 
 def _review_keep_drop(repo: Path, prunable: list[Item], kept_ids: set[str],
-                      label: str = "smartctx init:"):
+                      label: str = "loadout init:"):
     # Let the user adjust the auto keep/drop before it is frozen. Rows are grouped by kind with a
     # dim one-line description; a legend spells out what a ticked/unticked box means. Returns the
     # kept-id set, or None to skip the repo. Falls back to the auto decision when a raw tty isn't
@@ -553,11 +553,11 @@ def _review_keep_drop(repo: Path, prunable: list[Item], kept_ids: set[str],
         return None
     return {ordered[i].id for i in picks}
 
-_REPO_RULES_HEADER = "# generated by smartctx — local, gitignored keep/drop decisions\n"
+_REPO_RULES_HEADER = "# generated by loadout — local, gitignored keep/drop decisions\n"
 
 def _write_seed_scaffold(repo: Path, cfg, goal: str) -> None:
     # Local seed metadata, no rules: .gitignore + goal cache + config.toml.
-    d = repo / ".smartctx"; d.mkdir(exist_ok=True)
+    d = repo / ".loadout"; d.mkdir(exist_ok=True)
     (d / ".gitignore").write_text(_LOCAL_GITIGNORE)   # before write_goal_cache, which only writes if absent
     write_goal_cache(repo, goal)
     model = cfg.model_name.replace("\\", "\\\\").replace('"', '\\"')   # TOML basic string
@@ -567,7 +567,7 @@ def _write_seed_scaffold(repo: Path, cfg, goal: str) -> None:
 def _write_seed(repo: Path, cfg, goal: str, rules: list[Rule]) -> None:
     # Persist the local seed: scaffold + a fresh rules.toml holding `rules`.
     _write_seed_scaffold(repo, cfg, goal)
-    write_rules(repo / ".smartctx" / "rules.toml", rules, header=_REPO_RULES_HEADER)
+    write_rules(repo / ".loadout" / "rules.toml", rules, header=_REPO_RULES_HEADER)
 
 def _kept_dropped(prunable: list[Item], kept_ids: set[str]) -> tuple[list[Item], list[Item]]:
     return ([i for i in prunable if i.id in kept_ids],
@@ -581,8 +581,8 @@ def _seed_repo(repo: Path, cfg, items, kept_ids: set[str], goal: str) -> tuple[l
 def _cmd_init(cwd: Path, args: list[str], environ) -> int:
     yes = "--yes" in args
     root_args = [a for a in args if a != "--yes"]
-    configured = lambda r: ((r / ".smartctx" / "config.toml").is_file()
-                            or (r / ".smartctx" / "rules.toml").is_file())
+    configured = lambda r: ((r / ".loadout" / "config.toml").is_file()
+                            or (r / ".loadout" / "rules.toml").is_file())
     if root_args:                                    # bulk: every unconfigured project under ROOT
         root = Path(root_args[0]).expanduser()
         if not root.is_dir():
@@ -596,8 +596,8 @@ def _cmd_init(cwd: Path, args: list[str], environ) -> int:
         already_list = [cwd] if configured(cwd) else []
     already = len(already_list)
     if not eligible:
-        print(f"{_paint('smartctx:', 'green')} nothing to seed"
-              f"{f' ({already} already configured — run `smartctx update` to refresh)' if already else ' (no project folders found)'}")
+        print(f"{_paint('loadout:', 'green')} nothing to seed"
+              f"{f' ({already} already configured — run `loadout update` to refresh)' if already else ' (no project folders found)'}")
         for repo in already_list:
             print(f"  {_paint('–', 'dim')} {repo} {_paint('(already configured)', 'dim')}")
         return 0
@@ -664,21 +664,21 @@ def _print_init_summary(seeded: int, skipped: list[tuple[Path, str]],
         tail += f", {_plural(len(skipped), 'project')} skipped"
     if already_list:
         tail += f", {len(already_list)} already configured"
-    print(f"{_paint('smartctx:', 'green')} {tail}")
+    print(f"{_paint('loadout:', 'green')} {tail}")
     notes = skipped + [(r, "already configured") for r in already_list]
     for repo, reason in notes:                       # name every project that didn't get seeded
         print(f"  {_paint('–', 'dim')} {repo} {_paint(f'({reason})', 'dim')}")
 
-_UPDATE_LABEL = "smartctx update:"
+_UPDATE_LABEL = "loadout update:"
 
 def _is_seeded(repo: Path) -> bool:
     # init always writes config.toml under a local gitignore; its presence marks a repo that
     # update owns. A repo carrying only a hand-committed rules.toml (no config) is left alone.
-    return (repo / ".smartctx" / "config.toml").is_file()
+    return (repo / ".loadout" / "config.toml").is_file()
 
 def _split_repo_rules(repo: Path) -> tuple[list[Rule], list[Rule]]:
     # (human, machine) split of the repo's local rules.toml by the seed nl marker.
-    rr = read_rules(repo / ".smartctx" / "rules.toml")
+    rr = read_rules(repo / ".loadout" / "rules.toml")
     return ([r for r in rr if not _is_seeded_rule(r)],
             [r for r in rr if _is_seeded_rule(r)])
 
@@ -736,7 +736,7 @@ def _print_update_summary(updated: int, skipped: list[tuple[Path, str]],
         tail += f", {_plural(len(skipped), 'project')} skipped"
     if unseeded:
         tail += f", {len(unseeded)} not seeded"
-    print(f"{_paint('smartctx:', 'green')} {tail}")
+    print(f"{_paint('loadout:', 'green')} {tail}")
     notes = skipped + [(r, "not seeded — run init") for r in unseeded]
     for repo, reason in notes:
         print(f"  {_paint('–', 'dim')} {repo} {_paint(f'({reason})', 'dim')}")
@@ -754,12 +754,12 @@ def _cmd_update(cwd: Path, args: list[str], environ) -> int:
         eligible = [r for r in projects if _is_seeded(r)]
         unseeded = [r for r in projects if not _is_seeded(r)]
         if not eligible:
-            print(f"{_paint('smartctx:', 'green')} nothing to update"
+            print(f"{_paint('loadout:', 'green')} nothing to update"
                   f"{f' ({len(unseeded)} not seeded — run init)' if unseeded else ' (no seeded projects found)'}")
             return 0
     else:                                            # single: the current repo
         if not _is_seeded(cwd):
-            _warn("this repo isn't smartctx-seeded; run `smartctx init` first")
+            _warn("this repo isn't loadout-seeded; run `loadout init` first")
             return 0
         eligible = [cwd]
     if not sys.stdin.isatty() and not yes:
@@ -804,7 +804,7 @@ def _profile_report(root: Path, cwd: Path, active: bool,
                     token_costs: dict[str, int] | None = None) -> None:
     tag = f" {_paint('(active)', 'green', 'bold')}" if active else ""
     print(f"  {_paint(str(root), 'cyan')}{tag}")
-    user_cfg = root / "smartctx" / "config.toml"
+    user_cfg = root / "loadout" / "config.toml"
     print(f"    user config:  {_yn(user_cfg.is_file())}")
     try:
         items = claude_code_inventory(root, cwd, global_config_path)
@@ -827,7 +827,7 @@ def _profile_report(root: Path, cwd: Path, active: bool,
 
 def _cmd_doctor(cwd: Path) -> int:
     cfg = load_config(cwd=cwd)
-    print(_paint("smartctx doctor", "bold"))
+    print(_paint("loadout doctor", "bold"))
     print()
     profiles = _discover_profiles(cfg.config_root)
     print(_paint(f"  claude profiles: {_plural(len(profiles), 'profile')}", "bold"))
@@ -837,7 +837,7 @@ def _cmd_doctor(cwd: Path) -> int:
         _profile_report(root, cwd, active,
                         cfg.global_config_path if active else None, cfg.token_costs)
         print()
-    repo_cfg = cwd / ".smartctx" / "config.toml"
+    repo_cfg = cwd / ".loadout" / "config.toml"
     print(_paint("  environment", "bold"))
     print(f"    repo config:      {_paint(str(repo_cfg), 'cyan')} ({_yn(repo_cfg.is_file())})")
     resolved = resolve_model_source(cfg.model_name)
@@ -850,19 +850,19 @@ def _cmd_doctor(cwd: Path) -> int:
     print(f"    rule model:       {rule_state}")
     print()
     print(_paint("  Next steps", "bold"))
-    print("    1. Point your launch command at smartctx, e.g. add to your shell rc:")
-    print(f"         {_paint('alias claude=\"smartctx\"', 'cyan')}")
+    print("    1. Point your launch command at loadout, e.g. add to your shell rc:")
+    print(f"         {_paint('alias claude=\"loadout\"', 'cyan')}")
     print("       or wrap a separate profile:")
-    print(f"         {_paint('alias claude-work=\"CLAUDE_CONFIG_DIR=~/.claude-work smartctx\"', 'cyan')}")
+    print(f"         {_paint('alias claude-work=\"CLAUDE_CONFIG_DIR=~/.claude-work loadout\"', 'cyan')}")
     print("    2. Preview what a session would load, without launching anything:")
-    print(f"         {_paint('smartctx --explain', 'cyan')}")
+    print(f"         {_paint('loadout --explain', 'cyan')}")
     print("    3. Scope tools with plain-language rules:")
-    print(f"         {_paint('smartctx rules', 'cyan')}")
+    print(f"         {_paint('loadout rules', 'cyan')}")
     return 0
 
 def _cmd_measure(cwd: Path) -> int:
     cfg = load_config(cwd=cwd)
-    print(_paint("smartctx measure", "bold"))
+    print(_paint("loadout measure", "bold"))
     print(_paint("  connecting to each MCP server to tokenize its real tool set …", "dim"))
     print()
     try:
@@ -894,44 +894,44 @@ def _cmd_measure(cwd: Path) -> int:
     _measure.save_costs(cfg.config_root, results)
     n = sum(1 for r in results if r.tokens is not None)
     print()
-    print(f"{_paint('smartctx:', 'green')} measured {_plural(n, 'server')}, "
+    print(f"{_paint('loadout:', 'green')} measured {_plural(n, 'server')}, "
           f"~{_savings.human_tokens(total)} tokens total")
     print(_paint(f"  cached to {_measure.costs_path(cfg.config_root)}", "dim"))
     print(_paint("  these are a diagnostic view; a measured cost feeds savings only for MCP "
                  "servers in your .claude.json/.mcp.json (matched by bare name).", "dim"))
     print(_paint("  claude.ai connectors and plugin-bundled servers are shown here but aren't "
-                 "pruned by smartctx.", "dim"))
+                 "pruned by ccloadout.", "dim"))
     return 0
 
-def _smartctx_version() -> str:
+def _loadout_version() -> str:
     try:
-        return version("smartctx")
+        return version("ccloadout")
     except PackageNotFoundError:                     # running from a source tree, uninstalled
         return "unknown"
 
 def _print_help() -> None:
     cmd = lambda s: _paint(s, "cyan")
     print(
-        f"{_paint('smartctx', 'bold')} — goal-aware launcher for Claude Code\n"
+        f"{_paint('loadout', 'bold')} — goal-aware launcher for Claude Code\n"
         "\n"
         f"{_paint('Usage:', 'bold')}\n"
-        f"  {cmd('smartctx [claude-args...]')}   Launch claude with a goal-scoped tool set\n"
-        f"  {cmd('smartctx --explain')}          Print the scoping plan, then exit (no launch)\n"
-        f"  {cmd('smartctx rules')}              Author profile-wide keep/drop rules (all repos; launch prompts are repo-local)\n"
-        f"  {cmd('smartctx init [ROOT]')}        Seed local config — this repo, or bulk-seed every project under ROOT\n"
-        f"  {cmd('smartctx update [ROOT]')}      Refresh existing seeds — this repo, or all seeded under ROOT\n"
-        f"  {cmd('smartctx doctor')}             Report profiles, config, and model state\n"
-        f"  {cmd('smartctx measure')}            Measure real MCP tool-token cost — MCP only (they expose tools at runtime; opt-in, connects)\n"
-        f"  {cmd('smartctx --no-gate')}          Launch without the pre-launch review pause (or set SMARTCTX_NO_GATE)\n"
-        f"  {cmd('smartctx --no-scope-skills')}  Keep every user skill loaded — skip skill scoping (or set SMARTCTX_NO_SCOPE_SKILLS)\n"
-        f"  {cmd('smartctx --help, -h')}         Show this help\n"
-        f"  {cmd('smartctx --version, -V')}      Show the smartctx version\n"
+        f"  {cmd('loadout [claude-args...]')}   Launch claude with a goal-scoped tool set\n"
+        f"  {cmd('loadout --explain')}          Print the scoping plan, then exit (no launch)\n"
+        f"  {cmd('loadout rules')}              Author profile-wide keep/drop rules (all repos; launch prompts are repo-local)\n"
+        f"  {cmd('loadout init [ROOT]')}        Seed local config — this repo, or bulk-seed every project under ROOT\n"
+        f"  {cmd('loadout update [ROOT]')}      Refresh existing seeds — this repo, or all seeded under ROOT\n"
+        f"  {cmd('loadout doctor')}             Report profiles, config, and model state\n"
+        f"  {cmd('loadout measure')}            Measure real MCP tool-token cost — MCP only (they expose tools at runtime; opt-in, connects)\n"
+        f"  {cmd('loadout --no-gate')}          Launch without the pre-launch review pause (or set LOADOUT_NO_GATE)\n"
+        f"  {cmd('loadout --no-scope-skills')}  Keep every user skill loaded — skip skill scoping (or set LOADOUT_NO_SCOPE_SKILLS)\n"
+        f"  {cmd('loadout --help, -h')}         Show this help\n"
+        f"  {cmd('loadout --version, -V')}      Show the loadout version\n"
         "\n"
         f"{_paint('Any other flags pass straight through to claude — run `claude --help` for those.', 'dim')}"
     )
 
 def _print_explain(scope: _Scope, plan) -> None:
-    print(_paint("smartctx — scoping plan", "bold"))
+    print(_paint("loadout — scoping plan", "bold"))
     print()
     lbl = lambda s: _paint(f"  {s:<11}", "dim")
     print(f"{lbl('goal')}{scope.goal!r}   "
@@ -973,7 +973,7 @@ def _print_explain(scope: _Scope, plan) -> None:
         print(f"    on-demand:      {_paint('≈ ' + _savings.human_tokens(on_demand) + ' tokens', 'dim')} "
               f"{_paint(f'— MCP/connector schemas load lazily; avoided only if used ({note})', 'dim')}")
     elif not scope.measured:
-        print(_paint("    on-demand:      run `smartctx measure` to quantify the claude.ai "
+        print(_paint("    on-demand:      run `loadout measure` to quantify the claude.ai "
                      "connectors strict mode blocks", "dim"))
     print()
     print(_paint("  command", "bold"))
@@ -996,7 +996,7 @@ def _maybe_persist_edit(gate: _EditGate, selected_ids: set) -> None:
     if ans not in ("y", "yes"):
         return
     _seed_repo(gate.cwd, gate.cfg, gate.items, gate.pinned_ids | selected_ids, gate.goal)
-    _warn("saved — this repo is now seeded (`smartctx update` refreshes it)")
+    _warn("saved — this repo is now seeded (`loadout update` refreshes it)")
 
 def _launch_gate(scope: _Scope, plan, gate: _EditGate, passthrough: list[str], no_gate: bool = False):
     # Interactive pre-launch review: read the summary, optionally edit keep/drop, then launch.
@@ -1006,7 +1006,7 @@ def _launch_gate(scope: _Scope, plan, gate: _EditGate, passthrough: list[str], n
     _warn(_savings_line(scope))
     seeded = _is_seeded(gate.cwd)
     if not seeded:
-        _warn("this repo isn't seeded — run `smartctx init` to persist scoping for it")
+        _warn("this repo isn't seeded — run `loadout init` to persist scoping for it")
     if no_gate:                                     # opted out — launch immediately, no pause
         return scope, plan
     if seeded:                                      # settled config — brief readable pause, then launch
@@ -1047,11 +1047,11 @@ def main(argv: list[str] | None = None) -> int:
 def _run(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     cwd = Path.cwd()
-    if argv and argv[0] in ("--help", "-h", "help"):  # smartctx's own help; no profile prompt/scoping
+    if argv and argv[0] in ("--help", "-h", "help"):  # loadout's own help; no profile prompt/scoping
         _print_help()
         return 0
     if argv and argv[0] in ("--version", "-V"):
-        print(f"smartctx {_smartctx_version()}")
+        print(f"loadout {_loadout_version()}")
         return 0
     if argv and argv[0] == "doctor":                # doctor enumerates every profile itself
         return _cmd_doctor(cwd)
@@ -1063,9 +1063,9 @@ def _run(argv: list[str] | None = None) -> int:
         return _cmd_update(cwd, argv[1:], os.environ)
     rules_cmd = bool(argv) and argv[0] == "rules"
     explain = "--explain" in argv
-    no_gate = "--no-gate" in argv or bool(os.environ.get("SMARTCTX_NO_GATE"))
-    scope_skills = "--no-scope-skills" not in argv and not os.environ.get("SMARTCTX_NO_SCOPE_SKILLS")
-    passthrough = [a for a in argv                                          # smartctx flags, not claude's
+    no_gate = "--no-gate" in argv or bool(os.environ.get("LOADOUT_NO_GATE"))
+    scope_skills = "--no-scope-skills" not in argv and not os.environ.get("LOADOUT_NO_SCOPE_SKILLS")
+    passthrough = [a for a in argv                                          # loadout flags, not claude's
                    if a not in ("--explain", "--no-gate", "--no-scope-skills")]
     try:                                            # ask which profile when it is implicit
         override = _resolve_config_root(os.environ, [] if rules_cmd else passthrough)

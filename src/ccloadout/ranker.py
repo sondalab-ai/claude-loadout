@@ -5,7 +5,7 @@ from fnmatch import fnmatch
 from pathlib import Path
 from typing import Callable
 import numpy as np
-from smartctx.inventory import Item
+from ccloadout.inventory import Item
 
 # The default embedding model is vendored inside the package (models/potion-base-8M),
 # so a fresh install ranks offline with no first-run download.

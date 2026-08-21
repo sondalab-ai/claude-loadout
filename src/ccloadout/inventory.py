@@ -2,7 +2,7 @@ from __future__ import annotations
 import json, re
 from dataclasses import dataclass
 from pathlib import Path
-from smartctx.config import default_global_config_path
+from ccloadout.config import default_global_config_path
 
 @dataclass(frozen=True)
 class Item:

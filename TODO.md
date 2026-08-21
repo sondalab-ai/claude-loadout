@@ -5,8 +5,8 @@ All items below are implemented/verified — see
 for the commit list and verification evidence.
 
 - [x] Uninstall script (`scripts/uninstall.sh`)
-- [x] Better informative guidance once setup is done (how to init) — `smartctx doctor`
+- [x] Better informative guidance once setup is done (how to init) — `loadout doctor`
 - [x] Review readme after having shipped the model inside the repo — verified accurate
 - [x] Review the requisites of the readme — verified, one clarification added
-- [x] $ smartctx --help prints out: smartctx: CLAUDE_CONFIG_DIR not set — pick a Claude profile — `--help`/`-h`/`--version`/`-V` now short-circuit before profile resolution and scoping
-- [x] "smartctx: rule for '…' (plugin)? [enter=skip] keep it" / "couldn't compile; [k]eep always / [d]rop always / [s]kip?" interaction unclear — added upfront guidance (`_rules_intro`) with examples; when no rule model is configured the NL prompt is skipped entirely and only keep/drop/skip is offered
+- [x] $ loadout --help prints out: loadout: CLAUDE_CONFIG_DIR not set — pick a Claude profile — `--help`/`-h`/`--version`/`-V` now short-circuit before profile resolution and scoping
+- [x] "loadout: rule for '…' (plugin)? [enter=skip] keep it" / "couldn't compile; [k]eep always / [d]rop always / [s]kip?" interaction unclear — added upfront guidance (`_rules_intro`) with examples; when no rule model is configured the NL prompt is skipped entirely and only keep/drop/skip is offered

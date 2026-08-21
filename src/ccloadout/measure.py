@@ -5,14 +5,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import NamedTuple
 
-# On-demand, opt-in measurement of an MCP server's real tool set. smartctx speaks the
+# On-demand, opt-in measurement of an MCP server's real tool set. loadout speaks the
 # MCP JSON-RPC handshake itself (initialize -> tools/list), serialises the tool
 # definitions the way a client sees them, and estimates tokens with a ~4 chars/token
 # heuristic — labelled as such, since it is not Claude's own tokenizer. Anything that
 # needs auth we don't hold, hangs, or errors is reported "unmeasured", never zero.
 
 _PROTOCOL = "2024-11-05"
-_CLIENT = {"name": "smartctx", "version": "0"}
+_CLIENT = {"name": "loadout", "version": "0"}
 CHARS_PER_TOKEN = 4                              # rough; the label everywhere says "heuristic"
 
 class MeasureError(Exception):
@@ -180,7 +180,7 @@ def measure_server(s: Server, timeout: float = 15.0) -> Result:
         return Result(s.id, None, str(exc))
 
 def costs_path(config_root: Path) -> Path:
-    return config_root / "smartctx" / "costs.json"
+    return config_root / "loadout" / "costs.json"
 
 def load_costs(config_root: Path) -> dict[str, int]:
     # id -> measured tokens, for savings to prefer over the per-kind constant.
@@ -193,7 +193,7 @@ def load_costs(config_root: Path) -> dict[str, int]:
 
 def connector_costs(cache: dict[str, int], mcp_ids) -> dict[str, int]:
     # claude.ai account connectors: measured servers that scoped sessions drop unconditionally
-    # (via --strict-mcp-config) and that smartctx can't keep selectively. They are neither
+    # (via --strict-mcp-config) and that loadout can't keep selectively. They are neither
     # plugin-bundled (`plugin:` prefix) nor declared in .claude.json/.mcp.json (mcp_ids).
     ids = set(mcp_ids)
     return {k: v for k, v in cache.items() if not k.startswith("plugin:") and k not in ids}

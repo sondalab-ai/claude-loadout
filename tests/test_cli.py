@@ -1,7 +1,7 @@
 import io, json, os, sys
 from pathlib import Path
 import pytest
-import smartctx.cli as cli
+import ccloadout.cli as cli
 
 class _RC:
     def __init__(self, code): self.returncode = code
@@ -46,8 +46,8 @@ def test_keyboard_interrupt_aborts_cleanly(tmp_path, monkeypatch, capsys):
 
 def _drop_rule_root(tmp_path):
     root = _root(tmp_path)
-    (root / "smartctx").mkdir()
-    (root / "smartctx" / "rules.toml").write_text(
+    (root / "loadout").mkdir()
+    (root / "loadout" / "rules.toml").write_text(
         '[[rule]]\ntarget = "Gmail"\nnl = "never"\n'
         '[rule.predicate]\naction = "always_drop"\nmatch = []\nmatch_mode = "any"\n')
     return root
@@ -74,7 +74,7 @@ def test_forced_drop_rule_excludes_item(tmp_path, monkeypatch):
 def test_always_keep_config_overrides_drop_rule(tmp_path, monkeypatch):
     root = _drop_rule_root(tmp_path)                       # Gmail carries an always_drop rule
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
-    monkeypatch.setenv("SMARTCTX_ALWAYS_KEEP", "Gmail")    # config always_keep must win (spec §12)
+    monkeypatch.setenv("LOADOUT_ALWAYS_KEEP", "Gmail")    # config always_keep must win (spec §12)
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(cli, "make_model2vec_embed", lambda name: cli.keyword_embed)
     captured = _capture_mcp_overlay(monkeypatch)
@@ -93,8 +93,8 @@ def test_rules_subcommand_authors_rule(tmp_path, monkeypatch):
     monkeypatch.setattr("builtins.input", lambda *a, **k: next(replies, ""))
     rc = cli.main(["rules"])
     assert rc == 0
-    assert "always_keep" in (root / "smartctx" / "rules.toml").read_text()   # profile = the global path
-    assert not (tmp_path / ".smartctx" / "rules.toml").exists()              # `rules` writes profile, not repo rules
+    assert "always_keep" in (root / "loadout" / "rules.toml").read_text()   # profile = the global path
+    assert not (tmp_path / ".loadout" / "rules.toml").exists()              # `rules` writes profile, not repo rules
 
 def test_explain_shows_rule_forced_drop(tmp_path, monkeypatch, capsys):
     root = _drop_rule_root(tmp_path)                       # Gmail carries an always_drop rule
@@ -117,7 +117,7 @@ def test_rules_subcommand_noop_without_tty(tmp_path, monkeypatch, capsys):
 def test_launch_elicitation_survives_eof_on_piped_stdin(tmp_path, monkeypatch):
     root = _root(tmp_path)
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
-    monkeypatch.setenv("SMARTCTX_THRESHOLD", "0.99")      # force everything into dropped
+    monkeypatch.setenv("LOADOUT_THRESHOLD", "0.99")      # force everything into dropped
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(cli, "make_model2vec_embed", lambda name: cli.keyword_embed)
     monkeypatch.setattr(cli, "_interactive", lambda p: True)
@@ -163,7 +163,7 @@ def test_doctor_reports_external_model_over_bundled_dir(tmp_path, monkeypatch, c
     root = _root(tmp_path)
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
-    repo_cfg = tmp_path / ".smartctx"; repo_cfg.mkdir()
+    repo_cfg = tmp_path / ".loadout"; repo_cfg.mkdir()
     repo_cfg.joinpath("config.toml").write_text('model_name = "minishlab/potion-base-32M"')  # not bundled id
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(cli, "make_model2vec_embed", lambda name: (lambda texts: None))  # loads OK
@@ -193,7 +193,7 @@ def test_dropped_skill_offered_in_gate(tmp_path, monkeypatch):
     root = _skill_root(tmp_path)
     (tmp_path / "README.md").write_text("# P\n\nA tool that does X.\n")   # goal from docs -> no goal prompt
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
-    monkeypatch.setenv("SMARTCTX_THRESHOLD", "0.99")      # force everything into dropped
+    monkeypatch.setenv("LOADOUT_THRESHOLD", "0.99")      # force everything into dropped
     monkeypatch.chdir(tmp_path)                            # unseeded -> gate offered
     monkeypatch.setattr(cli, "make_model2vec_embed", lambda name: cli.keyword_embed)
     monkeypatch.setattr(cli, "_interactive", lambda p: True)
@@ -215,7 +215,7 @@ def test_dropped_skill_offered_in_gate(tmp_path, monkeypatch):
 def test_explain_dropped_skill_in_dropping_section(tmp_path, monkeypatch, capsys):
     root = _skill_root(tmp_path)                          # figma@x plugin + Gmail mcp + astro skill
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
-    monkeypatch.setenv("SMARTCTX_THRESHOLD", "0.99")      # rank everything out
+    monkeypatch.setenv("LOADOUT_THRESHOLD", "0.99")      # rank everything out
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(cli, "make_model2vec_embed", lambda name: cli.keyword_embed)
     monkeypatch.setattr(cli, "_interactive", lambda p: False)   # no elicitation
@@ -231,7 +231,7 @@ def test_explain_dropped_skill_in_dropping_section(tmp_path, monkeypatch, capsys
 def test_no_scope_skills_force_keeps_skill(tmp_path, monkeypatch, capsys):
     root = _skill_root(tmp_path)
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
-    monkeypatch.setenv("SMARTCTX_THRESHOLD", "0.99")      # would rank the skill out if scoped
+    monkeypatch.setenv("LOADOUT_THRESHOLD", "0.99")      # would rank the skill out if scoped
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(cli, "make_model2vec_embed", lambda name: cli.keyword_embed)
     monkeypatch.setattr(cli, "_interactive", lambda p: False)
@@ -246,7 +246,7 @@ def test_mcp_json_server_kept_appears_in_overlay(tmp_path, monkeypatch):
     root = _root(tmp_path)
     (tmp_path / ".mcp.json").write_text('{"mcpServers": {"Proj": {"command": "p"}}}')
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
-    monkeypatch.setenv("SMARTCTX_ALWAYS_KEEP", "Proj")   # pin the project server so it survives
+    monkeypatch.setenv("LOADOUT_ALWAYS_KEEP", "Proj")   # pin the project server so it survives
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(cli, "make_model2vec_embed", lambda name: cli.keyword_embed)
     captured = _capture_mcp_overlay(monkeypatch)
@@ -255,15 +255,15 @@ def test_mcp_json_server_kept_appears_in_overlay(tmp_path, monkeypatch):
     assert captured["mcp"]["mcpServers"]["Proj"] == {"command": "p"}   # real def from ./.mcp.json
 
 def _two_profiles(tmp_path):
-    # ~/.claude (no smartctx config) + ~/.claude-perso (with config); returns the perso root
+    # ~/.claude (no loadout config) + ~/.claude-perso (with config); returns the perso root
     default = tmp_path / ".claude"; default.mkdir()
     default.joinpath("settings.json").write_text('{"enabledPlugins": {"figma@x": true}}')
     default.joinpath(".claude.json").write_text('{"mcpServers": {}}')
     perso = tmp_path / ".claude-perso"; perso.mkdir()
     perso.joinpath("settings.json").write_text('{"enabledPlugins": {"figma@x": true}}')
     perso.joinpath(".claude.json").write_text('{"mcpServers": {}}')
-    (perso / "smartctx").mkdir()
-    (perso / "smartctx" / "config.toml").write_text('always_keep = ["figma@x"]\n')
+    (perso / "loadout").mkdir()
+    (perso / "loadout" / "config.toml").write_text('always_keep = ["figma@x"]\n')
     return perso
 
 def test_resolve_config_root_honors_explicit_env(monkeypatch):
@@ -289,7 +289,7 @@ def test_resolve_config_root_prompts_and_returns_choice(tmp_path, monkeypatch, c
     assert chosen == perso
     err = capsys.readouterr().err
     assert "pick a Claude profile" in err
-    assert "smartctx config: present" in err and "smartctx config: absent" in err
+    assert "loadout config: present" in err and "loadout config: absent" in err
 
 def test_resolve_config_root_reasks_on_empty_then_valid(tmp_path, monkeypatch):
     _two_profiles(tmp_path)
@@ -356,7 +356,7 @@ def test_prompted_profile_with_always_keep_protects_pinned_item(tmp_path, monkey
     perso = _two_profiles(tmp_path)                       # perso has always_keep = ["figma@x"]
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
-    monkeypatch.setenv("SMARTCTX_THRESHOLD", "0.99")     # force ranking to drop everything
+    monkeypatch.setenv("LOADOUT_THRESHOLD", "0.99")     # force ranking to drop everything
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(cli, "make_model2vec_embed", lambda name: cli.keyword_embed)
     monkeypatch.setattr(cli, "_interactive", lambda p: True)
@@ -368,10 +368,10 @@ def test_prompted_profile_with_always_keep_protects_pinned_item(tmp_path, monkey
     assert "figma@x" not in captured["settings"]["enabledPlugins"]   # pinned -> not disabled
 
 def test_prompted_default_profile_lacking_config_disables_item(tmp_path, monkeypatch):
-    _two_profiles(tmp_path)                               # ~/.claude has no smartctx config
+    _two_profiles(tmp_path)                               # ~/.claude has no loadout config
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
-    monkeypatch.setenv("SMARTCTX_THRESHOLD", "0.99")
+    monkeypatch.setenv("LOADOUT_THRESHOLD", "0.99")
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(cli, "make_model2vec_embed", lambda name: cli.keyword_embed)
     monkeypatch.setattr(cli, "_interactive", lambda p: True)
@@ -401,8 +401,8 @@ def test_launch_no_gate_env_suppresses_prompt(tmp_path, monkeypatch, capsys):
     _root(tmp_path)
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "root"))
     (tmp_path / "README.md").write_text("# P\n\nA tool that does X.\n")   # goal from docs -> no goal prompt
-    monkeypatch.setenv("SMARTCTX_THRESHOLD", "0.99")     # force drops -> summary would show
-    monkeypatch.setenv("SMARTCTX_NO_GATE", "1")          # opt out of the pause
+    monkeypatch.setenv("LOADOUT_THRESHOLD", "0.99")     # force drops -> summary would show
+    monkeypatch.setenv("LOADOUT_NO_GATE", "1")          # opt out of the pause
     monkeypatch.chdir(tmp_path)                          # unseeded repo (would normally gate)
     monkeypatch.setattr(cli, "make_model2vec_embed", lambda name: cli.keyword_embed)
     monkeypatch.setattr(cli, "_interactive", lambda p: True)
@@ -411,13 +411,13 @@ def test_launch_no_gate_env_suppresses_prompt(tmp_path, monkeypatch, capsys):
     rc = cli.main([])
     assert rc == 0
     err = capsys.readouterr().err
-    assert "scoped out" in err and "smartctx init" in err   # summary + nudge still shown
+    assert "scoped out" in err and "loadout init" in err   # summary + nudge still shown
     assert "[enter] launch" not in err                      # but no interactive gate
 
 def test_explain_reports_estimated_savings(tmp_path, monkeypatch, capsys):
     _root(tmp_path)                                       # 1 mcp + 1 plugin, no rules
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "root"))
-    monkeypatch.setenv("SMARTCTX_THRESHOLD", "0.99")     # force both into dropped
+    monkeypatch.setenv("LOADOUT_THRESHOLD", "0.99")     # force both into dropped
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(cli, "make_model2vec_embed", lambda name: cli.keyword_embed)
     monkeypatch.setattr(cli.subprocess, "run", lambda *a, **k: pytest.fail("--explain must not launch"))
@@ -431,7 +431,7 @@ def test_explain_reports_estimated_savings(tmp_path, monkeypatch, capsys):
 def test_launch_prints_savings_line_to_stderr(tmp_path, monkeypatch, capsys):
     _root(tmp_path)
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "root"))
-    monkeypatch.setenv("SMARTCTX_THRESHOLD", "0.99")
+    monkeypatch.setenv("LOADOUT_THRESHOLD", "0.99")
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(cli, "make_model2vec_embed", lambda name: cli.keyword_embed)
     monkeypatch.setattr(cli, "_interactive", lambda p: True)   # savings line is interactive-only
@@ -446,7 +446,7 @@ def test_launch_prints_savings_line_to_stderr(tmp_path, monkeypatch, capsys):
 def test_launch_nudges_when_unseeded(tmp_path, monkeypatch, capsys):
     _root(tmp_path)
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "root"))
-    monkeypatch.setenv("SMARTCTX_THRESHOLD", "0.99")
+    monkeypatch.setenv("LOADOUT_THRESHOLD", "0.99")
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(cli, "make_model2vec_embed", lambda name: cli.keyword_embed)
     monkeypatch.setattr(cli, "_interactive", lambda p: True)
@@ -454,15 +454,15 @@ def test_launch_nudges_when_unseeded(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(cli.subprocess, "run", lambda *a, **k: _RC(0))
     rc = cli.main([])
     assert rc == 0
-    assert "smartctx init" in capsys.readouterr().err            # nudge to persist scoping
+    assert "loadout init" in capsys.readouterr().err            # nudge to persist scoping
 
 def test_launch_no_nudge_when_seeded(tmp_path, monkeypatch, capsys):
     _root(tmp_path)
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "root"))
-    monkeypatch.setenv("SMARTCTX_THRESHOLD", "0.99")
+    monkeypatch.setenv("LOADOUT_THRESHOLD", "0.99")
     monkeypatch.chdir(tmp_path)
-    (tmp_path / ".smartctx").mkdir()
-    (tmp_path / ".smartctx" / "config.toml").write_text("threshold = 0.5\n")   # already seeded
+    (tmp_path / ".loadout").mkdir()
+    (tmp_path / ".loadout" / "config.toml").write_text("threshold = 0.5\n")   # already seeded
     monkeypatch.setattr(cli, "make_model2vec_embed", lambda name: cli.keyword_embed)
     monkeypatch.setattr(cli, "_interactive", lambda p: True)
     monkeypatch.setattr(cli, "_LAUNCH_PAUSE_S", 0)               # don't actually sleep in the test
@@ -472,17 +472,17 @@ def test_launch_no_nudge_when_seeded(tmp_path, monkeypatch, capsys):
     assert rc == 0
     err = capsys.readouterr().err
     assert "scoped out" in err                                   # seeded: summary still shown (then a brief pause)
-    assert "smartctx init" not in err                            # seeded -> no nudge
+    assert "loadout init" not in err                            # seeded -> no nudge
     assert "[enter] launch" not in err                           # seeded -> no gate prompt, fire-and-forget
 
 def test_launch_seeded_pauses_before_claude(tmp_path, monkeypatch, capsys):
     _root(tmp_path)
     (tmp_path / "README.md").write_text("# P\n\nA tool that does X.\n")   # goal from docs -> no goal prompt
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "root"))
-    monkeypatch.setenv("SMARTCTX_THRESHOLD", "0.99")
+    monkeypatch.setenv("LOADOUT_THRESHOLD", "0.99")
     monkeypatch.chdir(tmp_path)
-    (tmp_path / ".smartctx").mkdir()
-    (tmp_path / ".smartctx" / "config.toml").write_text("threshold = 0.5\n")   # seeded
+    (tmp_path / ".loadout").mkdir()
+    (tmp_path / ".loadout" / "config.toml").write_text("threshold = 0.5\n")   # seeded
     monkeypatch.setattr(cli, "make_model2vec_embed", lambda name: cli.keyword_embed)
     monkeypatch.setattr(cli, "_interactive", lambda p: True)
     slept = []
@@ -496,7 +496,7 @@ def test_launch_gate_edit_recomposes_keep(tmp_path, monkeypatch):
     root = _root(tmp_path)
     (tmp_path / "README.md").write_text("# P\n\nA tool that does X.\n")   # goal from docs -> no goal prompt
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
-    monkeypatch.setenv("SMARTCTX_THRESHOLD", "0.99")     # everything dropped by default
+    monkeypatch.setenv("LOADOUT_THRESHOLD", "0.99")     # everything dropped by default
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(cli, "make_model2vec_embed", lambda name: cli.keyword_embed)
     monkeypatch.setattr(cli, "_interactive", lambda p: True)
@@ -509,13 +509,13 @@ def test_launch_gate_edit_recomposes_keep(tmp_path, monkeypatch):
     rc = cli.main([])
     assert rc == 0
     assert "Gmail" in captured["mcp"]["mcpServers"]       # edit re-kept the dropped server
-    assert not (tmp_path / ".smartctx" / "config.toml").exists()   # 'n' -> not persisted
+    assert not (tmp_path / ".loadout" / "config.toml").exists()   # 'n' -> not persisted
 
 def test_launch_gate_edit_persists_seed(tmp_path, monkeypatch):
     root = _root(tmp_path)
     (tmp_path / "README.md").write_text("# P\n\nA tool that does X.\n")
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
-    monkeypatch.setenv("SMARTCTX_THRESHOLD", "0.99")
+    monkeypatch.setenv("LOADOUT_THRESHOLD", "0.99")
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(cli, "make_model2vec_embed", lambda name: cli.keyword_embed)
     monkeypatch.setattr(cli, "_interactive", lambda p: True)
@@ -527,8 +527,8 @@ def test_launch_gate_edit_persists_seed(tmp_path, monkeypatch):
     monkeypatch.setattr(cli.subprocess, "run", lambda *a, **k: _RC(0))
     rc = cli.main([])
     assert rc == 0
-    assert (tmp_path / ".smartctx" / "config.toml").is_file()   # persisted -> seeded
-    rules = (tmp_path / ".smartctx" / "rules.toml").read_text()
+    assert (tmp_path / ".loadout" / "config.toml").is_file()   # persisted -> seeded
+    rules = (tmp_path / ".loadout" / "rules.toml").read_text()
     assert "Gmail" in rules and "figma@x" in rules             # full keep/drop frozen as rules
 
 def test_doctor_reports_prunable_budget(tmp_path, monkeypatch, capsys):
@@ -545,10 +545,10 @@ def test_doctor_reports_prunable_budget(tmp_path, monkeypatch, capsys):
 
 def test_token_costs_config_override_changes_estimate(tmp_path, monkeypatch, capsys):
     _root(tmp_path)
-    repo = tmp_path / ".smartctx"; repo.mkdir()
+    repo = tmp_path / ".loadout"; repo.mkdir()
     repo.joinpath("config.toml").write_text("[token_costs]\nmcp = 5000\nplugin = 0\n")
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "root"))
-    monkeypatch.setenv("SMARTCTX_THRESHOLD", "0.99")
+    monkeypatch.setenv("LOADOUT_THRESHOLD", "0.99")
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(cli, "make_model2vec_embed", lambda name: cli.keyword_embed)
     monkeypatch.setattr(cli.subprocess, "run", lambda *a, **k: pytest.fail("must not launch"))
@@ -573,11 +573,11 @@ def test_measure_command_reports_and_caches(tmp_path, monkeypatch, capsys):
 
 def test_explain_prefers_measured_cost_over_constant(tmp_path, monkeypatch, capsys):
     root = _root(tmp_path)                                # Gmail mcp + figma@x plugin
-    (root / "smartctx").mkdir()
-    (root / "smartctx" / "costs.json").write_text(
+    (root / "loadout").mkdir()
+    (root / "loadout" / "costs.json").write_text(
         '{"servers": {"Gmail": {"tokens": 9000, "method": "m"}}}')
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
-    monkeypatch.setenv("SMARTCTX_THRESHOLD", "0.99")     # force both into dropped
+    monkeypatch.setenv("LOADOUT_THRESHOLD", "0.99")     # force both into dropped
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(cli, "make_model2vec_embed", lambda name: cli.keyword_embed)
     monkeypatch.setattr(cli.subprocess, "run", lambda *a, **k: pytest.fail("must not launch"))
@@ -589,14 +589,14 @@ def test_explain_prefers_measured_cost_over_constant(tmp_path, monkeypatch, caps
 
 def test_explain_surfaces_connectors_dropped_by_strict_mode(tmp_path, monkeypatch, capsys):
     root = _root(tmp_path)                                # mcp "Gmail" + plugin "figma@x"
-    (root / "smartctx").mkdir()
-    (root / "smartctx" / "costs.json").write_text(json.dumps({"servers": {
+    (root / "loadout").mkdir()
+    (root / "loadout" / "costs.json").write_text(json.dumps({"servers": {
         "claude.ai Calendar": {"tokens": 21000, "method": "m"},   # connector -> counted
         "Gmail": {"tokens": 9000, "method": "m"},                 # .claude.json server -> not a connector
         "plugin:playwright:playwright": {"tokens": 4600, "method": "m"},  # plugin-bundled -> excluded
     }}))
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
-    monkeypatch.setenv("SMARTCTX_THRESHOLD", "0.99")     # drop Gmail + figma
+    monkeypatch.setenv("LOADOUT_THRESHOLD", "0.99")     # drop Gmail + figma
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(cli, "make_model2vec_embed", lambda name: cli.keyword_embed)
     monkeypatch.setattr(cli.subprocess, "run", lambda *a, **k: pytest.fail("must not launch"))
@@ -622,7 +622,7 @@ def test_help_prints_usage_without_prompting_or_launching(tmp_path, monkeypatch,
         rc = cli.main([flag])
         assert rc == 0 and launched["ran"] is False
         out = capsys.readouterr().out
-        assert "Usage:" in out and "smartctx doctor" in out and "pass straight through" in out
+        assert "Usage:" in out and "loadout doctor" in out and "pass straight through" in out
 
 def test_version_prints_without_prompting(tmp_path, monkeypatch, capsys):
     _two_profiles(tmp_path)
@@ -633,7 +633,7 @@ def test_version_prints_without_prompting(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr("builtins.input", lambda *a, **k: pytest.fail("--version must not prompt"))
     rc = cli.main(["--version"])
     assert rc == 0
-    assert capsys.readouterr().out.startswith("smartctx ")
+    assert capsys.readouterr().out.startswith("loadout ")
 
 def test_rules_without_rule_model_skips_nl_prompt(tmp_path, monkeypatch, capsys):
     root = _root(tmp_path)                                # no rule_model_path -> compile_fn is None
@@ -648,7 +648,7 @@ def test_rules_without_rule_model_skips_nl_prompt(tmp_path, monkeypatch, capsys)
     assert "rule for" not in joined                      # NL authoring skipped when no rule model
     assert "[k]eep always" in joined                     # goes straight to structured choice
     assert "no rule model configured" in capsys.readouterr().err   # upfront guidance shown
-    assert "always_keep" in (root / "smartctx" / "rules.toml").read_text()   # [k]eep authored a rule
+    assert "always_keep" in (root / "loadout" / "rules.toml").read_text()   # [k]eep authored a rule
 
 def _proj(base, name):
     r = base / name; r.mkdir(parents=True); return r        # any subdir is a project (no .git needed)
@@ -714,47 +714,47 @@ def test_init_yes_seeds_config_and_rules(tmp_path, monkeypatch, capsys):
     repos = tmp_path / "repos"; r1 = _proj(repos, "proj1")
     rc = cli.main(["init", str(repos), "--yes"])
     assert rc == 0
-    cfg = (r1 / ".smartctx" / "config.toml").read_text()
+    cfg = (r1 / ".loadout" / "config.toml").read_text()
     assert "threshold" in cfg and "model_name" in cfg
-    rules = tomllib.loads((r1 / ".smartctx" / "rules.toml").read_text())["rule"]
+    rules = tomllib.loads((r1 / ".loadout" / "rules.toml").read_text())["rule"]
     actions = {x["target"]: x["predicate"]["action"] for x in rules}
     assert set(actions) == {"Gmail", "figma@x"}          # only prunable kinds frozen
-    assert (r1 / ".smartctx" / ".gitignore").read_text().strip().endswith("*")   # local, gitignored
+    assert (r1 / ".loadout" / ".gitignore").read_text().strip().endswith("*")   # local, gitignored
     assert all(a in ("always_keep", "always_drop") for a in actions.values())
-    assert (r1 / ".smartctx" / "goal").is_file()
+    assert (r1 / ".loadout" / "goal").is_file()
 
 def test_init_freezes_skill_rules_too(tmp_path, monkeypatch):
     import tomllib
     root = _skill_root(tmp_path)                          # Gmail mcp + figma@x plugin + astro skill
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
-    monkeypatch.setenv("SMARTCTX_THRESHOLD", "0.99")      # rank the skill out
+    monkeypatch.setenv("LOADOUT_THRESHOLD", "0.99")      # rank the skill out
     monkeypatch.setattr(cli, "make_model2vec_embed", lambda name: cli.keyword_embed)
     repos = tmp_path / "repos"; r1 = _proj(repos, "proj1")
     rc = cli.main(["init", str(repos), "--yes"])
     assert rc == 0
-    rules = tomllib.loads((r1 / ".smartctx" / "rules.toml").read_text())["rule"]
+    rules = tomllib.loads((r1 / ".loadout" / "rules.toml").read_text())["rule"]
     actions = {x["target"]: x["predicate"]["action"] for x in rules}
     assert actions.get("astro") == "always_drop"          # skills are seeded/frozen like mcp + plugins
 
 def test_init_skips_already_configured(tmp_path, monkeypatch, capsys):
     root = _root(tmp_path); monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
     repos = tmp_path / "repos"; r1 = _proj(repos, "proj1")
-    (r1 / ".smartctx").mkdir(); (r1 / ".smartctx" / "config.toml").write_text("threshold = 0.5\n")
+    (r1 / ".loadout").mkdir(); (r1 / ".loadout" / "config.toml").write_text("threshold = 0.5\n")
     rc = cli.main(["init", str(repos), "--yes"])
     assert rc == 0
     assert "already configured" in capsys.readouterr().out
-    assert not (r1 / ".smartctx" / "rules.toml").exists()  # existing config left untouched
+    assert not (r1 / ".loadout" / "rules.toml").exists()  # existing config left untouched
 
 def test_init_skips_repo_with_only_authored_rules(tmp_path, monkeypatch, capsys):
     root = _root(tmp_path); monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
     repos = tmp_path / "repos"; r1 = _proj(repos, "proj1")
-    (r1 / ".smartctx").mkdir()
+    (r1 / ".loadout").mkdir()
     authored = '[[rule]]\ntarget = "Gmail"\nnl = "team"\n[rule.predicate]\naction = "always_keep"\nmatch = []\nmatch_mode = "any"\n'
-    (r1 / ".smartctx" / "rules.toml").write_text(authored)   # committed rules, no config.toml
+    (r1 / ".loadout" / "rules.toml").write_text(authored)   # committed rules, no config.toml
     rc = cli.main(["init", str(repos), "--yes"])
     assert rc == 0
-    assert (r1 / ".smartctx" / "rules.toml").read_text() == authored   # never clobbered
-    assert not (r1 / ".smartctx" / "config.toml").exists()
+    assert (r1 / ".loadout" / "rules.toml").read_text() == authored   # never clobbered
+    assert not (r1 / ".loadout" / "config.toml").exists()
 
 def test_init_non_tty_without_yes_is_noop(tmp_path, monkeypatch, capsys):
     root = _root(tmp_path); monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
@@ -762,7 +762,7 @@ def test_init_non_tty_without_yes_is_noop(tmp_path, monkeypatch, capsys):
     _fake_stdin(monkeypatch, tty=False)
     rc = cli.main(["init", str(repos)])
     assert rc == 0 and "interactive terminal" in capsys.readouterr().err
-    assert not (r1 / ".smartctx").exists()
+    assert not (r1 / ".loadout").exists()
 
 def test_init_interactive_selects_subset(tmp_path, monkeypatch):
     root = _root(tmp_path); monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
@@ -774,8 +774,8 @@ def test_init_interactive_selects_subset(tmp_path, monkeypatch):
     monkeypatch.setattr(cli, "_ask", lambda prompt: next(answers))
     rc = cli.main(["init", str(repos)])
     assert rc == 0
-    assert (r1 / ".smartctx" / "config.toml").is_file()
-    assert not (r2 / ".smartctx" / "config.toml").exists()   # unselected repo untouched
+    assert (r1 / ".loadout" / "config.toml").is_file()
+    assert not (r2 / ".loadout" / "config.toml").exists()   # unselected repo untouched
 
 def test_init_goal_override_persists(tmp_path, monkeypatch):
     root = _root(tmp_path); monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
@@ -787,7 +787,7 @@ def test_init_goal_override_persists(tmp_path, monkeypatch):
     monkeypatch.setattr(cli, "_ask", lambda prompt: next(answers))
     rc = cli.main(["init", str(repos)])
     assert rc == 0
-    assert (r1 / ".smartctx" / "goal").read_text().strip() == "frontend work"
+    assert (r1 / ".loadout" / "goal").read_text().strip() == "frontend work"
 
 def test_init_skip_repo_at_goal_prompt(tmp_path, monkeypatch):
     root = _root(tmp_path); monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
@@ -799,7 +799,7 @@ def test_init_skip_repo_at_goal_prompt(tmp_path, monkeypatch):
     monkeypatch.setattr(cli, "_ask", lambda prompt: next(answers))
     rc = cli.main(["init", str(repos)])
     assert rc == 0
-    assert not (r1 / ".smartctx").exists()               # 's' skips before any write
+    assert not (r1 / ".loadout").exists()               # 's' skips before any write
 
 def test_init_no_arg_seeds_current_repo_not_children(tmp_path, monkeypatch):
     root = _root(tmp_path); monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
@@ -809,19 +809,19 @@ def test_init_no_arg_seeds_current_repo_not_children(tmp_path, monkeypatch):
     monkeypatch.chdir(repo)
     rc = cli.main(["init", "--yes"])                      # no ROOT -> seed cwd itself
     assert rc == 0
-    assert (repo / ".smartctx" / "config.toml").is_file()   # the repo itself is seeded
-    assert not (child / ".smartctx").exists()               # children are never descended into
+    assert (repo / ".loadout" / "config.toml").is_file()   # the repo itself is seeded
+    assert not (child / ".loadout").exists()               # children are never descended into
 
 def test_init_no_arg_already_configured_nudges_update(tmp_path, monkeypatch, capsys):
     root = _root(tmp_path); monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
     repo = tmp_path / "myrepo"; repo.mkdir()
-    (repo / ".smartctx").mkdir(); (repo / ".smartctx" / "config.toml").write_text("threshold = 0.5\n")
+    (repo / ".loadout").mkdir(); (repo / ".loadout" / "config.toml").write_text("threshold = 0.5\n")
     monkeypatch.chdir(repo)
     rc = cli.main(["init", "--yes"])
     assert rc == 0
     out = capsys.readouterr().out
-    assert "already configured" in out and "smartctx update" in out   # nudge toward update
-    assert not (repo / ".smartctx" / "rules.toml").exists()           # existing config untouched
+    assert "already configured" in out and "loadout update" in out   # nudge toward update
+    assert not (repo / ".loadout" / "rules.toml").exists()           # existing config untouched
 
 def test_init_dot_arg_bulk_seeds_children(tmp_path, monkeypatch):
     root = _root(tmp_path); monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
@@ -831,8 +831,8 @@ def test_init_dot_arg_bulk_seeds_children(tmp_path, monkeypatch):
     monkeypatch.chdir(parent)
     rc = cli.main(["init", ".", "--yes"])                 # explicit ROOT '.' -> bulk over children
     assert rc == 0
-    assert (r1 / ".smartctx" / "config.toml").is_file()
-    assert (r2 / ".smartctx" / "config.toml").is_file()
+    assert (r1 / ".loadout" / "config.toml").is_file()
+    assert (r2 / ".loadout" / "config.toml").is_file()
 
 def test_checkbox_preset_seeds_initial_ticks():
     picks = cli._checkbox_select("t", ["a", "b", "c"], read_key=_keys("\r"),
@@ -845,7 +845,7 @@ def test_checkbox_allow_empty_confirms_nothing():
     assert picks == []                                   # 'a' clears all, Enter confirms keep-nothing
 
 def _prunable_items():
-    from smartctx.inventory import Item
+    from ccloadout.inventory import Item
     return [Item(id="Gmail", kind="mcp", name="Gmail", description="Gmail"),
             Item(id="figma@x", kind="plugin", name="figma@x", description="figma@x")]
 
@@ -859,7 +859,7 @@ def test_review_keep_drop_toggle_flips_decision(monkeypatch):
     assert kept == {"Gmail"}                              # figma@x toggled off
 
 def test_display_name_strips_marketplace_suffix():
-    from smartctx.inventory import Item
+    from ccloadout.inventory import Item
     assert cli._display_name(Item("figma@x", "plugin", "f", "")) == "figma"
     assert cli._display_name(Item("astro", "skill", "a", "")) == "astro"   # no suffix -> unchanged
 
@@ -879,7 +879,7 @@ def test_render_checklist_draws_group_headers_and_counts_lines():
 
 def test_review_keep_drop_groups_by_kind_and_maps_past_headers(monkeypatch):
     import shutil
-    from smartctx.inventory import Item
+    from ccloadout.inventory import Item
     monkeypatch.setattr(cli, "_can_raw", lambda: True)
     monkeypatch.setattr(shutil, "get_terminal_size", lambda default=(80, 24): os.terminal_size((100, 40)))
     items = [Item("astro", "skill", "astro", "sky imaging"),
@@ -914,7 +914,7 @@ def test_init_review_choice_is_what_gets_frozen(tmp_path, monkeypatch):
     monkeypatch.setattr(cli, "_review_keep_drop", lambda repo, prunable, auto: {"Gmail"})
     rc = cli.main(["init", str(repos)])
     assert rc == 0
-    rules = tomllib.loads((r1 / ".smartctx" / "rules.toml").read_text())["rule"]
+    rules = tomllib.loads((r1 / ".loadout" / "rules.toml").read_text())["rule"]
     actions = {x["target"]: x["predicate"]["action"] for x in rules}
     assert actions == {"Gmail": "always_keep", "figma@x": "always_drop"}  # review set frozen, not auto
 
@@ -925,7 +925,7 @@ def test_init_summary_names_skipped_and_already(tmp_path, monkeypatch, capsys):
     repos = tmp_path / "repos"
     _proj(repos, "proj1"); _proj(repos, "proj2")
     pre = _proj(repos, "proj3")
-    (pre / ".smartctx").mkdir(); (pre / ".smartctx" / "config.toml").write_text("threshold = 0.5\n")
+    (pre / ".loadout").mkdir(); (pre / ".loadout" / "config.toml").write_text("threshold = 0.5\n")
     _fake_stdin(monkeypatch, tty=True)
     monkeypatch.setattr(cli, "_select_repos", lambda eligible, already: [eligible[0]])  # only proj1
     monkeypatch.setattr(cli, "_ask", lambda prompt: "")
@@ -949,29 +949,29 @@ def test_update_single_refreshes_machine_rules(tmp_path, monkeypatch):
     monkeypatch.chdir(r1)
     rc = cli.main(["update", "--yes"])
     assert rc == 0
-    rules = tomllib.loads((r1 / ".smartctx" / "rules.toml").read_text())["rule"]
+    rules = tomllib.loads((r1 / ".loadout" / "rules.toml").read_text())["rule"]
     assert {x["target"] for x in rules} == {"Gmail", "figma@x"}
-    assert all("seeded by smartctx update" in x["nl"] for x in rules)   # regenerated by update
+    assert all("seeded by loadout update" in x["nl"] for x in rules)   # regenerated by update
 
 def test_update_preserves_human_rule(tmp_path, monkeypatch):
     import tomllib
     _root_, _repos, r1 = _seeded_repo(tmp_path, monkeypatch)
     human = ('[[rule]]\ntarget = "Gmail"\nnl = "team pins gmail"\n[rule.predicate]\n'
              'action = "always_keep"\nmatch = []\nmatch_mode = "any"\n')
-    (r1 / ".smartctx" / "rules.toml").write_text(human)   # hand-authored, no seed marker
+    (r1 / ".loadout" / "rules.toml").write_text(human)   # hand-authored, no seed marker
     monkeypatch.chdir(r1)
     rc = cli.main(["update", "--yes"])
     assert rc == 0
-    rules = {x["target"]: x for x in tomllib.loads((r1 / ".smartctx" / "rules.toml").read_text())["rule"]}
+    rules = {x["target"]: x for x in tomllib.loads((r1 / ".loadout" / "rules.toml").read_text())["rule"]}
     assert rules["Gmail"]["nl"] == "team pins gmail"      # human rule untouched
-    assert "seeded by smartctx update" in rules["figma@x"]["nl"]   # the rest regenerated
+    assert "seeded by loadout update" in rules["figma@x"]["nl"]   # the rest regenerated
 
 def test_update_flip_overrides_human_rule(tmp_path, monkeypatch):
     import tomllib
     _root_, _repos, r1 = _seeded_repo(tmp_path, monkeypatch)
     human = ('[[rule]]\ntarget = "Gmail"\nnl = "team pins gmail"\n[rule.predicate]\n'
              'action = "always_keep"\nmatch = []\nmatch_mode = "any"\n')
-    (r1 / ".smartctx" / "rules.toml").write_text(human)
+    (r1 / ".loadout" / "rules.toml").write_text(human)
     monkeypatch.chdir(r1)
     _fake_stdin(monkeypatch, tty=True)
     monkeypatch.setattr(cli, "_discover_profiles", lambda active: [active])
@@ -983,16 +983,16 @@ def test_update_flip_overrides_human_rule(tmp_path, monkeypatch):
     rc = cli.main(["update"])
     assert rc == 0
     assert "Gmail" in seen["kept"]                        # preset honored the human keep rule ("mostrale")
-    rules = [x for x in tomllib.loads((r1 / ".smartctx" / "rules.toml").read_text())["rule"]
+    rules = [x for x in tomllib.loads((r1 / ".loadout" / "rules.toml").read_text())["rule"]
              if x["target"] == "Gmail"]
     assert len(rules) == 1                                # human rule replaced, not duplicated
     assert rules[0]["predicate"]["action"] == "always_drop"
-    assert "seeded by smartctx update" in rules[0]["nl"]  # now a machine rule
+    assert "seeded by loadout update" in rules[0]["nl"]  # now a machine rule
 
 def test_update_keeps_config_pinned_even_if_unticked(tmp_path, monkeypatch):
     import tomllib
     root = _root(tmp_path); monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
-    monkeypatch.setenv("SMARTCTX_ALWAYS_KEEP", "Gmail")   # config pin — wins over rules at launch
+    monkeypatch.setenv("LOADOUT_ALWAYS_KEEP", "Gmail")   # config pin — wins over rules at launch
     monkeypatch.setattr(cli, "make_model2vec_embed", lambda name: cli.keyword_embed)
     repos = tmp_path / "repos"; r1 = _proj(repos, "proj1")
     cli.main(["init", str(repos), "--yes"])
@@ -1008,7 +1008,7 @@ def test_update_keeps_config_pinned_even_if_unticked(tmp_path, monkeypatch):
     assert rc == 0
     assert "Gmail" not in seen["ids"]                    # pinned tool never offered in the picker
     rules = {x["target"]: x["predicate"]["action"] for x in
-             tomllib.loads((r1 / ".smartctx" / "rules.toml").read_text())["rule"]}
+             tomllib.loads((r1 / ".loadout" / "rules.toml").read_text())["rule"]}
     assert rules.get("Gmail") != "always_drop"           # config pin not overridden to a phantom drop
 
 def test_update_bulk_reports_unseeded(tmp_path, monkeypatch, capsys):
@@ -1016,7 +1016,7 @@ def test_update_bulk_reports_unseeded(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(cli, "make_model2vec_embed", lambda name: cli.keyword_embed)
     repos = tmp_path / "repos"; r1 = _proj(repos, "proj1"); _proj(repos, "proj2")
     cli.main(["init", str(repos), "--yes"])              # seeds both
-    import shutil as _sh; _sh.rmtree(repos / "proj2" / ".smartctx")   # proj2 no longer seeded
+    import shutil as _sh; _sh.rmtree(repos / "proj2" / ".loadout")   # proj2 no longer seeded
     rc = cli.main(["update", str(repos), "--yes"])
     assert rc == 0
     out = capsys.readouterr().out
@@ -1029,17 +1029,17 @@ def test_update_single_refuses_unseeded(tmp_path, monkeypatch, capsys):
     monkeypatch.chdir(bare)
     rc = cli.main(["update", "--yes"])
     assert rc == 0
-    assert "isn't smartctx-seeded" in capsys.readouterr().err
-    assert not (bare / ".smartctx").exists()
+    assert "isn't loadout-seeded" in capsys.readouterr().err
+    assert not (bare / ".loadout").exists()
 
 def test_update_redetects_goal_fresh(tmp_path, monkeypatch):
     _root_, _repos, r1 = _seeded_repo(tmp_path, monkeypatch)
-    (r1 / ".smartctx" / "goal").write_text("stale cached goal\n")   # what a launch would reuse
+    (r1 / ".loadout" / "goal").write_text("stale cached goal\n")   # what a launch would reuse
     (r1 / "pyproject.toml").write_text('[project]\ndescription = "a fresh purpose"\n')
     monkeypatch.chdir(r1)
     rc = cli.main(["update", "--yes"])
     assert rc == 0
-    goal = (r1 / ".smartctx" / "goal").read_text().strip()
+    goal = (r1 / ".loadout" / "goal").read_text().strip()
     assert "fresh purpose" in goal and "stale" not in goal   # cache bypassed, re-inferred
 
 def test_init_verbose_report_lists_each_tool(tmp_path, monkeypatch, capsys):

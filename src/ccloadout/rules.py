@@ -3,10 +3,10 @@ import sys, tomllib
 from dataclasses import dataclass
 from fnmatch import fnmatch
 from pathlib import Path
-from smartctx.inventory import Item
+from ccloadout.inventory import Item
 
 def _warn(msg: str) -> None:                       # local, avoids importing cli (cycle)
-    print(f"smartctx: {msg}", file=sys.stderr)
+    print(f"loadout: {msg}", file=sys.stderr)
 
 @dataclass(frozen=True)
 class Predicate:
@@ -65,7 +65,7 @@ def apply_rules(items: list[Item], rules: list[Rule], context: str) -> RuleOutco
     return RuleOutcome(tuple(keep), tuple(drop), tuple(undecided))
 
 def _rules_file(config_root: Path) -> Path:
-    return config_root / "smartctx" / "rules.toml"
+    return config_root / "loadout" / "rules.toml"
 
 def profile_rules_file(config_root: Path) -> Path:   # public accessor for the profile-level rules file
     return _rules_file(config_root)
@@ -97,7 +97,7 @@ def read_rules(path: Path) -> list[Rule]:            # public: parse one rules.t
 
 def load_rules(config_root: Path, cwd: Path) -> list[Rule]:
     user = {r.target: r for r in _parse(_rules_file(config_root))}
-    repo = {r.target: r for r in _parse(cwd / ".smartctx" / "rules.toml")}
+    repo = {r.target: r for r in _parse(cwd / ".loadout" / "rules.toml")}
     return list({**user, **repo}.values())   # repo overrides per target
 
 _ESC = {"\\": "\\\\", '"': '\\"', "\n": "\\n", "\t": "\\t", "\r": "\\r"}

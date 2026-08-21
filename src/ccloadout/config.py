@@ -3,7 +3,7 @@ import os, sys, tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Mapping
-from smartctx.savings import DEFAULT_TOKEN_COSTS
+from ccloadout.savings import DEFAULT_TOKEN_COSTS
 
 DEFAULT_THRESHOLD = 0.24   # potion-base-8M; re-centered from 0.20 when plugin items gained real
                            # manifest descriptions (richer text shifts scores up) — holds the prior
@@ -11,7 +11,7 @@ DEFAULT_THRESHOLD = 0.24   # potion-base-8M; re-centered from 0.20 when plugin i
 DEFAULT_MODEL = "minishlab/potion-base-8M"
 
 def _warn(msg: str) -> None:                       # local, avoids importing cli (cycle)
-    print(f"smartctx: {msg}", file=sys.stderr)
+    print(f"loadout: {msg}", file=sys.stderr)
 
 @dataclass(frozen=True)
 class Config:
@@ -58,8 +58,8 @@ def load_config(cwd: Path, environ: Mapping[str, str] | None = None,
         global_config_path = default_global_config_path(root)
     else:
         root, global_config_path = _resolve_paths(environ)
-    layers = [_read_toml(root / "smartctx" / "config.toml"),
-              _read_toml(cwd / ".smartctx" / "config.toml")]
+    layers = [_read_toml(root / "loadout" / "config.toml"),
+              _read_toml(cwd / ".loadout" / "config.toml")]
     always: tuple[str, ...] = ()
     threshold = DEFAULT_THRESHOLD
     model = DEFAULT_MODEL
@@ -78,14 +78,14 @@ def load_config(cwd: Path, environ: Mapping[str, str] | None = None,
     for layer in layers:
         if "rule_model_path" in layer:
             rule_model = str(layer["rule_model_path"])
-    if "SMARTCTX_RULE_MODEL" in environ:
-        rule_model = environ["SMARTCTX_RULE_MODEL"]
+    if "LOADOUT_RULE_MODEL" in environ:
+        rule_model = environ["LOADOUT_RULE_MODEL"]
     if rule_model:
         rule_model = str(Path(rule_model).expanduser())
-    if "SMARTCTX_ALWAYS_KEEP" in environ:
-        always = tuple(x for x in environ["SMARTCTX_ALWAYS_KEEP"].split(",") if x)
-    if "SMARTCTX_THRESHOLD" in environ:
-        threshold = float(environ["SMARTCTX_THRESHOLD"])
+    if "LOADOUT_ALWAYS_KEEP" in environ:
+        always = tuple(x for x in environ["LOADOUT_ALWAYS_KEEP"].split(",") if x)
+    if "LOADOUT_THRESHOLD" in environ:
+        threshold = float(environ["LOADOUT_THRESHOLD"])
     return Config(config_root=root, global_config_path=global_config_path,
                   always_keep=always, threshold=threshold,
                   model_name=model, rule_model_path=rule_model,

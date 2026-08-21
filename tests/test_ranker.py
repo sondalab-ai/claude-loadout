@@ -1,6 +1,6 @@
 import numpy as np
-from smartctx.inventory import Item
-from smartctx.ranker import Ranker, keyword_embed, make_model2vec_embed, bundled_model_path
+from ccloadout.inventory import Item
+from ccloadout.ranker import Ranker, keyword_embed, make_model2vec_embed, bundled_model_path
 
 def test_default_model_is_vendored_and_embeds_offline():
     # The default model ships inside the package: a fresh install ranks with no download.

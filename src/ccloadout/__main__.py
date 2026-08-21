@@ -1,4 +1,4 @@
-from smartctx.cli import main
+from ccloadout.cli import main
 import sys
 if __name__ == "__main__":
     sys.exit(main())

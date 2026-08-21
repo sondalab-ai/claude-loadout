@@ -1,5 +1,5 @@
 from pathlib import Path
-from smartctx.goal import detect_goal, write_goal_cache
+from ccloadout.goal import detect_goal, write_goal_cache
 
 def test_cache_takes_precedence(tmp_path: Path):
     write_goal_cache(tmp_path, "frontend work")
@@ -8,12 +8,12 @@ def test_cache_takes_precedence(tmp_path: Path):
 
 def test_cache_write_self_ignores_but_spares_authored_files(tmp_path: Path):
     write_goal_cache(tmp_path, "frontend work")
-    ignore = (tmp_path / ".smartctx" / ".gitignore").read_text()
+    ignore = (tmp_path / ".loadout" / ".gitignore").read_text()
     assert "goal" in ignore                            # machine state is ignored
     assert "config.toml" not in ignore and "rules.toml" not in ignore   # authored files stay committable
 
 def test_cache_write_preserves_existing_gitignore(tmp_path: Path):
-    d = tmp_path / ".smartctx"; d.mkdir()
+    d = tmp_path / ".loadout"; d.mkdir()
     (d / ".gitignore").write_text("custom\n")
     write_goal_cache(tmp_path, "x")
     assert (d / ".gitignore").read_text() == "custom\n"   # never clobber a user-authored ignore

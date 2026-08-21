@@ -1,5 +1,5 @@
 from pathlib import Path
-from smartctx.inventory import claude_code_inventory, Item
+from ccloadout.inventory import claude_code_inventory, Item
 
 def _root(tmp_path: Path) -> Path:
     root = tmp_path / "root"; root.mkdir()

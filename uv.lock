@@ -20,6 +20,33 @@ wheels = [
 ]
 
 [[package]]
+name = "ccloadout"
+version = "0.1.0"
+source = { editable = "." }
+dependencies = [
+    { name = "model2vec" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
+    { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+]
+
+[package.optional-dependencies]
+dev = [
+    { name = "pytest" },
+]
+rules = [
+    { name = "llama-cpp-python" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "llama-cpp-python", marker = "extra == 'rules'", specifier = ">=0.2" },
+    { name = "model2vec", specifier = ">=0.3" },
+    { name = "numpy", specifier = ">=1.24" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
+]
+provides-extras = ["dev", "rules"]
+
+[[package]]
 name = "certifi"
 version = "2026.7.22"
 source = { registry = "https://pypi.org/simple" }
@@ -580,33 +607,6 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/1b/6d/3fba214c1e5e0f69991677ec3bc17023f0421776975e1de0c682dca475e2/safetensors-0.8.0-cp310-abi3-win_amd64.whl", hash = "sha256:096ec1a98435df7beb08853bb5aa9081a84f23d0adc67ed1a0a10550f608373f", size = 355540, upload-time = "2026-06-09T07:52:27.832Z" },
     { url = "https://files.pythonhosted.org/packages/8d/fc/7eedc3510d97878876e32774eebbeb61c43f148a96e915c84229a3e967aa/safetensors-0.8.0-cp310-abi3-win_arm64.whl", hash = "sha256:f7838e5135a406ad3e02efdcb8cf2e5397d368b0154537c4fec682dbc544d452", size = 340500, upload-time = "2026-06-09T07:52:26.745Z" },
 ]
-
-[[package]]
-name = "smartctx"
-version = "0.1.0"
-source = { editable = "." }
-dependencies = [
-    { name = "model2vec" },
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
-    { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
-]
-
-[package.optional-dependencies]
-dev = [
-    { name = "pytest" },
-]
-rules = [
-    { name = "llama-cpp-python" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "llama-cpp-python", marker = "extra == 'rules'", specifier = ">=0.2" },
-    { name = "model2vec", specifier = ">=0.3" },
-    { name = "numpy", specifier = ">=1.24" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
-]
-provides-extras = ["dev", "rules"]
 
 [[package]]
 name = "tokenizers"

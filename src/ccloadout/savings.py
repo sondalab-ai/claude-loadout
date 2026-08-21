@@ -8,7 +8,7 @@ class _Kinded(Protocol):
 
 # Rough, offline estimates of the context each pruned item injects into a session
 # (an MCP server's tool schemas, a plugin's bundled skills/agents/hooks). The real
-# cost depends on the server's actual tool set, which smartctx can't see without
+# cost depends on the server's actual tool set, which loadout can't see without
 # connecting to it — so these are deliberately labelled estimates everywhere they
 # surface. Override per-kind with a [token_costs] table in config.toml.
 DEFAULT_TOKEN_COSTS: dict[str, int] = {"mcp": 1200, "plugin": 600, "skill": 50}
@@ -16,7 +16,7 @@ DEFAULT_TOKEN_COSTS: dict[str, int] = {"mcp": 1200, "plugin": 600, "skill": 50}
 # Kinds that a scoped session can actually remove. Standalone user skills join mcp and
 # plugins here: they are dropped via skillOverrides "off" (see compose), so they count
 # toward savings. A skill's flat cost is a conservative fallback for its listing description;
-# a real per-skill measurement (measured[id], from `smartctx measure`) wins over it.
+# a real per-skill measurement (measured[id], from `loadout measure`) wins over it.
 PRUNABLE = frozenset(DEFAULT_TOKEN_COSTS)
 
 # How a dropped item's cost lands in a session. EAGER kinds (skill/plugin descriptions and the
@@ -46,7 +46,7 @@ def _split_by_load(items: Iterable[_Kinded], costs: Mapping[str, int],
 
 def _item_cost(item: _Kinded, costs: Mapping[str, int],
                measured: Mapping[str, int] | None) -> int:
-    # A real measured cost for this exact server (from `smartctx measure`) wins over
+    # A real measured cost for this exact server (from `loadout measure`) wins over
     # the flat per-kind estimate.
     if measured and item.id in measured:
         return measured[item.id]

@@ -1,8 +1,8 @@
 from __future__ import annotations
 import json
 from typing import Callable
-from smartctx.inventory import Item
-from smartctx.rules import Predicate
+from ccloadout.inventory import Item
+from ccloadout.rules import Predicate
 
 _VALID = {"keep_if", "drop_if", "always_keep", "always_drop"}
 

@@ -1,5 +1,5 @@
-from smartctx import savings
-from smartctx.inventory import Item
+from ccloadout import savings
+from ccloadout.inventory import Item
 
 def _it(kind, id):
     return Item(id=id, kind=kind, name=id, description=id)

@@ -1,6 +1,6 @@
 import json
-from smartctx.inventory import Item
-from smartctx.compiler import compile_rule, build_prompt
+from ccloadout.inventory import Item
+from ccloadout.compiler import compile_rule, build_prompt
 
 _ITEM = Item("design-system-ds", "plugin", "design-system-ds", "corporate design system")
 
