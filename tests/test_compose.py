@@ -3,6 +3,9 @@ from pathlib import Path
 from smartctx.inventory import Item
 from smartctx.compose import compose
 
+def _settings_of(plan):
+    return json.loads(Path(plan.argv[plan.argv.index("--settings") + 1]).read_text())
+
 def test_compose_writes_overlays_and_argv(tmp_path: Path):
     root = tmp_path / "root"; root.mkdir()
     (root / ".claude.json").write_text(json.dumps(
@@ -33,3 +36,21 @@ def test_compose_emits_project_scoped_server_def(tmp_path: Path):
     mcp = json.loads(mcp_path.read_text())
     assert mcp["mcpServers"] == {"Scoped": {"command": "z"}}   # kept server survives to launch
     mcp_path.unlink(); Path(plan.argv[plan.argv.index("--settings") + 1]).unlink()
+
+def test_compose_marks_dropped_skills_off_via_skilloverrides(tmp_path: Path):
+    root = tmp_path / "root"; root.mkdir()
+    items = [Item("astro", "skill", "astro", ""), Item("mind", "skill", "mind", "")]
+    plan = compose([items[0]], items, root, passthrough=[])    # keep astro, drop mind
+    settings = _settings_of(plan)
+    assert settings["skillOverrides"] == {"mind": "off"}       # only the dropped skill turned off
+    assert "--setting-sources" not in plan.argv and "--plugin-dir" not in plan.argv  # native lever only
+    assert set(plan.tmp_paths) == {Path(plan.argv[plan.argv.index("--mcp-config") + 1]),
+                                   Path(plan.argv[plan.argv.index("--settings") + 1])}
+
+def test_compose_no_skilloverrides_when_no_skill_dropped(tmp_path: Path):
+    root = tmp_path / "root"; root.mkdir()
+    items = [Item("astro", "skill", "astro", ""), Item("figma@x", "plugin", "figma", "")]
+    plan = compose([items[0]], items, root, passthrough=[])    # keep the skill, drop only a plugin
+    settings = _settings_of(plan)
+    assert "skillOverrides" not in settings                    # nothing to override
+    assert settings["enabledPlugins"] == {"figma@x": False}

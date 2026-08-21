@@ -152,7 +152,8 @@ class _EditGate(NamedTuple):
     cfg: object
     goal: str
 
-def _scoped_plan(passthrough: list[str], cwd: Path, config_root_override: Path | None = None):
+def _scoped_plan(passthrough: list[str], cwd: Path, config_root_override: Path | None = None,
+                 scope_skills: bool = True):
     cfg = load_config(cwd=cwd, config_root_override=config_root_override)
     items = claude_code_inventory(cfg.config_root, cwd, cfg.global_config_path)
     if not items:
@@ -165,14 +166,15 @@ def _scoped_plan(passthrough: list[str], cwd: Path, config_root_override: Path |
     outcome = apply_rules(remainder, rules, context)
     embed = _build_embed(cfg.model_name)
     ranked = Ranker(embed=embed).rank(context, list(outcome.undecided), cfg.threshold, cfg.always_keep)
-    # compose never removes skills (only mcp via --strict-mcp-config, plugins via enabledPlugins),
-    # so a non-prunable item that ranks or rules "out" still loads — keep it, never show it dropped.
-    stays = lambda i: i.kind not in _savings.PRUNABLE
-    always_loaded = ([i for i, _ in ranked.dropped if stays(i)]
-                     + [i for i in outcome.forced_drop if stays(i)])
+    # Skill scoping on: every kind (mcp, plugin, skill) is prunable and flows through keep/drop
+    # (compose turns dropped user skills off via skillOverrides). --no-scope-skills force-keeps
+    # skills — none get dropped, so compose writes no overrides.
+    force_keep = lambda i: not scope_skills and i.kind == "skill"
+    always_loaded = ([i for i, _ in ranked.dropped if force_keep(i)]
+                     + [i for i in outcome.forced_drop if force_keep(i)])
     kept = list(pinned) + list(outcome.forced_keep) + list(ranked.kept) + always_loaded
-    dropped = ([(i, s) for i, s in ranked.dropped if not stays(i)]
-               + [(i, "rule") for i in outcome.forced_drop if not stays(i)])  # prunable only
+    dropped = ([(i, s) for i, s in ranked.dropped if not force_keep(i)]
+               + [(i, "rule") for i in outcome.forced_drop if not force_keep(i)])
     # Launch-time keep/drop review is the pre-launch gate (a single checkbox over every prunable
     # tool), not a per-item prompt — see _launch_gate. `smartctx rules` remains the per-item /
     # natural-language authoring path.
@@ -187,11 +189,12 @@ def _scoped_plan(passthrough: list[str], cwd: Path, config_root_override: Path |
         scope = _Scope(context, gsource, gconf, cfg.threshold, kept, dropped,
                        saved, connectors, bool(measured))
         return scope, plan
-    prunable = [i for i in items if i.kind in _savings.PRUNABLE]
+    _is_prunable = lambda i: i.kind in _savings.PRUNABLE and (scope_skills or i.kind != "skill")
+    prunable = [i for i in items if _is_prunable(i)]
     editable = [i for i in prunable if i.id not in pinned_ids]     # pinned always stay; not offered
     def _replan(selected_ids: set[str]):           # rebuild the plan from an edited prunable keep-set
         final = pinned_ids | selected_ids
-        nkept = [i for i in items if i.kind not in _savings.PRUNABLE or i.id in final]
+        nkept = [i for i in items if not _is_prunable(i) or i.id in final]
         ndropped = [(i, "edited") for i in prunable if i.id not in final]
         return _finish(nkept, ndropped)
     scope, plan = _finish(kept, dropped)
@@ -330,11 +333,14 @@ def _read_key():                                    # one keypress -> normalized
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, old)
 
-def _render_checklist(title, labels, selected, cursor, out, redraw_lines, hint=_CHECK_HINT):
+def _render_checklist(title, labels, selected, cursor, out, redraw_lines, hint=_CHECK_HINT,
+                      headers=None):
     if redraw_lines:                                # rewind over the previous frame
         out.write(f"\033[{redraw_lines}F")
-    lines = [title, ""]
+    lines = [*title.split("\n"), ""]                # title may carry a legend line under it
     for i, lab in enumerate(labels):
+        if headers and i in headers:                # group header before the first item of a kind
+            lines.append(_paint(f" {headers[i]}", "dim", err=True))
         box = "[x]" if selected[i] else "[ ]"
         pointer = _paint(">", "cyan", "bold", err=True) if i == cursor else " "
         lines.append(f" {pointer} {box} {lab}")
@@ -345,16 +351,19 @@ def _render_checklist(title, labels, selected, cursor, out, redraw_lines, hint=_
     return len(lines)
 
 def _checkbox_select(title, labels, read_key=None, out=sys.stderr,
-                     preset=None, allow_empty=False, hint=_CHECK_HINT) -> list[int] | None:
+                     preset=None, allow_empty=False, hint=_CHECK_HINT,
+                     headers=None) -> list[int] | None:
     # Interactive multi-select; returns chosen 0-based indices, or None to cancel.
     # Logic is driven by read_key() so tests can feed a key sequence without a real tty.
     # preset seeds the initial ticks (default: all on); allow_empty lets Enter confirm an
     # empty pick (keep-nothing is a valid keep/drop outcome) instead of reading it as cancel.
+    # headers: {item_index -> label} draws a dim group header before that item (render-only —
+    # cursor and selection index over items, never headers).
     read_key = read_key or _read_key
     n = len(labels)
     selected = list(preset) if preset is not None else [True] * n
     cursor = 0
-    drawn = _render_checklist(title, labels, selected, cursor, out, 0, hint)
+    drawn = _render_checklist(title, labels, selected, cursor, out, 0, hint, headers)
     while True:
         key = read_key()
         if key in ("up", "k"):
@@ -375,7 +384,7 @@ def _checkbox_select(title, labels, read_key=None, out=sys.stderr,
             return None
         else:
             continue                                # ignore unmapped keys without redrawing
-        drawn = _render_checklist(title, labels, selected, cursor, out, drawn, hint)
+        drawn = _render_checklist(title, labels, selected, cursor, out, drawn, hint, headers)
 
 def _can_raw() -> bool:
     # True only when stdin is a real terminal we can put into raw mode; the picker
@@ -440,10 +449,12 @@ def _confirm_goal(repo: Path, use_cache: bool = True, label: str = "smartctx ini
     # Returns the accepted/overridden goal, or None to skip this repo. update re-infers fresh.
     g = detect_goal(repo, use_cache=use_cache)
     print("", file=sys.stderr)
-    print(f"{_paint(label, 'yellow', err=True)} {_paint(str(repo), 'cyan', err=True)} → "
-          f"{g.goal!r} {_paint(f'({g.source} · conf {g.confidence:.2f})', 'dim', err=True)}",
+    print(f"{_paint(label, 'yellow', err=True)} {_paint(str(repo), 'cyan', err=True)}", file=sys.stderr)
+    print(f"  {_paint('goal', 'dim', err=True)}   {g.goal}", file=sys.stderr)
+    print(f"         {_paint(f'from {g.source} · confidence {g.confidence:.2f}', 'dim', err=True)}",
           file=sys.stderr)
-    raw = _ask("  accept [enter] / type a goal to override / 's' to skip this repo: ").strip()
+    raw = _ask(f"  {_paint('enter', 'bold', err=True)} accept · type to override · "
+               f"{_paint('s', 'bold', err=True)} skip repo: ").strip()
     if raw.lower() == "s":
         return None
     return raw or g.goal
@@ -465,18 +476,18 @@ def _is_seeded_rule(rule: Rule) -> bool:
     return rule.nl.startswith(_SEED_NL_PREFIX)
 
 def _materialize_rules(items, kept_ids: set[str], goal: str, verb: str = "init") -> list[Rule]:
-    # Freeze keep/drop only for the kinds compose actually prunes (mcp, plugin).
+    # Freeze keep/drop for every kind compose can prune (mcp, plugin, and skills via skillOverrides).
     nl = f"{_SEED_NL_PREFIX} {verb} (goal: {goal})"
     rules = []
     for i in items:
-        if i.kind not in ("mcp", "plugin"):
+        if i.kind not in _savings.PRUNABLE:
             continue
         action = "always_keep" if i.id in kept_ids else "always_drop"
         rules.append(Rule(target=i.id, nl=nl, predicate=Predicate(action, (), "any")))
     return rules
 
 def _prunable(items) -> list[Item]:
-    return [i for i in items if i.kind in ("mcp", "plugin")]
+    return [i for i in items if i.kind in _savings.PRUNABLE]
 
 def _pinned_ids(items, cfg) -> set[str]:
     # Tools the config's always_keep pins: they win over rules at launch (spec §12), so the
@@ -490,26 +501,56 @@ def _plan_repo(repo: Path, profile: Path, goal: str):
     kept_ids = _decide_keep(items, cfg, goal, load_rules(cfg.config_root, repo))
     return cfg, items, kept_ids
 
+_KIND_ORDER = {"mcp": 0, "plugin": 1, "skill": 2}
+_KIND_HEADER = {"mcp": "mcp servers", "plugin": "plugins", "skill": "skills"}
+
+def _display_name(item) -> str:
+    return item.id.split("@", 1)[0]                 # drop the @marketplace suffix for readability
+
+def _short_desc(text: str, width: int) -> str:
+    s = " ".join((text or "").split())              # collapse newlines/runs of whitespace
+    if width <= 0 or not s:
+        return ""
+    return s if len(s) <= width else s[: width - 1].rstrip() + "…"
+
 def _review_keep_drop(repo: Path, prunable: list[Item], kept_ids: set[str],
                       label: str = "smartctx init:"):
-    # Let the user adjust the auto keep/drop before it is frozen (checkbox pre-ticked to the
-    # auto decision). Returns the kept-id set, or None to skip the repo. Falls back to the auto
-    # decision when a raw tty isn't available or the frame is taller than the window.
+    # Let the user adjust the auto keep/drop before it is frozen. Rows are grouped by kind with a
+    # dim one-line description; a legend spells out what a ticked/unticked box means. Returns the
+    # kept-id set, or None to skip the repo. Falls back to the auto decision when a raw tty isn't
+    # available or the frame is taller than the window.
     import shutil
     if not prunable:
         return set(kept_ids)
-    rows = shutil.get_terminal_size((80, 24)).lines
-    if not _can_raw() or len(prunable) + 4 > rows:
+    size = shutil.get_terminal_size((80, 24))
+    ordered = sorted(prunable, key=lambda i: (_KIND_ORDER.get(i.kind, 9), _display_name(i).lower()))
+    headers, seen = {}, set()
+    for idx, i in enumerate(ordered):
+        if i.kind not in seen:
+            headers[idx] = _KIND_HEADER.get(i.kind, i.kind); seen.add(i.kind)
+    frame = len(ordered) + len(headers) + 5         # title + legend + blank + rows + headers + blank + hint
+    if not _can_raw() or frame > size.lines:
         return set(kept_ids)                        # can't draw the picker; accept auto silently
-    preset = [i.id in kept_ids for i in prunable]
-    labels = [f"{i.id}  {_paint('(' + i.kind + ')', 'dim', err=True)}" for i in prunable]
-    title = (f"{_paint(label, 'yellow', err=True)} keep/drop for "
-             f"{_paint(str(repo), 'cyan', err=True)}")
-    hint = "↑/↓ move · space toggle · a all/none · enter confirm · q skip repo"
-    picks = _checkbox_select(title, labels, preset=preset, allow_empty=True, hint=hint)
+    id_w = min(max(len(_display_name(i)) for i in ordered), 30)
+    desc_w = size.columns - id_w - 12               # room left after the box, name column, and gaps
+    labels = []
+    for i in ordered:
+        desc = _short_desc(i.description, desc_w)
+        if desc == i.id or desc in (">", "|", ">-", "|-", ">+", "|+"):
+            desc = ""                               # useless: plugin id-fallback / bare YAML block scalar
+        tail = f"  {_paint(desc, 'dim', err=True)}" if desc else ""
+        labels.append(f"{_display_name(i):<{id_w}}{tail}")
+    preset = [i.id in kept_ids for i in ordered]
+    count = _paint(f"({_plural(len(ordered), 'tool')})", "dim", err=True)
+    title = (f"{_paint(label, 'yellow', err=True)} keep/drop · "
+             f"{_paint(repo.name, 'cyan', err=True)}  {count}\n"
+             f"  {_paint('[x] keep — loads here', 'green', err=True)}   ·   "
+             f"{_paint('[ ] drop — pruned this session', 'dim', err=True)}")
+    hint = "↑/↓ move · space keep/drop · a all/none · enter save · q skip repo"
+    picks = _checkbox_select(title, labels, preset=preset, allow_empty=True, hint=hint, headers=headers)
     if picks is None:                               # q / Esc -> skip this repo entirely
         return None
-    return {prunable[i].id for i in picks}
+    return {ordered[i].id for i in picks}
 
 _REPO_RULES_HEADER = "# generated by smartctx — local, gitignored keep/drop decisions\n"
 
@@ -880,6 +921,7 @@ def _print_help() -> None:
         f"  {cmd('smartctx doctor')}             Report profiles, config, and model state\n"
         f"  {cmd('smartctx measure')}            Measure real MCP tool-token cost — MCP only (they expose tools at runtime; opt-in, connects)\n"
         f"  {cmd('smartctx --no-gate')}          Launch without the pre-launch review pause (or set SMARTCTX_NO_GATE)\n"
+        f"  {cmd('smartctx --no-scope-skills')}  Keep every user skill loaded — skip skill scoping (or set SMARTCTX_NO_SCOPE_SKILLS)\n"
         f"  {cmd('smartctx --help, -h')}         Show this help\n"
         f"  {cmd('smartctx --version, -V')}      Show the smartctx version\n"
         "\n"
@@ -895,7 +937,6 @@ def _print_explain(scope: _Scope, plan) -> None:
     print(f"{lbl('threshold')}{scope.threshold}")
     print()
     kept_prunable = [i for i in scope.kept if i.kind in _savings.PRUNABLE]
-    skills = [i for i in scope.kept if i.kind not in _savings.PRUNABLE]
     print(_paint(f"  keeping ({len(kept_prunable)})", "bold"))
     for i in kept_prunable:
         print(f"    {_paint('✓', 'green')} {i.id}")
@@ -911,11 +952,6 @@ def _print_explain(scope: _Scope, plan) -> None:
     if not dropped:
         print(_paint("    (nothing)", "dim"))
     print()
-    if skills:                                     # loaded regardless of ranking — compose can't prune them
-        print(_paint(f"  always loaded — skills, not prunable ({len(skills)})", "bold"))
-        for i in skills:
-            print(f"    {_paint('•', 'cyan')} {i.id}")
-        print()
     conn_tok = sum(t for _, t in scope.connectors)
     if scope.connectors:
         print(_paint("  connectors dropped (all-or-nothing, strict mode)", "bold"))
@@ -1021,7 +1057,9 @@ def _run(argv: list[str] | None = None) -> int:
     rules_cmd = bool(argv) and argv[0] == "rules"
     explain = "--explain" in argv
     no_gate = "--no-gate" in argv or bool(os.environ.get("SMARTCTX_NO_GATE"))
-    passthrough = [a for a in argv if a not in ("--explain", "--no-gate")]   # smartctx flags, not claude's
+    scope_skills = "--no-scope-skills" not in argv and not os.environ.get("SMARTCTX_NO_SCOPE_SKILLS")
+    passthrough = [a for a in argv                                          # smartctx flags, not claude's
+                   if a not in ("--explain", "--no-gate", "--no-scope-skills")]
     try:                                            # ask which profile when it is implicit
         override = _resolve_config_root(os.environ, [] if rules_cmd else passthrough)
     except _Abort:
@@ -1031,7 +1069,7 @@ def _run(argv: list[str] | None = None) -> int:
         return _cmd_rules(cwd, override)
     fallback_env = _launch_env(override)            # keep a prompted profile on the fallback launches
     try:
-        result, plan, gate = _scoped_plan(passthrough, cwd, override)
+        result, plan, gate = _scoped_plan(passthrough, cwd, override, scope_skills)
     except Exception as exc:
         _warn(f"scoping failed ({exc}); launching full session")
         return subprocess.run(["claude", *passthrough], env=fallback_env).returncode

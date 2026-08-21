@@ -117,9 +117,8 @@ Every place that shows a plan also shows how much context it trims:
 > [!NOTE]
 > By default these figures are **estimates**. The real cost of an MCP server is the tool
 > schemas it injects once connected, which smartctx can't see at plan time — so it uses a
-> flat per-kind figure (MCP server ≈ 1200 tokens, plugin ≈ 600) over the items it actually
-> removes. Standalone skills are never counted: they're shown but not pruned. Tune the
-> constants per kind:
+> flat per-kind figure (MCP server ≈ 1200 tokens, plugin ≈ 600, standalone skill ≈ 50) over the
+> items it actually removes. Tune the constants per kind:
 
 ```toml
 # .smartctx/config.toml
@@ -177,7 +176,7 @@ it is **not** the nuclear `--bare` mode: your `CLAUDE.md`, hooks, and memory all
 | MCP servers (`.claude.json` / `.mcp.json`) | **Yes** — only the kept set loads |
 | Plugins (and everything they provide) | **Yes** — dropped plugins are disabled |
 | claude.ai connectors (Gmail, Calendar, …) | **All dropped (all-or-nothing in v1)** — `--strict-mcp-config` loads only the curated overlay, so account connectors don't load at all. A connector that needs account authorization (Gmail, Calendar, …) can't be re-added even if smartctx wanted to: its OAuth lives in your claude.ai account and doesn't transfer to a config smartctx can pass to Claude (verified — the re-injected server reports "not authorized"). Connectors that need no auth *are* technically re-injectable, but v1 keeps none either way. Run `smartctx measure` to see them listed with their token cost in `--explain`. |
-| Standalone skills (`$CLAUDE_CONFIG_DIR/skills`) | **No** — inventoried and shown in `--explain`, but not removed (Claude Code offers only an all-or-nothing switch, which v1 leaves alone) |
+| Standalone skills (`$CLAUDE_CONFIG_DIR/skills`) | **Yes** — off-topic skills are dropped via `skillOverrides: "off"` (removes the skill and its description from context). On by default; `--no-scope-skills` keeps them all |
 | `CLAUDE.md`, hooks, memory | **No** — always preserved |
 
 ---
@@ -311,6 +310,9 @@ update`. Non-interactive launches (`-p`, pipelines) never pause.
 
 To launch instantly with no pause at all, pass `--no-gate` (or set `SMARTCTX_NO_GATE=1`): smartctx
 still prints the estimate and the *not seeded* nudge, but hands straight to claude.
+
+To keep every standalone skill loaded (skip skill scoping for a session), pass `--no-scope-skills`
+(or set `SMARTCTX_NO_SCOPE_SKILLS=1`).
 
 ### Seeding repos — `smartctx init`
 

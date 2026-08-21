@@ -18,16 +18,34 @@ def _load_json(path: Path) -> dict:
         return {}
 
 _FRONTMATTER = re.compile(r"^---\n(.*?)\n---", re.DOTALL)
+_BLOCK_SCALARS = {">", "|", ">-", "|-", ">+", "|+"}
 
 def _frontmatter(text: str) -> dict[str, str]:
+    # Minimal YAML: top-level `key: value` pairs, plus block scalars (`>` folded / `|` literal)
+    # whose body is the following more-indented lines. Enough for SKILL.md name/description —
+    # notably descriptions written as a folded `>` block, which the ranker embeds and the UI shows.
     m = _FRONTMATTER.match(text)
     if not m:
         return {}
+    lines = m.group(1).splitlines()
     out: dict[str, str] = {}
-    for line in m.group(1).splitlines():
-        if ":" in line:
-            k, _, v = line.partition(":")
-            out[k.strip()] = v.strip()
+    i, n = 0, len(lines)
+    while i < n:
+        line = lines[i]; i += 1
+        if ":" not in line or line[:1] in (" ", "\t", "#"):   # only unindented keys, skip comments
+            continue
+        k, _, v = line.partition(":")
+        key, val = k.strip(), v.strip()
+        if val in _BLOCK_SCALARS:                             # gather the indented/blank block body
+            body = []
+            while i < n and (not lines[i].strip() or lines[i][0] in " \t"):
+                body.append(lines[i].strip()); i += 1
+            if val[0] == ">":                                 # folded: newlines become spaces
+                out[key] = " ".join(" ".join(body).split())
+            else:                                             # literal: keep line breaks
+                out[key] = "\n".join(body).strip("\n")
+        else:
+            out[key] = val.strip("\"'")
     return out
 
 def _installed_plugin_paths(config_root: Path) -> dict[str, Path]:

@@ -11,10 +11,12 @@ class _Kinded(Protocol):
 # cost depends on the server's actual tool set, which smartctx can't see without
 # connecting to it — so these are deliberately labelled estimates everywhere they
 # surface. Override per-kind with a [token_costs] table in config.toml.
-DEFAULT_TOKEN_COSTS: dict[str, int] = {"mcp": 1200, "plugin": 600}
+DEFAULT_TOKEN_COSTS: dict[str, int] = {"mcp": 1200, "plugin": 600, "skill": 50}
 
-# Only these kinds are actually removed from a session; standalone skills are
-# inventoried and shown but never pruned, so they must not count toward savings.
+# Kinds that a scoped session can actually remove. Standalone user skills join mcp and
+# plugins here: they are dropped via skillOverrides "off" (see compose), so they count
+# toward savings. A skill's flat cost is a conservative fallback for its listing description;
+# a real per-skill measurement (measured[id], from `smartctx measure`) wins over it.
 PRUNABLE = frozenset(DEFAULT_TOKEN_COSTS)
 
 class Savings(NamedTuple):

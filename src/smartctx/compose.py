@@ -33,8 +33,17 @@ def compose(kept, all_items, config_root: Path, passthrough: list[str],
                if i.kind == "mcp" and i.id in kept_ids and i.id in server_defs}
     dropped_plugins = {i.id: False for i in all_items
                        if i.kind == "plugin" and i.id not in kept_ids}
+    # Standalone user skills are pruned per-session with the native skillOverrides lever: "off"
+    # removes both the skill and its description from context (verified CC 2.1.238). It rides the
+    # same --settings overlay, so no --setting-sources / CLAUDE_CONFIG_DIR games and no auth risk.
+    dropped_skills = {i.id: "off" for i in all_items
+                      if i.kind == "skill" and i.id not in kept_ids}
+    settings: dict = {"enabledPlugins": dropped_plugins}
+    if dropped_skills:
+        settings["skillOverrides"] = dropped_skills
+
     mcp_path = _write_tmp("mcp", {"mcpServers": curated})
-    settings_path = _write_tmp("settings", {"enabledPlugins": dropped_plugins})
+    settings_path = _write_tmp("settings", settings)
     argv = ["claude", "--strict-mcp-config", "--mcp-config", str(mcp_path),
             "--settings", str(settings_path), *passthrough]
     env = dict(environ)

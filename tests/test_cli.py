@@ -189,7 +189,7 @@ def _skill_root(tmp_path):
     (skill / "SKILL.md").write_text("---\nname: astro\ndescription: sky imaging\n---\nbody")
     return root
 
-def test_dropped_skill_not_offered_in_gate(tmp_path, monkeypatch):
+def test_dropped_skill_offered_in_gate(tmp_path, monkeypatch):
     root = _skill_root(tmp_path)
     (tmp_path / "README.md").write_text("# P\n\nA tool that does X.\n")   # goal from docs -> no goal prompt
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
@@ -209,10 +209,10 @@ def test_dropped_skill_not_offered_in_gate(tmp_path, monkeypatch):
     rc = cli.main([])
     assert rc == 0
     joined = " ".join(seen["labels"])
-    assert "astro" not in joined                          # un-prunable skill never editable in the gate
-    assert "Gmail" in joined and "figma@x" in joined      # prunable kinds are editable
+    assert "astro" in joined                              # skills are now prunable -> editable in the gate
+    assert "Gmail" in joined and "figma@x" in joined      # other prunable kinds too
 
-def test_explain_skills_shown_always_loaded_not_dropped(tmp_path, monkeypatch, capsys):
+def test_explain_dropped_skill_in_dropping_section(tmp_path, monkeypatch, capsys):
     root = _skill_root(tmp_path)                          # figma@x plugin + Gmail mcp + astro skill
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
     monkeypatch.setenv("SMARTCTX_THRESHOLD", "0.99")      # rank everything out
@@ -222,12 +222,25 @@ def test_explain_skills_shown_always_loaded_not_dropped(tmp_path, monkeypatch, c
     rc = cli.main(["--explain"])
     assert rc == 0
     lines = capsys.readouterr().out.splitlines()
-    always_i = next(i for i, l in enumerate(lines) if "always loaded" in l)
-    astro_i = next(i for i, l in enumerate(lines) if "astro" in l)
-    assert astro_i > always_i                            # skill lands in always-loaded, not dropping
+    assert not any("always loaded" in l for l in lines)  # the non-prunable skill section is gone
     drop_i = next(i for i, l in enumerate(lines) if "dropping (" in l)
-    assert not any("astro" in l for l in lines[drop_i:always_i])   # never in the dropping section
-    assert "•" in lines[astro_i]                         # neutral marker, not the ✗ of a real drop
+    astro_i = next(i for i, l in enumerate(lines) if "astro" in l)
+    assert astro_i > drop_i                               # a ranked-out skill lands in dropping
+    assert "✗" in lines[astro_i]                          # real drop marker
+
+def test_no_scope_skills_force_keeps_skill(tmp_path, monkeypatch, capsys):
+    root = _skill_root(tmp_path)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
+    monkeypatch.setenv("SMARTCTX_THRESHOLD", "0.99")      # would rank the skill out if scoped
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "make_model2vec_embed", lambda name: cli.keyword_embed)
+    monkeypatch.setattr(cli, "_interactive", lambda p: False)
+    rc = cli.main(["--explain", "--no-scope-skills"])
+    assert rc == 0
+    lines = capsys.readouterr().out.splitlines()
+    drop_i = next(i for i, l in enumerate(lines) if "dropping (" in l)
+    astro_lines = [i for i, l in enumerate(lines) if "astro" in l]
+    assert astro_lines and all(i < drop_i for i in astro_lines)   # skill sits under keeping, never dropped
 
 def test_mcp_json_server_kept_appears_in_overlay(tmp_path, monkeypatch):
     root = _root(tmp_path)
@@ -705,6 +718,19 @@ def test_init_yes_seeds_config_and_rules(tmp_path, monkeypatch, capsys):
     assert all(a in ("always_keep", "always_drop") for a in actions.values())
     assert (r1 / ".smartctx" / "goal").is_file()
 
+def test_init_freezes_skill_rules_too(tmp_path, monkeypatch):
+    import tomllib
+    root = _skill_root(tmp_path)                          # Gmail mcp + figma@x plugin + astro skill
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
+    monkeypatch.setenv("SMARTCTX_THRESHOLD", "0.99")      # rank the skill out
+    monkeypatch.setattr(cli, "make_model2vec_embed", lambda name: cli.keyword_embed)
+    repos = tmp_path / "repos"; r1 = _proj(repos, "proj1")
+    rc = cli.main(["init", str(repos), "--yes"])
+    assert rc == 0
+    rules = tomllib.loads((r1 / ".smartctx" / "rules.toml").read_text())["rule"]
+    actions = {x["target"]: x["predicate"]["action"] for x in rules}
+    assert actions.get("astro") == "always_drop"          # skills are seeded/frozen like mcp + plugins
+
 def test_init_skips_already_configured(tmp_path, monkeypatch, capsys):
     root = _root(tmp_path); monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
     repos = tmp_path / "repos"; r1 = _proj(repos, "proj1")
@@ -826,6 +852,38 @@ def test_review_keep_drop_toggle_flips_decision(monkeypatch):
     prunable = _prunable_items()
     kept = cli._review_keep_drop(Path("/x"), prunable, {"Gmail", "figma@x"})
     assert kept == {"Gmail"}                              # figma@x toggled off
+
+def test_display_name_strips_marketplace_suffix():
+    from smartctx.inventory import Item
+    assert cli._display_name(Item("figma@x", "plugin", "f", "")) == "figma"
+    assert cli._display_name(Item("astro", "skill", "a", "")) == "astro"   # no suffix -> unchanged
+
+def test_short_desc_collapses_and_truncates():
+    assert cli._short_desc("a  b\nc", 40) == "a b c"                       # whitespace/newlines collapse
+    trimmed = cli._short_desc("x" * 50, 10)
+    assert trimmed.endswith("…") and len(trimmed) == 10                    # hard width cap with ellipsis
+    assert cli._short_desc("", 40) == "" and cli._short_desc("hi", 0) == ""
+
+def test_render_checklist_draws_group_headers_and_counts_lines():
+    out = io.StringIO()
+    n = cli._render_checklist("title", ["a", "b"], [True, False], 0, out, 0,
+                              hint="h", headers={0: "plugins", 1: "skills"})
+    text = out.getvalue()
+    assert "plugins" in text and "skills" in text         # both group headers drawn
+    assert n == text.count("\n")                           # returned count matches physical lines (redraw safe)
+
+def test_review_keep_drop_groups_by_kind_and_maps_past_headers(monkeypatch):
+    import shutil
+    from smartctx.inventory import Item
+    monkeypatch.setattr(cli, "_can_raw", lambda: True)
+    monkeypatch.setattr(shutil, "get_terminal_size", lambda default=(80, 24): os.terminal_size((100, 40)))
+    items = [Item("astro", "skill", "astro", "sky imaging"),
+             Item("Gmail", "mcp", "Gmail", "email"),
+             Item("figma@x", "plugin", "figma", "design tool")]
+    # ordered mcp,plugin,skill -> Gmail, figma@x, astro; move down twice to astro, drop it, save
+    monkeypatch.setattr(cli, "_read_key", _keys("down", "down", " ", "\r"))
+    kept = cli._review_keep_drop(Path("/x"), items, {"Gmail", "figma@x", "astro"})
+    assert kept == {"Gmail", "figma@x"}                   # skill row reached despite header rows
 
 def test_review_keep_drop_quit_skips_repo(monkeypatch):
     import shutil

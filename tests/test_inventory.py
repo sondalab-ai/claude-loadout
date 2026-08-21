@@ -22,6 +22,23 @@ def test_inventory_collects_enabled_plugins_mcp_and_skills(tmp_path: Path):
     assert skill.id == "astro-visibility"
     assert "visible sky" in skill.description
 
+def test_skill_folded_block_description_is_parsed(tmp_path: Path):
+    root = tmp_path / "root"; root.mkdir()
+    skill = root / "skills" / "astro"; skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text(                      # description as a YAML folded (>) block
+        "---\nname: astro\ndescription: >\n  Computes which deep-sky objects are\n"
+        "  visible from a location tonight.\nmetadata: 1\n---\nbody")
+    skill_item = next(i for i in claude_code_inventory(root) if i.kind == "skill")
+    assert skill_item.description == "Computes which deep-sky objects are visible from a location tonight."
+
+def test_skill_literal_block_description_keeps_lines(tmp_path: Path):
+    root = tmp_path / "root"; root.mkdir()
+    skill = root / "skills" / "s"; skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text(
+        "---\nname: s\ndescription: |\n  line one\n  line two\n---\nbody")
+    skill_item = next(i for i in claude_code_inventory(root) if i.kind == "skill")
+    assert skill_item.description == "line one\nline two"
+
 def test_plugin_description_read_from_manifest(tmp_path: Path):
     root = tmp_path / "root"; root.mkdir()
     (root / "settings.json").write_text('{"enabledPlugins": {"mytool@mkt": true}}')
