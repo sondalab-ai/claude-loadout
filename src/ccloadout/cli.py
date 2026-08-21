@@ -851,9 +851,11 @@ def _cmd_doctor(cwd: Path) -> int:
     print()
     print(_paint("  Next steps", "bold"))
     print("    1. Point your launch command at loadout, e.g. add to your shell rc:")
-    print(f"         {_paint('alias claude=\"loadout\"', 'cyan')}")
+    alias_plain = _paint('alias claude="loadout"', 'cyan')   # kept out of the f-string: nested
+    print(f"         {alias_plain}")                          # double quotes break f-strings on 3.11
     print("       or wrap a separate profile:")
-    print(f"         {_paint('alias claude-work=\"CLAUDE_CONFIG_DIR=~/.claude-work loadout\"', 'cyan')}")
+    alias_profile = _paint('alias claude-work="CLAUDE_CONFIG_DIR=~/.claude-work loadout"', 'cyan')
+    print(f"         {alias_profile}")
     print("    2. Preview what a session would load, without launching anything:")
     print(f"         {_paint('loadout --explain', 'cyan')}")
     print("    3. Scope tools with plain-language rules:")
