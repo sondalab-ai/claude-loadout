@@ -24,7 +24,7 @@ class _Abort(Exception):
 # Color codes resolve through the shared Sondalab palette: on a non-truecolor
 # terminal the named-ANSI floor is byte-identical to the previous static codes;
 # on COLORTERM=truecolor they upgrade to the brand hues. dim/bold stay styles.
-from ccloadout import _sondalab_palette as _sl
+import sondalab_palette as _sl
 _STYLE_SGR = {"dim": "2", "bold": "1"}
 _COLOR_ROLE = {"green": "ok", "red": "err", "yellow": "warn", "cyan": "accent"}
 
