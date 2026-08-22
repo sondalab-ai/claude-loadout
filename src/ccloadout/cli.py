@@ -21,7 +21,18 @@ _LAUNCH_PAUSE_S = 1.5   # seeded launch: hold the scoping summary on screen befo
 class _Abort(Exception):
     """User declined to pick a profile at the selection prompt."""
 
-_SGR = {"dim": "2", "bold": "1", "green": "32", "red": "31", "cyan": "36", "yellow": "33"}
+# Color codes resolve through the shared Sondalab palette: on a non-truecolor
+# terminal the named-ANSI floor is byte-identical to the previous static codes;
+# on COLORTERM=truecolor they upgrade to the brand hues. dim/bold stay styles.
+import sondalab_palette as _sl
+_STYLE_SGR = {"dim": "2", "bold": "1"}
+_COLOR_ROLE = {"green": "ok", "red": "err", "yellow": "warn", "cyan": "accent"}
+
+def _sgr(code: str) -> str:
+    if code in _STYLE_SGR:
+        return _STYLE_SGR[code]
+    ansi, rgb = _sl.ROLES[_COLOR_ROLE[code]]
+    return f"38;2;{rgb[0]};{rgb[1]};{rgb[2]}" if _sl.supports_truecolor() else str(ansi)
 
 def _supports_color(err: bool) -> bool:
     # Looked up lazily (not cached at import) so pytest's capsys stream swap is honoured.
@@ -33,7 +44,7 @@ def _supports_color(err: bool) -> bool:
 def _paint(text: str, *codes: str, err: bool = False) -> str:
     if not _supports_color(err):
         return text
-    return f"\033[{';'.join(_SGR[c] for c in codes)}m{text}\033[0m"
+    return f"\033[{';'.join(_sgr(c) for c in codes)}m{text}\033[0m"
 
 def _yn(flag: bool, *, err: bool = False) -> str:
     return _paint("present", "green", err=err) if flag else _paint("absent", "dim", err=err)
