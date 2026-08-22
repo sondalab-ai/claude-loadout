@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Uninstall loadout: the Python package (pipx or pip) and, on request,
+# Uninstall claude-loadout: the Python package (pipx or pip) and, on request,
 # the per-profile and per-repo configuration it wrote.
 set -euo pipefail
 
@@ -14,18 +14,18 @@ confirm() {
 
 uninstall_pkg() {
     if command -v pipx >/dev/null 2>&1 \
-        && pipx list --short 2>/dev/null | grep -Eq '^[[:space:]]*loadout([[:space:]]|$)'; then
-        warn "found loadout installed via pipx — running: pipx uninstall loadout"
-        if ! pipx uninstall loadout; then
+        && pipx list --short 2>/dev/null | grep -Eq '^[[:space:]]*ccloadout([[:space:]]|$)'; then
+        warn "found loadout installed via pipx — running: pipx uninstall ccloadout"
+        if ! pipx uninstall ccloadout; then
             warn "pipx uninstall failed; remove it by hand, then re-run for config cleanup"
         fi
         return
     fi
-    if command -v loadout >/dev/null 2>&1; then
+    if command -v claude-loadout >/dev/null 2>&1; then
         warn "loadout on PATH but not via pipx — trying pip instead"
-        if ! python3 -m pip uninstall -y loadout; then
+        if ! python3 -m pip uninstall -y ccloadout; then
             warn "automatic uninstall failed; do it by hand from the environment that provides"
-            warn "  $(command -v loadout)"
+            warn "  $(command -v claude-loadout)"
         fi
         return
     fi
@@ -95,6 +95,6 @@ cleanup_user_config
 cleanup_repo_configs
 cat >&2 <<'EOF'
 loadout: done. Remaining by hand:
-  - remove any aliases you added to your shell rc (e.g. alias claude-work="... loadout")
+  - remove any aliases you added to your shell rc (e.g. alias claude-work="... claude-loadout")
   - optionally drop the now-stale ~/.claude-work / ~/.claude-perso profile dirs
 EOF

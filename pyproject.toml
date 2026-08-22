@@ -24,7 +24,8 @@ Repository = "https://github.com/marcellobarile/claude-loadout"
 Issues = "https://github.com/marcellobarile/claude-loadout/issues"
 
 [project.scripts]
-loadout = "ccloadout.cli:main"
+claude-loadout = "ccloadout.cli:main"
+cld = "ccloadout.cli:main"
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]
