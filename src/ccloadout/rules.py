@@ -6,7 +6,7 @@ from pathlib import Path
 from ccloadout.inventory import Item
 
 def _warn(msg: str) -> None:                       # local, avoids importing cli (cycle)
-    print(f"loadout: {msg}", file=sys.stderr)
+    print(f"claude-loadout: {msg}", file=sys.stderr)
 
 @dataclass(frozen=True)
 class Predicate:

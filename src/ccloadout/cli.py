@@ -39,7 +39,7 @@ def _yn(flag: bool, *, err: bool = False) -> str:
     return _paint("present", "green", err=err) if flag else _paint("absent", "dim", err=err)
 
 def _warn(msg: str) -> None:
-    print(f"{_paint('loadout:', 'yellow', err=True)} {msg}", file=sys.stderr)
+    print(f"{_paint('claude-loadout:', 'yellow', err=True)} {msg}", file=sys.stderr)
 
 def _plural(n: int, noun: str) -> str:
     return f"{n} {noun}" if n == 1 else f"{n} {noun}s"
@@ -79,7 +79,7 @@ def _build_compiler(cfg):
 def _resolve_goal(cwd: Path, passthrough: list[str]) -> tuple[str, str, float]:
     goal = detect_goal(cwd)                          # returns (text, source, confidence)
     if goal.confidence < 0.15 and _interactive(passthrough):
-        entered = _ask(f"loadout: session goal? [{goal.goal}] ").strip()
+        entered = _ask(f"claude-loadout: session goal? [{goal.goal}] ").strip()
         if entered:
             write_goal_cache(cwd, entered)         # preflight ruling: persist, don't re-ask
             return entered, "prompt", 1.0
@@ -92,7 +92,7 @@ def _rules_intro(compile_fn, scope: str) -> None:
     dim = lambda s: _paint(s, "dim", err=True)
     p("")
     if compile_fn:
-        p(f"{_paint('loadout:', 'yellow', err=True)} for each tool, describe in plain "
+        p(f"{_paint('claude-loadout:', 'yellow', err=True)} for each tool, describe in plain "
           "language when to keep or drop it.")
         p(dim('    e.g.  "keep only when the goal is frontend"'))
         p(dim('          "drop unless it mentions email"'))
@@ -100,7 +100,7 @@ def _rules_intro(compile_fn, scope: str) -> None:
         p(dim("    press enter to skip; if a description can't be translated "
               "you'll get keep/drop/skip choices."))
     else:
-        p(f"{_paint('loadout:', 'yellow', err=True)} no rule model configured — "
+        p(f"{_paint('claude-loadout:', 'yellow', err=True)} no rule model configured — "
           "natural-language rules are unavailable.")
         p(dim("    [k]eep always / [d]rop always write a permanent rule; "
               "[s]kip (enter) decides nothing and asks again next time."))
@@ -116,7 +116,7 @@ def _elicit(item: Item, context: str, compile_fn, save) -> str:
     # `save(Rule)` persists an authored rule to the chosen scope (profile or a repo's local file).
     nl = ""
     if compile_fn:                                 # natural-language authoring path
-        nl = _ask(f"loadout: rule for '{item.id}' ({item.kind})? [enter=skip] ").strip()
+        nl = _ask(f"claude-loadout: rule for '{item.id}' ({item.kind})? [enter=skip] ").strip()
         if not nl:
             return "undecided"
         pred = compile_rule(nl, item, compile_fn)
@@ -176,7 +176,7 @@ def _scoped_plan(passthrough: list[str], cwd: Path, config_root_override: Path |
     dropped = ([(i, s) for i, s in ranked.dropped if not force_keep(i)]
                + [(i, "rule") for i in outcome.forced_drop if not force_keep(i)])
     # Launch-time keep/drop review is the pre-launch gate (a single checkbox over every prunable
-    # tool), not a per-item prompt — see _launch_gate. `loadout rules` remains the per-item /
+    # tool), not a per-item prompt — see _launch_gate. `claude-loadout rules` remains the per-item /
     # natural-language authoring path.
     def _finish(kept, dropped):                    # compose + cost accounting for a keep/drop decision
         plan = compose(kept, items, cfg.config_root, passthrough, cwd=cwd,
@@ -214,7 +214,7 @@ def _cmd_rules(cwd: Path, config_root_override: Path | None = None) -> int:
     context, _src, _conf = _resolve_goal(cwd, [])   # goal string for conditional-rule evaluation
     pending = [i for i in items if not has_rule(i, rules)]
     if not pending:
-        print(f"{_paint('loadout:', 'green')} every tool already has a rule")
+        print(f"{_paint('claude-loadout:', 'green')} every tool already has a rule")
         return 0
     _rules_intro(compile_fn, "to every repo in this profile")
     save = lambda r: save_rule(cfg.config_root, r)   # profile-scoped: the deliberate global path
@@ -223,15 +223,15 @@ def _cmd_rules(cwd: Path, config_root_override: Path | None = None) -> int:
         if _elicit(item, context, compile_fn, save) != "undecided":
             authored += 1
     print()
-    print(f"{_paint('loadout:', 'green')} authored {_plural(authored, 'rule')}")
+    print(f"{_paint('claude-loadout:', 'green')} authored {_plural(authored, 'rule')}")
     cache = _measure.load_costs(cfg.config_root)
     b = _savings.budget(items, cfg.token_costs, cache)
-    print(f"{_paint('loadout:', 'green')} up to ~{_savings.human_tokens(b.eager)} tokens trimmed up "
-          "front per session (skill + plugin context) — run `loadout --explain` for this session")
+    print(f"{_paint('claude-loadout:', 'green')} up to ~{_savings.human_tokens(b.eager)} tokens trimmed up "
+          "front per session (skill + plugin context) — run `claude-loadout --explain` for this session")
     conns = _measure.connector_costs(cache, {i.id for i in items if i.kind == "mcp"})
     on_demand = b.deferred + sum(conns.values())
     if on_demand:
-        print(f"{_paint('loadout:', 'green')} plus ~{_savings.human_tokens(on_demand)} tokens of "
+        print(f"{_paint('claude-loadout:', 'green')} plus ~{_savings.human_tokens(on_demand)} tokens of "
               "MCP/connector schemas that load on demand — avoided only if those tools are used")
     return 0
 
@@ -265,13 +265,13 @@ def _resolve_config_root(environ, passthrough: list[str]) -> Path | None:
     if len(profiles) <= 1:
         return None
     print("", file=sys.stderr)
-    print(f"{_paint('loadout:', 'yellow', err=True)} CLAUDE_CONFIG_DIR not set — "
+    print(f"{_paint('claude-loadout:', 'yellow', err=True)} CLAUDE_CONFIG_DIR not set — "
           "pick a Claude profile:", file=sys.stderr)
     print("", file=sys.stderr)
     for idx, prof in enumerate(profiles, 1):
         has_cfg = (prof / "loadout" / "config.toml").is_file()
         num = _paint(f"{idx})", "bold", err=True)
-        print(f"  {num} {prof}  {_paint(f'(loadout config: {_yn(has_cfg, err=True)})', 'dim', err=True)}",
+        print(f"  {num} {prof}  {_paint(f'(claude-loadout config: {_yn(has_cfg, err=True)})', 'dim', err=True)}",
               file=sys.stderr)
     print("", file=sys.stderr)
     while True:                                          # no default (spec B): Enter re-asks
@@ -290,7 +290,7 @@ _CONFIG_HEADER = (
     "# (~/.claude*/loadout/config.toml). Edit or extend freely.\n")
 
 # init writes machine-derived config it treats as local; ignore the whole dir so
-# nothing lands in git. Hand-authored config (via `loadout rules`) stays shareable.
+# nothing lands in git. Hand-authored config (via `claude-loadout rules`) stays shareable.
 _LOCAL_GITIGNORE = "# generated by loadout init — local machine config, do not commit\n*\n"
 
 def _discover_projects(root: Path) -> list[Path]:
@@ -398,7 +398,7 @@ def _can_raw() -> bool:
         return False
 
 def _select_repos(eligible: list[Path], already: int,
-                  label: str = "loadout init:", action: str = "seed") -> list[Path] | None:
+                  label: str = "claude-loadout init:", action: str = "seed") -> list[Path] | None:
     import shutil
     rows = shutil.get_terminal_size((80, 24)).lines
     if not _can_raw() or len(eligible) + 4 > rows:  # no raw tty / frame taller than the window
@@ -411,7 +411,7 @@ def _select_repos(eligible: list[Path], already: int,
     return [eligible[i] for i in picks] if picks else None
 
 def _select_repos_line(eligible: list[Path], already: int,
-                       label: str = "loadout init:", action: str = "seed") -> list[Path] | None:
+                       label: str = "claude-loadout init:", action: str = "seed") -> list[Path] | None:
     print("", file=sys.stderr)
     head = _plural(len(eligible), "project") + " eligible"
     if already:
@@ -431,7 +431,7 @@ def _select_repos_line(eligible: list[Path], already: int,
         _warn(f"invalid selection {raw!r}")
 
 def _pick_profile(profiles: list[Path], default: Path, repo: Path,
-                  label: str = "loadout init:") -> Path:
+                  label: str = "claude-loadout init:") -> Path:
     print("", file=sys.stderr)
     print(f"{_paint(label, 'yellow', err=True)} profile for "
           f"{_paint(str(repo), 'cyan', err=True)}", file=sys.stderr)
@@ -446,7 +446,7 @@ def _pick_profile(profiles: list[Path], default: Path, repo: Path,
             return profiles[int(raw) - 1]
         _warn(f"invalid choice {raw!r}")
 
-def _confirm_goal(repo: Path, use_cache: bool = True, label: str = "loadout init:") -> str | None:
+def _confirm_goal(repo: Path, use_cache: bool = True, label: str = "claude-loadout init:") -> str | None:
     # Returns the accepted/overridden goal, or None to skip this repo. update re-infers fresh.
     g = detect_goal(repo, use_cache=use_cache)
     print("", file=sys.stderr)
@@ -470,8 +470,8 @@ def _decide_keep(items, cfg, context: str, rules: list[Rule]) -> set[str]:
     return pinned_ids | {i.id for i in outcome.forced_keep} | {i.id for i in ranked.kept}
 
 # Machine-materialized rules carry this nl prefix so `update` can tell them from rules a human
-# authored (via `loadout rules` or by hand) and regenerate only the machine ones.
-_SEED_NL_PREFIX = "seeded by loadout"
+# authored (via `claude-loadout rules` or by hand) and regenerate only the machine ones.
+_SEED_NL_PREFIX = "seeded by loadout"   # on-disk marker in rules.toml (read back by is_seed_rule); keep stable for compat
 
 def _is_seeded_rule(rule: Rule) -> bool:
     return rule.nl.startswith(_SEED_NL_PREFIX)
@@ -515,7 +515,7 @@ def _short_desc(text: str, width: int) -> str:
     return s if len(s) <= width else s[: width - 1].rstrip() + "…"
 
 def _review_keep_drop(repo: Path, prunable: list[Item], kept_ids: set[str],
-                      label: str = "loadout init:"):
+                      label: str = "claude-loadout init:"):
     # Let the user adjust the auto keep/drop before it is frozen. Rows are grouped by kind with a
     # dim one-line description; a legend spells out what a ticked/unticked box means. Returns the
     # kept-id set, or None to skip the repo. Falls back to the auto decision when a raw tty isn't
@@ -596,8 +596,8 @@ def _cmd_init(cwd: Path, args: list[str], environ) -> int:
         already_list = [cwd] if configured(cwd) else []
     already = len(already_list)
     if not eligible:
-        print(f"{_paint('loadout:', 'green')} nothing to seed"
-              f"{f' ({already} already configured — run `loadout update` to refresh)' if already else ' (no project folders found)'}")
+        print(f"{_paint('claude-loadout:', 'green')} nothing to seed"
+              f"{f' ({already} already configured — run `claude-loadout update` to refresh)' if already else ' (no project folders found)'}")
         for repo in already_list:
             print(f"  {_paint('–', 'dim')} {repo} {_paint('(already configured)', 'dim')}")
         return 0
@@ -664,12 +664,12 @@ def _print_init_summary(seeded: int, skipped: list[tuple[Path, str]],
         tail += f", {_plural(len(skipped), 'project')} skipped"
     if already_list:
         tail += f", {len(already_list)} already configured"
-    print(f"{_paint('loadout:', 'green')} {tail}")
+    print(f"{_paint('claude-loadout:', 'green')} {tail}")
     notes = skipped + [(r, "already configured") for r in already_list]
     for repo, reason in notes:                       # name every project that didn't get seeded
         print(f"  {_paint('–', 'dim')} {repo} {_paint(f'({reason})', 'dim')}")
 
-_UPDATE_LABEL = "loadout update:"
+_UPDATE_LABEL = "claude-loadout update:"
 
 def _is_seeded(repo: Path) -> bool:
     # init always writes config.toml under a local gitignore; its presence marks a repo that
@@ -736,7 +736,7 @@ def _print_update_summary(updated: int, skipped: list[tuple[Path, str]],
         tail += f", {_plural(len(skipped), 'project')} skipped"
     if unseeded:
         tail += f", {len(unseeded)} not seeded"
-    print(f"{_paint('loadout:', 'green')} {tail}")
+    print(f"{_paint('claude-loadout:', 'green')} {tail}")
     notes = skipped + [(r, "not seeded — run init") for r in unseeded]
     for repo, reason in notes:
         print(f"  {_paint('–', 'dim')} {repo} {_paint(f'({reason})', 'dim')}")
@@ -754,12 +754,12 @@ def _cmd_update(cwd: Path, args: list[str], environ) -> int:
         eligible = [r for r in projects if _is_seeded(r)]
         unseeded = [r for r in projects if not _is_seeded(r)]
         if not eligible:
-            print(f"{_paint('loadout:', 'green')} nothing to update"
+            print(f"{_paint('claude-loadout:', 'green')} nothing to update"
                   f"{f' ({len(unseeded)} not seeded — run init)' if unseeded else ' (no seeded projects found)'}")
             return 0
     else:                                            # single: the current repo
         if not _is_seeded(cwd):
-            _warn("this repo isn't loadout-seeded; run `loadout init` first")
+            _warn("this repo isn't claude-loadout-seeded; run `claude-loadout init` first")
             return 0
         eligible = [cwd]
     if not sys.stdin.isatty() and not yes:
@@ -827,7 +827,7 @@ def _profile_report(root: Path, cwd: Path, active: bool,
 
 def _cmd_doctor(cwd: Path) -> int:
     cfg = load_config(cwd=cwd)
-    print(_paint("loadout doctor", "bold"))
+    print(_paint("claude-loadout doctor", "bold"))
     print()
     profiles = _discover_profiles(cfg.config_root)
     print(_paint(f"  claude profiles: {_plural(len(profiles), 'profile')}", "bold"))
@@ -850,21 +850,22 @@ def _cmd_doctor(cwd: Path) -> int:
     print(f"    rule model:       {rule_state}")
     print()
     print(_paint("  Next steps", "bold"))
-    print("    1. Point your launch command at loadout, e.g. add to your shell rc:")
-    alias_plain = _paint('alias claude="loadout"', 'cyan')   # kept out of the f-string: nested
-    print(f"         {alias_plain}")                          # double quotes break f-strings on 3.11
+    print("    1. Point your launch command at claude-loadout (short alias: cld),")
+    print("       e.g. add to your shell rc:")
+    alias_plain = _paint('alias claude="claude-loadout"', 'cyan')  # kept out of the f-string: nested
+    print(f"         {alias_plain}")                                # double quotes break f-strings on 3.11
     print("       or wrap a separate profile:")
-    alias_profile = _paint('alias claude-work="CLAUDE_CONFIG_DIR=~/.claude-work loadout"', 'cyan')
+    alias_profile = _paint('alias claude-work="CLAUDE_CONFIG_DIR=~/.claude-work claude-loadout"', 'cyan')
     print(f"         {alias_profile}")
     print("    2. Preview what a session would load, without launching anything:")
-    print(f"         {_paint('loadout --explain', 'cyan')}")
+    print(f"         {_paint('claude-loadout --explain', 'cyan')}")
     print("    3. Scope tools with plain-language rules:")
-    print(f"         {_paint('loadout rules', 'cyan')}")
+    print(f"         {_paint('claude-loadout rules', 'cyan')}")
     return 0
 
 def _cmd_measure(cwd: Path) -> int:
     cfg = load_config(cwd=cwd)
-    print(_paint("loadout measure", "bold"))
+    print(_paint("claude-loadout measure", "bold"))
     print(_paint("  connecting to each MCP server to tokenize its real tool set …", "dim"))
     print()
     try:
@@ -896,7 +897,7 @@ def _cmd_measure(cwd: Path) -> int:
     _measure.save_costs(cfg.config_root, results)
     n = sum(1 for r in results if r.tokens is not None)
     print()
-    print(f"{_paint('loadout:', 'green')} measured {_plural(n, 'server')}, "
+    print(f"{_paint('claude-loadout:', 'green')} measured {_plural(n, 'server')}, "
           f"~{_savings.human_tokens(total)} tokens total")
     print(_paint(f"  cached to {_measure.costs_path(cfg.config_root)}", "dim"))
     print(_paint("  these are a diagnostic view; a measured cost feeds savings only for MCP "
@@ -914,26 +915,26 @@ def _loadout_version() -> str:
 def _print_help() -> None:
     cmd = lambda s: _paint(s, "cyan")
     print(
-        f"{_paint('loadout', 'bold')} — goal-aware launcher for Claude Code\n"
+        f"{_paint('claude-loadout', 'bold')} — goal-aware launcher for Claude Code  {_paint('(alias: cld)', 'dim')}\n"
         "\n"
         f"{_paint('Usage:', 'bold')}\n"
-        f"  {cmd('loadout [claude-args...]')}   Launch claude with a goal-scoped tool set\n"
-        f"  {cmd('loadout --explain')}          Print the scoping plan, then exit (no launch)\n"
-        f"  {cmd('loadout rules')}              Author profile-wide keep/drop rules (all repos; launch prompts are repo-local)\n"
-        f"  {cmd('loadout init [ROOT]')}        Seed local config — this repo, or bulk-seed every project under ROOT\n"
-        f"  {cmd('loadout update [ROOT]')}      Refresh existing seeds — this repo, or all seeded under ROOT\n"
-        f"  {cmd('loadout doctor')}             Report profiles, config, and model state\n"
-        f"  {cmd('loadout measure')}            Measure real MCP tool-token cost — MCP only (they expose tools at runtime; opt-in, connects)\n"
-        f"  {cmd('loadout --no-gate')}          Launch without the pre-launch review pause (or set LOADOUT_NO_GATE)\n"
-        f"  {cmd('loadout --no-scope-skills')}  Keep every user skill loaded — skip skill scoping (or set LOADOUT_NO_SCOPE_SKILLS)\n"
-        f"  {cmd('loadout --help, -h')}         Show this help\n"
-        f"  {cmd('loadout --version, -V')}      Show the loadout version\n"
+        f"  {cmd('cld [claude-args...]')}   Launch claude with a goal-scoped tool set\n"
+        f"  {cmd('cld --explain')}          Print the scoping plan, then exit (no launch)\n"
+        f"  {cmd('cld rules')}              Author profile-wide keep/drop rules (all repos; launch prompts are repo-local)\n"
+        f"  {cmd('cld init [ROOT]')}        Seed local config — this repo, or bulk-seed every project under ROOT\n"
+        f"  {cmd('cld update [ROOT]')}      Refresh existing seeds — this repo, or all seeded under ROOT\n"
+        f"  {cmd('cld doctor')}             Report profiles, config, and model state\n"
+        f"  {cmd('cld measure')}            Measure real MCP tool-token cost — MCP only (they expose tools at runtime; opt-in, connects)\n"
+        f"  {cmd('cld --no-gate')}          Launch without the pre-launch review pause (or set LOADOUT_NO_GATE)\n"
+        f"  {cmd('cld --no-scope-skills')}  Keep every user skill loaded — skip skill scoping (or set LOADOUT_NO_SCOPE_SKILLS)\n"
+        f"  {cmd('cld --help, -h')}         Show this help\n"
+        f"  {cmd('cld --version, -V')}      Show the claude-loadout version\n"
         "\n"
         f"{_paint('Any other flags pass straight through to claude — run `claude --help` for those.', 'dim')}"
     )
 
 def _print_explain(scope: _Scope, plan) -> None:
-    print(_paint("loadout — scoping plan", "bold"))
+    print(_paint("claude-loadout — scoping plan", "bold"))
     print()
     lbl = lambda s: _paint(f"  {s:<11}", "dim")
     print(f"{lbl('goal')}{scope.goal!r}   "
@@ -975,7 +976,7 @@ def _print_explain(scope: _Scope, plan) -> None:
         print(f"    on-demand:      {_paint('≈ ' + _savings.human_tokens(on_demand) + ' tokens', 'dim')} "
               f"{_paint(f'— MCP/connector schemas load lazily; avoided only if used ({note})', 'dim')}")
     elif not scope.measured:
-        print(_paint("    on-demand:      run `loadout measure` to quantify the claude.ai "
+        print(_paint("    on-demand:      run `claude-loadout measure` to quantify the claude.ai "
                      "connectors strict mode blocks", "dim"))
     print()
     print(_paint("  command", "bold"))
@@ -998,7 +999,7 @@ def _maybe_persist_edit(gate: _EditGate, selected_ids: set) -> None:
     if ans not in ("y", "yes"):
         return
     _seed_repo(gate.cwd, gate.cfg, gate.items, gate.pinned_ids | selected_ids, gate.goal)
-    _warn("saved — this repo is now seeded (`loadout update` refreshes it)")
+    _warn("saved — this repo is now seeded (`claude-loadout update` refreshes it)")
 
 def _launch_gate(scope: _Scope, plan, gate: _EditGate, passthrough: list[str], no_gate: bool = False):
     # Interactive pre-launch review: read the summary, optionally edit keep/drop, then launch.
@@ -1008,7 +1009,7 @@ def _launch_gate(scope: _Scope, plan, gate: _EditGate, passthrough: list[str], n
     _warn(_savings_line(scope))
     seeded = _is_seeded(gate.cwd)
     if not seeded:
-        _warn("this repo isn't seeded — run `loadout init` to persist scoping for it")
+        _warn("this repo isn't seeded — run `claude-loadout init` to persist scoping for it")
     if no_gate:                                     # opted out — launch immediately, no pause
         return scope, plan
     if seeded:                                      # settled config — brief readable pause, then launch
@@ -1053,7 +1054,7 @@ def _run(argv: list[str] | None = None) -> int:
         _print_help()
         return 0
     if argv and argv[0] in ("--version", "-V"):
-        print(f"loadout {_loadout_version()}")
+        print(f"claude-loadout {_loadout_version()}")
         return 0
     if argv and argv[0] == "doctor":                # doctor enumerates every profile itself
         return _cmd_doctor(cwd)

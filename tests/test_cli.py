@@ -289,7 +289,7 @@ def test_resolve_config_root_prompts_and_returns_choice(tmp_path, monkeypatch, c
     assert chosen == perso
     err = capsys.readouterr().err
     assert "pick a Claude profile" in err
-    assert "loadout config: present" in err and "loadout config: absent" in err
+    assert "claude-loadout config: present" in err and "claude-loadout config: absent" in err
 
 def test_resolve_config_root_reasks_on_empty_then_valid(tmp_path, monkeypatch):
     _two_profiles(tmp_path)
@@ -622,7 +622,7 @@ def test_help_prints_usage_without_prompting_or_launching(tmp_path, monkeypatch,
         rc = cli.main([flag])
         assert rc == 0 and launched["ran"] is False
         out = capsys.readouterr().out
-        assert "Usage:" in out and "loadout doctor" in out and "pass straight through" in out
+        assert "Usage:" in out and "cld doctor" in out and "pass straight through" in out
 
 def test_version_prints_without_prompting(tmp_path, monkeypatch, capsys):
     _two_profiles(tmp_path)
@@ -633,7 +633,7 @@ def test_version_prints_without_prompting(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr("builtins.input", lambda *a, **k: pytest.fail("--version must not prompt"))
     rc = cli.main(["--version"])
     assert rc == 0
-    assert capsys.readouterr().out.startswith("loadout ")
+    assert capsys.readouterr().out.startswith("claude-loadout ")
 
 def test_rules_without_rule_model_skips_nl_prompt(tmp_path, monkeypatch, capsys):
     root = _root(tmp_path)                                # no rule_model_path -> compile_fn is None
@@ -1029,7 +1029,7 @@ def test_update_single_refuses_unseeded(tmp_path, monkeypatch, capsys):
     monkeypatch.chdir(bare)
     rc = cli.main(["update", "--yes"])
     assert rc == 0
-    assert "isn't loadout-seeded" in capsys.readouterr().err
+    assert "isn't claude-loadout-seeded" in capsys.readouterr().err
     assert not (bare / ".loadout").exists()
 
 def test_update_redetects_goal_fresh(tmp_path, monkeypatch):

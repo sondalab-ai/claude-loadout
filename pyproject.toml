@@ -1,6 +1,6 @@
 [project]
 name = "ccloadout"
-version = "0.1.0"
+version = "0.2.0"
 description = "Goal-aware launcher for Claude Code: load only the MCP servers, plugins, and skills each session needs."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -24,7 +24,8 @@ Repository = "https://github.com/marcellobarile/claude-loadout"
 Issues = "https://github.com/marcellobarile/claude-loadout/issues"
 
 [project.scripts]
-loadout = "ccloadout.cli:main"
+claude-loadout = "ccloadout.cli:main"
+cld = "ccloadout.cli:main"
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]

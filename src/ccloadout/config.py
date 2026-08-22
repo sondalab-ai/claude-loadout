@@ -11,7 +11,7 @@ DEFAULT_THRESHOLD = 0.24   # potion-base-8M; re-centered from 0.20 when plugin i
 DEFAULT_MODEL = "minishlab/potion-base-8M"
 
 def _warn(msg: str) -> None:                       # local, avoids importing cli (cycle)
-    print(f"loadout: {msg}", file=sys.stderr)
+    print(f"claude-loadout: {msg}", file=sys.stderr)
 
 @dataclass(frozen=True)
 class Config:

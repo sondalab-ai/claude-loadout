@@ -16,7 +16,7 @@ DEFAULT_TOKEN_COSTS: dict[str, int] = {"mcp": 1200, "plugin": 600, "skill": 50}
 # Kinds that a scoped session can actually remove. Standalone user skills join mcp and
 # plugins here: they are dropped via skillOverrides "off" (see compose), so they count
 # toward savings. A skill's flat cost is a conservative fallback for its listing description;
-# a real per-skill measurement (measured[id], from `loadout measure`) wins over it.
+# a real per-skill measurement (measured[id], from `claude-loadout measure`) wins over it.
 PRUNABLE = frozenset(DEFAULT_TOKEN_COSTS)
 
 # How a dropped item's cost lands in a session. EAGER kinds (skill/plugin descriptions and the
@@ -46,7 +46,7 @@ def _split_by_load(items: Iterable[_Kinded], costs: Mapping[str, int],
 
 def _item_cost(item: _Kinded, costs: Mapping[str, int],
                measured: Mapping[str, int] | None) -> int:
-    # A real measured cost for this exact server (from `loadout measure`) wins over
+    # A real measured cost for this exact server (from `claude-loadout measure`) wins over
     # the flat per-kind estimate.
     if measured and item.id in measured:
         return measured[item.id]
