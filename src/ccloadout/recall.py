@@ -76,7 +76,8 @@ def select(entries: Iterable[Entry], goal: str,
     # promoted by repeated delivery go first, but never past half the budget, or promotion would
     # eventually starve ranked recall. The payload is re-rendered per candidate because its header
     # carries the count, so the cost is not a running sum.
-    items = list(entries)
+    # A resolved debt entry is noise in a session's resident context; `recall` can still find it.
+    items = [e for e in entries if e.status != "resolved"]
     usage = usage or {}
     now = today or date.today()
     scored = [(entry, _adjust(entry, score, root, usage, decay_days, decay_factor, now))

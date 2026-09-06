@@ -1149,3 +1149,59 @@ def test_launch_records_a_delivery_but_explain_does_not(tmp_path, monkeypatch):
     usage = load_usage(root, tmp_path)
     assert {k.split(":")[-1] for k in usage} == {"m0", "m1"}
     assert all(rec.uses == 1 for rec in usage.values())
+
+# --- debt ledger --------------------------------------------------------------
+
+def _debt_repo(tmp_path, git_tracked=True):
+    root = _root(tmp_path)
+    (root / "loadout").mkdir()
+    (root / "loadout" / "config.toml").write_text(
+        f"[memory]\nenabled = true\nthreshold = 0.0\ngit_tracked = {str(git_tracked).lower()}\n")
+    return root
+
+def test_debt_add_list_and_resolve(tmp_path, monkeypatch, capsys):
+    _debt_repo(tmp_path)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "root"))
+    monkeypatch.chdir(tmp_path)
+    assert cli.main(["debt", "add", "Fail-fast stub in the rules compiler"]) == 0
+    assert cli.main(["debt", "list"]) == 0
+    out = capsys.readouterr().out
+    assert "open" in out and "fail-fast-stub-in-the-rules-compiler" in out
+    assert cli.main(["debt", "resolve", "fail-fast-stub-in-the-rules-compiler"]) == 0
+    cli.main(["debt", "list"])
+    assert "no open debt" in capsys.readouterr().out
+    cli.main(["debt", "list", "--all"])
+    assert "resolved" in capsys.readouterr().out
+
+def test_debt_survives_an_unrelated_edit_to_its_anchor(tmp_path, monkeypatch, capsys):
+    _debt_repo(tmp_path)
+    src = tmp_path / "src" / "cli.py"; src.parent.mkdir(parents=True); src.write_text("x = 1\n")
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "root"))
+    monkeypatch.chdir(tmp_path)
+    cli.main(["debt", "add", "--anchor", "src/cli.py", "shim here"])
+    src.write_text("x = 2\n# unrelated change\n")
+    capsys.readouterr()
+    cli.main(["debt", "list"])
+    assert "open" in capsys.readouterr().out          # only `debt resolve` closes an entry
+
+def test_resolved_debt_is_not_injected_but_recall_still_finds_it(tmp_path, monkeypatch, capsys):
+    root = _debt_repo(tmp_path)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "make_model2vec_embed", lambda name: cli.keyword_embed)
+    cli.main(["debt", "add", "--name", "shim", "a shim in the launcher"])
+    cli.main(["debt", "resolve", "shim"])
+    capsys.readouterr()
+    monkeypatch.setattr(cli.subprocess, "run", lambda *a, **k: _RC(0))
+    cli.main(["--explain"])
+    assert "none injected" in capsys.readouterr().out
+    cli.main(["recall", "shim"])
+    assert "shim" in capsys.readouterr().out
+
+def test_memory_add_writes_outside_the_repo_when_not_tracked(tmp_path, monkeypatch, capsys):
+    root = _debt_repo(tmp_path, git_tracked=False)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
+    monkeypatch.chdir(tmp_path)
+    assert cli.main(["memory", "add", "the ranker threshold was recentred"]) == 0
+    assert not (tmp_path / "docs").exists()
+    assert "wrote" in capsys.readouterr().out

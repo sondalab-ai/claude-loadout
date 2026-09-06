@@ -22,6 +22,7 @@ class MemoryConfig:
     promote_after: int = 3       # deliveries in a repo after which an entry is pinned into recall
     decay_days: int = 90         # no delivery for this long demotes an entry (never deletes it)
     decay_factor: float = 0.5
+    git_tracked: bool = True     # new entries land in <repo>/docs/memory and travel in git
 
 @dataclass(frozen=True)
 class Config:

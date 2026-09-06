@@ -109,3 +109,45 @@ def test_both_project_slug_conventions_are_read(tmp_path: Path):
            _decision("2026-01-01-0900-d", "Decision slug"))
     names = {e.name for e in read_store(repo, root, home=home).entries}
     assert names == {"a", "2026-01-01-0900-d"}
+
+# --- writing entries (Slice 2) ------------------------------------------------
+
+def test_written_entry_round_trips_through_the_reader(tmp_path: Path):
+    from ccloadout.memory import write_entry
+    repo, root = tmp_path / "repo", tmp_path / "root"
+    (repo / "src").mkdir(parents=True)
+    (repo / "src" / "cli.py").write_text("x = 1\n")
+    path = write_entry(root, repo, name="shim-in-launcher", description="a temporary shim",
+                       kind="debt", git_tracked=True, anchors=["src/cli.py"], body="why it is here")
+    assert path == repo / "docs" / "memory" / "shim-in-launcher.md"
+    e, = read_store(repo, root, home=tmp_path / "h").entries
+    assert e.kind == "debt" and e.status == "open" and e.anchors == ("src/cli.py",)
+    assert e.content_sha                                   # recorded so staleness has a baseline
+    assert "why it is here" in path.read_text()
+
+def test_untracked_entries_land_outside_the_repository(tmp_path: Path):
+    from ccloadout.memory import write_entry, harness_slug
+    repo, root = tmp_path / "repo", tmp_path / "root"; repo.mkdir()
+    path = write_entry(root, repo, name="n", description="d", kind="memory", git_tracked=False)
+    assert path == root / "projects" / harness_slug(repo) / "memory" / "n.md"
+    assert not (repo / "docs").exists()
+
+def test_writing_the_same_name_twice_is_refused(tmp_path: Path):
+    from ccloadout.memory import write_entry, EntryExists
+    import pytest
+    repo, root = tmp_path / "repo", tmp_path / "root"; repo.mkdir()
+    write_entry(root, repo, name="n", description="d", kind="memory", git_tracked=True)
+    with pytest.raises(EntryExists):
+        write_entry(root, repo, name="n", description="other", kind="memory", git_tracked=True)
+
+def test_resolving_a_debt_entry_rewrites_only_its_status(tmp_path: Path):
+    from ccloadout.memory import write_entry, set_status
+    repo, root = tmp_path / "repo", tmp_path / "root"; repo.mkdir()
+    path = write_entry(root, repo, name="d", description="a shim", kind="debt",
+                       git_tracked=True, body="the body stays")
+    before = path.read_text()
+    set_status(path, "resolved")
+    e, = read_store(repo, root, home=tmp_path / "h").entries
+    assert e.status == "resolved" and e.description == "a shim"
+    assert "the body stays" in path.read_text()
+    assert before.count("\n") == path.read_text().count("\n")   # no lines added or lost

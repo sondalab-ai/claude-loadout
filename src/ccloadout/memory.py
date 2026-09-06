@@ -1,5 +1,6 @@
 from __future__ import annotations
 import re
+from datetime import date
 from dataclasses import dataclass
 from pathlib import Path
 from ccloadout.inventory import _frontmatter
@@ -122,3 +123,46 @@ def read_store(cwd: Path, config_root: Path, home: Path | None = None) -> Store:
             by_id[entry.id] = entry
             entries.append(entry)
     return Store(entries=tuple(entries), shadowed=tuple(shadowed))
+
+
+class EntryExists(Exception):
+    """A store already holds an entry with this name; entries are never silently overwritten."""
+
+def store_dir(config_root: Path, repo: Path, git_tracked: bool) -> Path:
+    # Where new entries are written. Tracked entries travel with the repository and reach
+    # collaborators; untracked ones stay in the harness's own directory (spec §5.1, §9).
+    return repo / "docs" / "memory" if git_tracked \
+        else config_root / "projects" / harness_slug(repo) / "memory"
+
+def write_entry(config_root: Path, repo: Path, name: str, description: str, kind: str,
+                git_tracked: bool, anchors: list[str] | None = None, body: str = "",
+                today: date | None = None) -> Path:
+    from ccloadout.recall import sha_of                   # local: recall imports memory
+    directory = store_dir(config_root, repo, git_tracked)
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / f"{name}.md"
+    if path.exists():
+        raise EntryExists(str(path))
+    anchors = anchors or []
+    meta = [f"  node_type: memory",
+            f"  loadout_kind: {kind}",
+            f"  scope: repo",
+            f"  created: {(today or date.today()).isoformat()}"]
+    if anchors:
+        meta.append("  anchors: [" + ", ".join(anchors) + "]")
+        meta.append(f"  content_sha: {sha_of([repo / a.split('#', 1)[0] for a in anchors])}")
+    if kind == "debt":
+        meta.append("  status: open")               # only an explicit resolve closes it (spec §11)
+    front = "\n".join([f"name: {name}", f"description: {description}", "metadata:", *meta])
+    path.write_text(f"---\n{front}\n---\n\n{body}\n" if body else f"---\n{front}\n---\n")
+    return path
+
+def set_status(path: Path, status: str) -> None:
+    # Rewrites the one line, leaving body and every other key byte-identical.
+    lines = path.read_text().splitlines()
+    for i, line in enumerate(lines):
+        if line.strip().startswith("status:"):
+            lines[i] = f"{line[:len(line) - len(line.lstrip())]}status: {status}"
+            path.write_text("\n".join(lines) + "\n")
+            return
+    raise ValueError(f"{path} has no status field to set")

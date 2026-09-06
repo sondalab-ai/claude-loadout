@@ -1,5 +1,5 @@
 from __future__ import annotations
-import os, subprocess, sys, time
+import os, re, subprocess, sys, time
 from fnmatch import fnmatch
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
@@ -9,7 +9,7 @@ from ccloadout.inventory import claude_code_inventory, Item
 from ccloadout.goal import detect_goal, write_goal_cache
 from ccloadout.ranker import Ranker, make_model2vec_embed, keyword_embed, bundled_model_path, resolve_model_source
 from ccloadout.compose import compose
-from ccloadout.memory import read_store
+from ccloadout.memory import EntryExists, read_store, set_status, write_entry
 from ccloadout.usage import load_usage, record_delivery
 from ccloadout.recall import (anchor_state, build_payload, estimate_tokens,
                               recall_command, search, select, strip_frontmatter)
@@ -201,6 +201,67 @@ def _record_delivery(scope, cwd: Path) -> None:
             record_delivery(mem.config_root, cwd, mem.delivered)
         except OSError as exc:                      # a counter is never worth failing a launch for
             _warn(f"could not record memory usage ({exc})")
+
+def _slugify(text: str) -> str:
+    words = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-").split("-")
+    return "-".join(w for w in words if w)[:60] or "entry"
+
+def _pop_flag(args: list[str], flag: str) -> tuple[list[str], list[str]]:
+    values = []
+    while flag in args:
+        at = args.index(flag)
+        values.append(args[at + 1]) if at + 1 < len(args) else None
+        args = args[:at] + args[at + 2:]
+    return args, values
+
+def _cmd_write_entry(cwd: Path, args: list[str], kind: str, override: Path | None) -> int:
+    args, names = _pop_flag(list(args), "--name")
+    args, anchors = _pop_flag(args, "--anchor")
+    description = " ".join(args).strip()
+    if not description:
+        _warn(f"{kind} add needs a description")
+        return 2
+    cfg = load_config(cwd=cwd, config_root_override=override)
+    try:
+        path = write_entry(cfg.config_root, cwd, name=names[0] if names else _slugify(description),
+                           description=description, kind=kind,
+                           git_tracked=cfg.memory.git_tracked, anchors=anchors)
+    except EntryExists as exc:
+        _warn(f"an entry already exists at {exc}; pick another --name")
+        return 1
+    print(f"{_paint('wrote', 'green')} {path}")
+    return 0
+
+def _cmd_debt(cwd: Path, args: list[str], override: Path | None = None) -> int:
+    action, rest = (args[0], args[1:]) if args else ("list", [])
+    if action == "add":
+        return _cmd_write_entry(cwd, rest, "debt", override)
+    cfg = load_config(cwd=cwd, config_root_override=override)
+    entries = [e for e in read_store(cwd, cfg.config_root).entries if e.kind == "debt"]
+    if action == "resolve":
+        if not rest:
+            _warn("debt resolve needs the name of an entry")
+            return 2
+        match = next((e for e in entries if e.name == rest[0]), None)
+        if match is None:
+            _warn(f"no debt entry named {rest[0]!r}")
+            return 1
+        set_status(match.path, "resolved")
+        print(f"{_paint('resolved', 'green')} {match.name}")
+        return 0
+    if action != "list":
+        _warn(f"unknown debt command {action!r}; try add, list or resolve")
+        return 2
+    show_all = "--all" in rest
+    shown = [e for e in entries if show_all or e.status != "resolved"]
+    if not shown:
+        print(_paint("no open debt recorded for this repository", "dim"))
+        return 0
+    for e in shown:
+        state = _paint("resolved", "dim") if e.status == "resolved" else _paint("open", "yellow")
+        mark = "" if anchor_state(e, cwd) != "missing" else _paint("  ⚠ anchor gone", "yellow")
+        print(f"  {state}  {e.name} — {_short_desc(e.description, 60)}{mark}")
+    return 0
 
 def _cmd_recall(cwd: Path, args: list[str], config_root_override: Path | None = None) -> int:
     limit = 3
@@ -1000,6 +1061,8 @@ def _print_help() -> None:
         f"  {cmd('cld [claude-args...]')}   Launch claude with a goal-scoped tool set\n"
         f"  {cmd('cld --explain')}          Print the scoping plan, then exit (no launch)\n"
         f"  {cmd('cld recall <query>')}    Search the memory store and print matching entries in full\n"
+        f"  {cmd('cld memory add <text>')} Record a note for this repo (--name slug, --anchor path)\n"
+        f"  {cmd('cld debt add|list|resolve')}  Track shims, stubs and skipped tests you left behind\n"
         f"  {cmd('cld rules')}              Author profile-wide keep/drop rules (all repos; launch prompts are repo-local)\n"
         f"  {cmd('cld init [ROOT]')}        Seed local config — this repo, or bulk-seed every project under ROOT\n"
         f"  {cmd('cld update [ROOT]')}      Refresh existing seeds — this repo, or all seeded under ROOT\n"
@@ -1156,6 +1219,14 @@ def _run(argv: list[str] | None = None) -> int:
         return 0
     if argv and argv[0] == "doctor":                # doctor enumerates every profile itself
         return _cmd_doctor(cwd)
+    if argv and argv[0] == "debt":                  # the debt ledger: explicit lifecycle only
+        return _cmd_debt(cwd, argv[1:], _resolve_config_root(os.environ, []))
+    if argv and argv[0] == "memory":
+        sub = argv[1] if len(argv) > 1 else ""
+        if sub == "add":
+            return _cmd_write_entry(cwd, argv[2:], "memory", _resolve_config_root(os.environ, []))
+        _warn("memory takes: add <description> [--name slug] [--anchor path]")
+        return 2
     if argv and argv[0] == "recall":                # T2 retrieval: no scoping, no launch
         return _cmd_recall(cwd, argv[1:], _resolve_config_root(os.environ, []))
     if argv and argv[0] == "measure":               # opt-in, connects to servers; no scoping
