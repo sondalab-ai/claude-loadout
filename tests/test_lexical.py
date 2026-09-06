@@ -35,3 +35,24 @@ def test_shared_words_do_not_beat_the_specific_entry():
 def test_an_empty_store_scores_nothing():
     assert rank_lexically([], "anything") == []
     assert Bm25([]).scores("anything") == []
+
+def test_singular_and_plural_forms_meet():
+    for one, many in (("process", "processes"), ("class", "classes"), ("cache", "caches"),
+                      ("address", "addresses"), ("change", "changes")):
+        assert tokenize(one) == tokenize(many), (one, many)
+
+def test_a_plural_query_finds_a_singular_entry():
+    entries = [_e("proc", "how the process pool is drained on exit")]
+    assert rank_lexically(entries, "draining processes")[0][1] > 0
+
+def test_non_ascii_prompts_are_tokenised():
+    assert tokenize("perché il processo è bloccato") != []
+    assert tokenize("процесс") != []
+
+def test_idf_and_not_term_frequency_decides_the_winner():
+    # Every entry mentions "session"; only one mentions "overlay". Without inverse document
+    # frequency the long common term dominates and the specific entry loses.
+    common = [_e(f"c{i}", "session session session session handling notes") for i in range(6)]
+    specific = _e("specific", "session overlay")
+    ranked = rank_lexically(common + [specific], "session overlay")
+    assert ranked[0][0].name == "specific"

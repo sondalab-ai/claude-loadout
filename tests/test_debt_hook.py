@@ -75,3 +75,26 @@ def test_a_shell_command_that_only_reads_records_nothing(tmp_path):
     _run({"tool_name": "Bash", "cwd": str(repo),
           "tool_input": {"command": "grep -rn 'TODO(loadout)' src/"}}, _env(root))
     assert load_candidates(root, repo) == []          # searching for markers is not creating one
+
+def test_a_non_writing_tool_is_ignored_even_with_the_marker_in_its_input(tmp_path):
+    # The tool-name filter must be what suppresses this: the marker sits in a field the hook reads.
+    root, repo = tmp_path / "root", tmp_path / "repo"
+    _run({"tool_name": "Read", "cwd": str(repo),
+          "tool_input": {"file_path": "a.py", "content": "# TODO(loadout) someone else's shim"}},
+         _env(root))
+    assert load_candidates(root, repo) == []
+
+def test_error_redirection_is_not_a_write(tmp_path):
+    root, repo = tmp_path / "root", tmp_path / "repo"
+    _run({"tool_name": "Bash", "cwd": str(repo),
+          "tool_input": {"command": "python -c 'print(1)' 2>&1 | grep 'TODO(loadout)'"}},
+         _env(root))
+    assert load_candidates(root, repo) == []
+
+def test_a_pattern_containing_a_comma_survives_the_env(tmp_path):
+    root, repo = tmp_path / "root", tmp_path / "repo"
+    _run({"tool_name": "Write", "cwd": str(repo),
+          "tool_input": {"file_path": "a.py", "content": "# TODO(a,b) unpick"}},
+         _env(root, patterns="TODO(a,b)"))
+    row, = load_candidates(root, repo, kind="debt-signal")
+    assert row["pattern"] == "TODO(a,b)"

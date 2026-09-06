@@ -90,7 +90,7 @@ Every row below was checked empirically, in the house style of
 | E | **The launch-time goal signal describes the repo, not the task.** `detect_goal` (`src/ccloadout/goal.py:115`) derives the goal from `README` / `pyproject.description`. | Source read. Adequate for capability pruning; weak for G2, where the useful memory is about the bug you are *about* to hit. |
 | F | **The launcher does *not* exec — the parent survives the whole session.** `cli.py:1106` runs `subprocess.run(plan.argv, env=plan.env)` inside a `try/finally` that cleans up the tmp files; `grep -rn 'os.exec'` over `src/` matches nothing. | Source read; grep. **Consequence:** end-of-session capture is available in the parent for free, so §5.3 needs a hook only for mid-session signals. |
 | H | **The harness injects its `MEMORY.md` index lines and nothing else.** A memory file that is not listed in the index reaches no session; a listed one contributes its title and hook, never its body. So entries under `<config_root>/projects/<slug>/memory/` that the index names are **already resident** before this subsystem adds anything. | Two `claude -p` probes in a throwaway project (CC 2.1.263): an unlisted file's codeword came back `NONE`; after adding its index line the model quoted the line verbatim but still answered `CODEWORD-NOT-SEEN`. **Consequence:** T1 excludes indexed entries (§5.2), or it pays twice for what the session already has — on the author's own repo that was 3 of 7 entries. |
-| G | **`UserPromptSubmit` is a hostile place to do work.** A non-zero exit there blocks the prompt and erases what the user typed. | Third-party report, and weaker than it first looks: the p50 of 8718 ms and 6 timeouts in 256 runs come from an **external reporter**, not the `remember` maintainers, were measured on Windows 11 ARM64 under QEMU, were caused by 19–27 process spawns per prompt, and have since been fixed upstream (`scripts/user-prompt-hook.sh` header, https://github.com/Digital-Process-Tools/claude-remember/issues/227). The *erase-the-prompt* failure mode is real and platform-independent; the latency numbers are an upper bound from a pathological setup. Both still bind §5.2's requirements. |
+| G | **`UserPromptSubmit` can block a turn, but only on exit 2.** Probed directly (CC 2.1.263): a hook exiting **1** lets the turn through unchanged; a hook exiting **2** blocks it with `UserPromptSubmit operation blocked by hook … Original prompt: …`, so the text is shown back rather than lost. | Our own probe for the exit codes; the latency numbers are a third-party report, and weaker than they first look: the p50 of 8718 ms and 6 timeouts in 256 runs come from an **external reporter**, not the `remember` maintainers, were measured on Windows 11 ARM64 under QEMU, were caused by 19–27 process spawns per prompt, and have since been fixed upstream (`scripts/user-prompt-hook.sh` header, https://github.com/Digital-Process-Tools/claude-remember/issues/227). The *erase-the-prompt* failure mode is real and platform-independent; the latency numbers are an upper bound from a pathological setup. Both still bind §5.2's requirements. |
 
 ## 5. Architecture
 
@@ -222,8 +222,11 @@ self-reference it introduces.
    > prompt's "skills pruned" meet an entry's "skill pruning". Measured end to end, hook process
    > included: **38 ms median, 56 ms worst of seven**, against a 300 ms budget.
 3. A hard wall-clock timeout (default 300 ms), enforced inside the hook with `setitimer`.
-4. `exit 0` on **every** path — timeout, missing index, import error, corrupt store. A recall miss
-   is invisible; a non-zero exit destroys the user's typed prompt (lever G).
+4. `exit 0` on **every** path — timeout, missing index, import error, corrupt store. The binding
+   rule is *never exit 2*, which is the only code that blocks a turn (lever G); exiting 0
+   unconditionally satisfies it without having to reason about which failures are recoverable. An
+   uncaught Python exception is exit 1, which does not block — so the discipline buys silence, not
+   safety, and the earlier claim that it prevented prompt loss was wrong.
 5. Off by default, behind `[memory] prompt_recall = false`.
 6. The hook is told which entries the launch payload already made resident and never repeats one,
    so the two tiers add context instead of duplicating it.

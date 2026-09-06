@@ -37,3 +37,16 @@ def test_a_corrupt_line_does_not_break_the_reader(tmp_path: Path):
     with candidates_path(root).open("a") as fh:
         fh.write("{not json\n")
     assert [r["goal"] for r in load_candidates(root, repo)] == ["good"]
+
+def test_consolidating_one_repo_keeps_every_other_line(tmp_path: Path):
+    from ccloadout.candidates import drop_rows
+    root = tmp_path / "root"
+    record_session(root, tmp_path / "a", goal="mine", exit_code=0, changed=[])
+    record_session(root, tmp_path / "b", goal="theirs", exit_code=0, changed=[])
+    with candidates_path(root).open("a") as fh:      # a writer crashed mid-line
+        fh.write('{"kind": "session", "repo": "' + str(tmp_path / "b") + '", "goal": "trunc"\n')
+    drop_rows(root, tmp_path / "a", keep=[])
+    text = candidates_path(root).read_text()
+    assert "theirs" in text and "trunc" in text      # unparsable lines are kept, not judged
+    assert "mine" not in text
+    assert load_candidates(root, tmp_path / "a") == []

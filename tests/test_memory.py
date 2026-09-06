@@ -29,7 +29,9 @@ def test_reads_all_memory_locations_with_scope(tmp_path: Path):
 
 def test_index_files_are_not_entries(tmp_path: Path):
     repo, root = tmp_path / "repo", tmp_path / "root"
-    _write(repo / "docs" / "memory" / "MEMORY.md", "# Memory index\n- [a](a.md) — hook\n")
+    # With frontmatter, so the filename is the only thing that can exclude it.
+    _write(repo / "docs" / "memory" / "MEMORY.md",
+           _entry("MEMORY", "an index that looks like an entry"))
     _write(repo / "docs" / "memory" / "a.md", _entry("a", "real one"))
     assert [e.name for e in read_store(repo, root, home=tmp_path / "h").entries] == ["a"]
 

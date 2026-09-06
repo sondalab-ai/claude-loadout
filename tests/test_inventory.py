@@ -119,3 +119,24 @@ def test_frontmatter_scalar_and_block_scalar_behaviour_unchanged():
     assert _frontmatter("---\nmetadata: 1\n---\n")["metadata"] == "1"
     assert _frontmatter("---\nd: >\n  a\n  b\n---\n")["d"] == "a b"
     assert _frontmatter("---\nd: |\n  a\n  b\n---\n")["d"] == "a\nb"
+
+def test_frontmatter_keeps_a_plain_multiline_scalar_as_text():
+    # Legal YAML that is not a mapping: an indented block of prose. Treating it as one produced a
+    # dict, which then reached Item.description and was embedded by the ranker.
+    text = ("---\nname: astro\ndescription:\n"
+            "  Use when the user asks for X. Triggers on: \"do X\", \"make X\".\n"
+            "  Also handles Y.\n---\nbody")
+    d = _frontmatter(text)["description"]
+    assert isinstance(d, str)
+    assert d == 'Use when the user asks for X. Triggers on: "do X", "make X". Also handles Y.'
+
+def test_frontmatter_still_reads_a_real_nested_mapping():
+    text = "---\nname: n\nmetadata:\n  node_type: memory\n  uses: 2\n---\nbody"
+    assert _frontmatter(text)["metadata"] == {"node_type": "memory", "uses": "2"}
+
+def test_inventory_never_hands_the_ranker_a_non_string_description(tmp_path: Path):
+    root = tmp_path / "root"; skill = root / "skills" / "s"; skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text(
+        "---\nname: s\ndescription:\n  plain prose with no colon at all\n  over two lines\n---\nx")
+    item = next(i for i in claude_code_inventory(root) if i.kind == "skill")
+    assert isinstance(item.description, str) and "plain prose" in item.description

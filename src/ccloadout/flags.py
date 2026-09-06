@@ -17,8 +17,14 @@ class Flag:
 def flags_path(config_root: Path) -> Path:
     return config_root / "loadout" / "flags.json"
 
+def _repo_key(repo: Path) -> str:
+    try:
+        return str(Path(repo).resolve())   # see usage._repo_key
+    except OSError:
+        return str(repo)
+
 def load_flags(config_root: Path, repo: Path) -> dict[str, Flag]:
-    per_repo = read_json(flags_path(config_root)).get(str(repo))
+    per_repo = read_json(flags_path(config_root)).get(_repo_key(repo))
     if not isinstance(per_repo, dict):
         return {}
     return {eid: Flag(reason=str(rec.get("reason") or ""), at=str(rec.get("at") or ""))
@@ -28,15 +34,15 @@ def set_flag(config_root: Path, repo: Path, entry_id: str, reason: str,
              today: date | None = None) -> None:
     stamp = (today or date.today()).isoformat()
     def mutate(data: dict) -> None:
-        per_repo = data.setdefault(str(repo), {})
+        per_repo = data.setdefault(_repo_key(repo), {})
         if not isinstance(per_repo, dict):
-            per_repo = data[str(repo)] = {}
+            per_repo = data[_repo_key(repo)] = {}
         per_repo[entry_id] = {"reason": reason, "at": stamp}
     update_json(flags_path(config_root), mutate)
 
 def clear_flag(config_root: Path, repo: Path, entry_id: str) -> None:
     def mutate(data: dict) -> None:
-        per_repo = data.get(str(repo))
+        per_repo = data.get(_repo_key(repo))
         if isinstance(per_repo, dict):
             per_repo.pop(entry_id, None)
     update_json(flags_path(config_root), mutate)

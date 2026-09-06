@@ -105,3 +105,12 @@ def test_no_prompt_recall_means_no_hooks_key(tmp_path: Path):
     plan = compose([], [], tmp_path, [], environ={}, cwd=tmp_path,
                    global_config_path=tmp_path / ".claude.json")
     assert "hooks" not in _settings_of(plan)
+
+def test_hook_command_is_quoted_and_time_limited(tmp_path: Path):
+    plan = compose([], [], tmp_path, [], environ={}, cwd=tmp_path,
+                   global_config_path=tmp_path / ".claude.json",
+                   hooks={"PostToolUse": "ccloadout.debt_hook"}, hook_env={})
+    hook = _settings_of(plan)["hooks"]["PostToolUse"][0]["hooks"][0]
+    assert hook["timeout"] == 5
+    import shlex, sys
+    assert shlex.split(hook["command"])[0] == sys.executable   # survives a path with spaces

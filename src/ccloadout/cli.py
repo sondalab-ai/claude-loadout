@@ -9,8 +9,8 @@ from ccloadout.inventory import claude_code_inventory, Item
 from ccloadout.goal import detect_goal, write_goal_cache
 from ccloadout.ranker import Ranker, make_model2vec_embed, keyword_embed, bundled_model_path, resolve_model_source
 from ccloadout.compose import compose
-from ccloadout.memory import (EntryExists, forget_entry, indexed_files, read_all,
-                              read_store, set_status, slug_for, write_entry)
+from ccloadout.memory import (EntryExists, NoStatus, forget_entry, indexed_files,
+                              read_all, read_store, set_status, slug_for, write_entry)
 from ccloadout.flags import clear_flag, load_flags, set_flag
 from ccloadout.usage import load_usage, record_delivery
 from ccloadout.candidates import drop_rows, load_candidates, record_session
@@ -60,8 +60,10 @@ def _yn(flag: bool, *, err: bool = False) -> str:
 def _warn(msg: str) -> None:
     print(f"{_paint('claude-loadout:', 'yellow', err=True)} {msg}", file=sys.stderr)
 
+_IRREGULAR = {"entry": "entries"}
+
 def _plural(n: int, noun: str) -> str:
-    return f"{n} {noun}" if n == 1 else f"{n} {noun}s"
+    return f"{n} {noun}" if n == 1 else f"{n} {_IRREGULAR.get(noun, noun + 's')}"
 
 def _cleanup(tmp_paths) -> None:
     for p in tmp_paths:
@@ -202,7 +204,7 @@ def _recall_payload(cfg, cwd: Path, goal: str, embed):
                     flags=load_flags(cfg.config_root, cwd), resident=resident,
                     promote_after=cfg.memory.promote_after,
                     decay_days=cfg.memory.decay_days, decay_factor=cfg.memory.decay_factor)
-    payload = build_payload(chosen, exe=exe, total=total - len(resident), root=cwd)
+    payload = build_payload(chosen, exe=exe, total=total, root=cwd)  # same count assess estimated with
     return payload, _Memory(len(chosen), total, estimate_tokens(payload), len(resident),
                             tuple(e.id for e in chosen), cfg.config_root)
 
@@ -219,8 +221,10 @@ def _changed_since(cwd: Path, head_before: str | None) -> list[str]:
     head_now = _git(cwd, "rev-parse", "HEAD")
     if head_before and head_now and head_before != head_now:
         names += (_git(cwd, "diff", "--name-only", head_before, head_now) or "").splitlines()
-    dirty = (_git(cwd, "status", "--porcelain") or "").splitlines()
-    names += [line[3:] for line in dirty if len(line) > 3]
+    # -z: `git status --porcelain` quotes unusual paths and summarises whole directories;
+    # --untracked-files=all lists the files inside them instead of the directory itself.
+    dirty = (_git(cwd, "status", "--porcelain", "-z", "--untracked-files=all") or "")
+    names += [field[3:] for field in dirty.split("\0") if len(field) > 3]
     return sorted(dict.fromkeys(n for n in names if n))
 
 def _capture_session(scope, cwd: Path, exit_code: int, head_before: str | None) -> None:
@@ -363,7 +367,11 @@ def _cmd_debt(cwd: Path, args: list[str], override: Path | None = None) -> int:
         if match is None:
             _warn(f"no debt entry named {rest[0]!r}")
             return 1
-        set_status(match.path, "resolved")
+        try:
+            set_status(match.path, "resolved")
+        except (NoStatus, OSError) as exc:          # hand-written notes carry no status key
+            _warn(f"could not resolve {match.name}: {exc}")
+            return 1
         print(f"{_paint('resolved', 'green')} {match.name}")
         return 0
     if action != "list":
@@ -389,15 +397,22 @@ def _session_hooks(cfg, cwd: Path, mem) -> tuple[dict | None, dict | None]:
     env = {"LOADOUT_CONFIG_ROOT": str(cfg.config_root), "LOADOUT_REPO": str(cwd)}
     if cfg.memory.prompt_recall:                   # re-rank per prompt; told what is already resident
         hooks["UserPromptSubmit"] = "ccloadout.prompt_hook"
-        env.update({"LOADOUT_RESIDENT_IDS": ",".join(mem.delivered),
+        env.update({"LOADOUT_RESIDENT_IDS": _LIST_SEP.join(mem.delivered),
                     "LOADOUT_PROMPT_MAX": cfg.memory.prompt_recall_max,
                     "LOADOUT_PROMPT_TIMEOUT_MS": cfg.memory.prompt_timeout_ms})
     if cfg.memory.debt_patterns:                   # notice configured debt markers being written
         hooks["PostToolUse"] = "ccloadout.debt_hook"
-        env["LOADOUT_DEBT_PATTERNS"] = ",".join(cfg.memory.debt_patterns)
+        env["LOADOUT_DEBT_PATTERNS"] = _LIST_SEP.join(cfg.memory.debt_patterns)
     return (hooks or None), (env if hooks else None)
 
 _AUDIT_HINT = "↑/↓ move · space keep/drop · a all/none · enter apply · q cancel"
+_LIST_SEP = "\x1f"                                  # env-passed lists: see debt_hook.LIST_SEP
+_MEMORY_ACTIONS = frozenset({"enable", "disable", "add", "audit", "flag", "consolidate"})
+_DEBT_ACTIONS = frozenset({"add", "list", "resolve"})
+_DECISION_ACTIONS = frozenset({"new", "list", "show", "supersede"})
+
+def _is_action(argv: list[str], actions: frozenset) -> bool:
+    return len(argv) == 1 or argv[1] in actions
 _INTRO_MARKER = ".memory-intro-seen"                # printed once per profile, then never again
 
 def _memory_state(cwd: Path, cfg) -> dict:
@@ -511,8 +526,12 @@ def _memory_intro_once(mem) -> None:
     except OSError:                                 # unwritable profile: say it once per run, not never
         pass
 
-def _entry_signals(entry, cwd: Path, usage, flags, shadowed_ids: set) -> str:
+def _entry_signals(entry, cwd: Path | None, usage, flags, shadowed_ids: set) -> str:
+    # cwd is None for rows read from another project: its anchors, counters and flags are relative
+    # to a root we do not have, and reporting them against this one produces confident nonsense.
     bits = []
+    if cwd is None:
+        return _paint("another project — signals not evaluated here", "dim", err=True)
     state = anchor_state(entry, cwd)
     if state == "missing":
         bits.append(_paint("anchor gone", "red", err=True))
@@ -536,16 +555,19 @@ def _audit_rows(cwd: Path, cfg, all_repos: bool):
     if not all_repos:
         store = read_store(cwd, cfg.config_root)
         shadowed = {dropped.id for _, dropped in store.shadowed}
-        return [("this repository", e) for e in store.entries], usage, flags, shadowed
+        return ([("this repository", e) for e in store.entries], usage, flags, shadowed,
+                {e.path.resolve() for e in store.entries})
+    here = {e.path.resolve() for e in read_store(cwd, cfg.config_root).entries}
     rows = [(project, e) for project, entries in sorted(read_all(cfg.config_root).items())
             for e in entries]
-    return rows, usage, flags, set()
+    return rows, usage, flags, set(), here
 
 def _cmd_audit(cwd: Path, args: list[str], override: Path | None = None) -> int:
     args, contexts = _pop_flag(list(args), "--context")
     all_repos, as_json = "--all-repos" in args, "--json" in args
     cfg = load_config(cwd=cwd, config_root_override=override)
-    rows, usage, flags, shadowed = _audit_rows(cwd, cfg, all_repos)
+    rows, usage, flags, shadowed, local = _audit_rows(cwd, cfg, all_repos)
+    root_of = lambda e: cwd if e.path.resolve() in local else None
     if not rows:
         print(_paint("no memory entries to audit", "dim"))
         return 0
@@ -555,7 +577,7 @@ def _cmd_audit(cwd: Path, args: list[str], override: Path | None = None) -> int:
         print(json.dumps([{"project": project, "id": e.id, "kind": e.kind, "scope": e.scope,
                            "name": e.name, "description": e.description, "path": str(e.path),
                            "status": e.status, "anchors": list(e.anchors),
-                           "anchor_state": anchor_state(e, cwd),
+                           "anchor_state": anchor_state(e, cwd) if root_of(e) else None,
                            "uses": usage[e.id].uses if e.id in usage else 0,
                            "last_used": usage[e.id].last_used if e.id in usage else None,
                            "flagged": flags[e.id].reason if e.id in flags else None,
@@ -566,19 +588,19 @@ def _cmd_audit(cwd: Path, args: list[str], override: Path | None = None) -> int:
         for project, e in rows:
             print(f"  {_paint(f'[{e.kind} · {project}]', 'dim')} {e.name} — "
                   f"{_short_desc(e.description, 50)}")
-            signals = _entry_signals(e, cwd, usage, flags, shadowed)
+            signals = _entry_signals(e, root_of(e), usage, flags, shadowed)
             if signals:
                 print(f"      {signals}")
         return 0
-    return _audit_interactive(cwd, cfg, rows, usage, flags, shadowed)
+    return _audit_interactive(cwd, cfg, rows, usage, flags, shadowed, root_of)
 
-def _audit_interactive(cwd: Path, cfg, rows, usage, flags, shadowed) -> int:
+def _audit_interactive(cwd: Path, cfg, rows, usage, flags, shadowed, root_of) -> int:
     labels, headers, seen = [], {}, None
     for i, (project, entry) in enumerate(rows):
         if project != seen:
             headers[i] = project
             seen = project
-        signals = _entry_signals(entry, cwd, usage, flags, shadowed)
+        signals = _entry_signals(entry, root_of(entry), usage, flags, shadowed)
         labels.append(f"{_short_desc(entry.name, 34):<34} {_short_desc(entry.description, 44)}"
                       + (f"   {signals}" if signals else ""))
     title = (_paint("claude-loadout — memory audit", "bold", err=True) + "\n"
@@ -608,11 +630,12 @@ def _audit_interactive(cwd: Path, cfg, rows, usage, flags, shadowed) -> int:
     return 0
 
 def _audit_context(cwd: Path, cfg, entries, context: str, usage, flags, as_json: bool) -> int:
-    verdicts = assess(entries, context, _build_embed(cfg.model_name), cfg.memory.threshold,
+    verdicts = sorted(assess(entries, context, _build_embed(cfg.model_name), cfg.memory.threshold,
                       cfg.memory.budget_tokens, exe=recall_command(), root=cwd,
                       usage=usage, flags=flags, resident=_resident_ids(cfg, cwd, entries),
                       promote_after=cfg.memory.promote_after,
-                      decay_days=cfg.memory.decay_days, decay_factor=cfg.memory.decay_factor)
+                      decay_days=cfg.memory.decay_days, decay_factor=cfg.memory.decay_factor),
+                      key=lambda v: (not v.admitted, -v.score))   # the cut line must mean something
     if as_json:
         print(json.dumps([{"id": v.entry.id, "name": v.entry.name, "score": round(v.score, 4),
                            "base": round(v.base, 4), "reasons": list(v.reasons),
@@ -704,10 +727,12 @@ def _cmd_decision(cwd: Path, args: list[str], override: Path | None = None) -> i
     return 0
 
 def _cmd_recall(cwd: Path, args: list[str], config_root_override: Path | None = None) -> int:
-    limit = 3
-    if "--limit" in args:
-        at = args.index("--limit")
-        limit = max(1, int(args[at + 1])); args = args[:at] + args[at + 2:]
+    args, limits = _pop_flag(list(args), "--limit")
+    try:
+        limit = max(1, int(limits[0])) if limits else 3
+    except ValueError:
+        _warn(f"--limit needs a number, not {limits[0]!r}")
+        return 2
     query = " ".join(args).strip()
     cfg = load_config(cwd=cwd, config_root_override=config_root_override)
     store = read_store(cwd, cfg.config_root)
@@ -1731,11 +1756,14 @@ def _run(argv: list[str] | None = None) -> int:
         return 0
     if argv and argv[0] == "doctor":                # doctor enumerates every profile itself
         return _cmd_doctor(cwd)
-    if argv and argv[0] == "decision":              # absorbed from the debug-decisions skill
+    # `cld <words…>` used to pass a bare prompt through to claude, and these verbs are ordinary
+    # English. Only claim argv when the second word names a real action; otherwise fall through
+    # and let the session have the prompt.
+    if argv and argv[0] == "decision" and _is_action(argv, _DECISION_ACTIONS):
         return _cmd_decision(cwd, argv[1:], _resolve_config_root(os.environ, []))
-    if argv and argv[0] == "debt":                  # the debt ledger: explicit lifecycle only
+    if argv and argv[0] == "debt" and _is_action(argv, _DEBT_ACTIONS):
         return _cmd_debt(cwd, argv[1:], _resolve_config_root(os.environ, []))
-    if argv and argv[0] == "memory":
+    if argv and argv[0] == "memory" and _is_action(argv, _MEMORY_ACTIONS):
         sub = argv[1] if len(argv) > 1 else ""
         if sub == "add":
             return _cmd_write_entry(cwd, argv[2:], "memory", _resolve_config_root(os.environ, []))
@@ -1751,7 +1779,7 @@ def _run(argv: list[str] | None = None) -> int:
         if sub == "flag":
             return _cmd_flag(cwd, argv[2:], _resolve_config_root(os.environ, []))
         _warn(f"unknown memory command {sub!r}; try enable, add, audit, flag or consolidate")
-        return 2
+        return 2                                    # unreachable: _is_action already filtered
     if argv and argv[0] == "recall":                # T2 retrieval: no scoping, no launch
         return _cmd_recall(cwd, argv[1:], _resolve_config_root(os.environ, []))
     if argv and argv[0] == "measure":               # opt-in, connects to servers; no scoping

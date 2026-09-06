@@ -29,10 +29,11 @@ def new_decision(directory: Path, project: str, title: str, tags: list[str],
     now = now or datetime.now()
     did = f"{now:%Y-%m-%d-%H%M}-{_slug(title)}"
     directory.mkdir(parents=True, exist_ok=True)
-    path = directory / f"{did}.md"
-    suffix = 2
+    path, base, suffix = directory / f"{did}.md", did, 2
     while path.exists():                            # two decisions in the same minute
-        path = directory / f"{did}-{suffix}.md"; did = path.stem; suffix += 1
+        did = f"{base}-{suffix}"
+        path = directory / f"{did}.md"
+        suffix += 1
     path.write_text(
         f"---\nid: {did}\ndate: {now.astimezone():%Y-%m-%dT%H:%M%z}\nproject: {project}\n"
         f"status: active\ntags: [{', '.join(tags)}]\n---\n\n"
@@ -43,7 +44,8 @@ def new_decision(directory: Path, project: str, title: str, tags: list[str],
 def _index_row(directory: Path, did: str, day: str, status: str,
                tags: list[str], title: str) -> None:
     index = directory / _INDEX
-    row = f"| {did} | {day} | {status} | {','.join(tags)} | {title} |\n"
+    cell = lambda s: str(s).replace("|", "\\|")     # a pipe would split the row into new columns
+    row = f"| {did} | {day} | {status} | {cell(','.join(tags))} | {cell(title)} |\n"
     if not index.exists():
         index.write_text(f"# Decisions — {directory.name}\n\n{_HEADER}{row}")
         return

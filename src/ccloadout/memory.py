@@ -1,5 +1,5 @@
 from __future__ import annotations
-import re
+import os, re, tempfile
 from datetime import date
 from dataclasses import dataclass
 from pathlib import Path
@@ -10,6 +10,19 @@ _INDEX_NAMES = {"MEMORY.md", "INDEX.md", "README.md"}
 _HEADING = re.compile(r"^#\s+(.+)$", re.MULTILINE)
 _INDEX_LINE = re.compile(r"^- \[[^\]]*\]\(([^)]+)\)")   # `- [Title](file.md) — hook`
 _INDEX_FILE = "MEMORY.md"
+_UNSAFE_NAME = re.compile(r"[^A-Za-z0-9._-]+")
+_CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
+
+def safe_name(raw: str) -> str:
+    # An entry name becomes a filename. `--name ../../x` and `--name /etc/x` used to write there,
+    # and the injected payload tells the session to run `memory add` — so the name is agent-reachable.
+    name = _UNSAFE_NAME.sub("-", (raw or "").strip()).strip("-.")[:80]
+    return name or "entry"
+
+def one_line(raw: str) -> str:
+    # Descriptions land in YAML frontmatter, in a MEMORY.md table row and in the system prompt.
+    # A newline in any of those is a structural break, not text: collapse it here, once.
+    return _CONTROL.sub("", " ".join((raw or "").split()))
 
 @dataclass(frozen=True)
 class Entry:
@@ -80,7 +93,9 @@ def _decision_entry(path: Path, project: str) -> Entry | None:
         return None
     # Decision files carry no `description`; the ranker needs one, and the human title is the
     # first `#` heading of the body (spec §5.1). Frontmatter is left untouched on disk.
-    heading = _HEADING.search(raw[raw.find("\n---", 3) + 1:] if raw.startswith("---") else raw)
+    close = raw.find("\n---", 3) if raw.startswith("---") else -1
+    body = raw[close + 1:] if close != -1 else raw  # unterminated frontmatter: never mine it for a title
+    heading = _HEADING.search(body)
     return Entry(id=f"decision:{project}/{did}", kind="decision", name=did,
                  description=heading.group(1).strip() if heading else "",
                  path=path, scope="repo", status=_str(fm.get("status")))
@@ -132,7 +147,10 @@ def write_entry(config_root: Path, repo: Path, name: str, description: str, kind
     from ccloadout.recall import sha_of                   # local: recall imports memory
     directory = store_dir(config_root, repo, git_tracked)
     directory.mkdir(parents=True, exist_ok=True)
+    name, description = safe_name(name), one_line(description)
     path = directory / f"{name}.md"
+    if not path.resolve().parent == directory.resolve():   # belt and braces over safe_name
+        raise EntryExists(f"{path} would fall outside {directory}")
     if path.exists():
         raise EntryExists(str(path))
     anchors = anchors or []
@@ -140,6 +158,7 @@ def write_entry(config_root: Path, repo: Path, name: str, description: str, kind
             f"  loadout_kind: {kind}",
             f"  scope: repo",
             f"  created: {(today or date.today()).isoformat()}"]
+    anchors = [one_line(a) for a in anchors if one_line(a)]
     if anchors:
         meta.append("  anchors: [" + ", ".join(anchors) + "]")
         meta.append(f"  content_sha: {sha_of([repo / a.split('#', 1)[0] for a in anchors])}")
@@ -150,15 +169,27 @@ def write_entry(config_root: Path, repo: Path, name: str, description: str, kind
     _index_add(path, name, description)
     return path
 
+class NoStatus(Exception):
+    """The file carries no `status:` key in its frontmatter, so there is nothing to set."""
+
 def set_status(path: Path, status: str) -> None:
-    # Rewrites the one line, leaving body and every other key byte-identical.
-    lines = path.read_text().splitlines()
-    for i, line in enumerate(lines):
+    # Rewrites exactly one line and leaves every other byte alone: keepends preserves CRLF and the
+    # unicode separators `splitlines()` would otherwise normalise, and the write is atomic because
+    # this touches the user's own notes, which may be git-tracked.
+    raw = path.read_text(errors="replace")
+    lines = raw.splitlines(keepends=True)
+    end = next((i for i, ln in enumerate(lines[1:], 1) if ln.strip() == "---"), len(lines))
+    for i, line in enumerate(lines[:end]):          # frontmatter only; a body line is not a key
         if line.strip().startswith("status:"):
-            lines[i] = f"{line[:len(line) - len(line.lstrip())]}status: {status}"
-            path.write_text("\n".join(lines) + "\n")
+            indent = line[:len(line) - len(line.lstrip())]
+            newline = line[len(line.rstrip("\r\n")):]
+            lines[i] = f"{indent}status: {status}{newline or chr(10)}"
+            fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".entry-", suffix=".md")
+            with os.fdopen(fd, "w", newline="") as fh:
+                fh.write("".join(lines))
+            os.replace(tmp, path)
             return
-    raise ValueError(f"{path} has no status field to set")
+    raise NoStatus(f"{path} has no status field to set")
 
 def read_all(config_root: Path, home: Path | None = None) -> dict[str, tuple[Entry, ...]]:
     # Every project's store under this profile, for auditing across repositories — memories
@@ -226,20 +257,25 @@ def _index_add(path: Path, name: str, description: str) -> None:
     index = path.parent / _INDEX_FILE
     if not index.exists():
         return
-    line = f"- [{name}]({path.name}) — {description}\n"
-    text = index.read_text()
+    line = f"- [{one_line(name)}]({path.name}) — {one_line(description)}\n"
+    text = index.read_text(errors="replace")
     index.write_text(text if line in text else text.rstrip("\n") + "\n" + line)
 
 def _index_remove(path: Path) -> None:
     index = path.parent / _INDEX_FILE
     if not index.exists():
         return
-    kept = [ln for ln in index.read_text().splitlines(keepends=True)
-            if not (lambda m: m and (index.parent / m.group(1)).name == path.name)(
-                _INDEX_LINE.match(ln.strip()))]
+    target = path.resolve()
+    def points_here(line: str) -> bool:
+        m = _INDEX_LINE.match(line.strip())
+        # Compare resolved paths: two entries can share a basename in different subdirectories,
+        # and removing the wrong line silently un-indexes a note nobody touched.
+        return bool(m) and (index.parent / m.group(1)).resolve() == target
+    kept = [ln for ln in index.read_text(errors="replace").splitlines(keepends=True)
+            if not points_here(ln)]
     index.write_text("".join(kept))
 
 def forget_entry(path: Path) -> None:
     """Delete an entry and the index line that pointed at it, so the harness is left consistent."""
+    _index_remove(path)                             # before the unlink: resolve() needs the file
     path.unlink(missing_ok=True)
-    _index_remove(path)

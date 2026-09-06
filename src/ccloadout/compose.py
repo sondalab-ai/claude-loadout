@@ -1,5 +1,5 @@
 from __future__ import annotations
-import json, os, sys, tempfile
+import json, os, shlex, sys, tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping
@@ -52,8 +52,12 @@ def compose(kept, all_items, config_root: Path, passthrough: list[str],
         # Hooks in this overlay merge with the user's own rather than replacing them (verified),
         # so adding one cannot silence an installed plugin's capture. Each is a module run by the
         # interpreter that is running us, addressed absolutely — never a bare name on PATH.
+        # The command string is shell-parsed by the harness, so an interpreter path containing a
+        # space has to survive quoting; the timeout is explicit because the default is 60 s and
+        # these hooks are meant to be imperceptible.
         settings["hooks"] = {event: [{"hooks": [
-            {"type": "command", "command": f"{sys.executable} -m {module}"}]}]
+            {"type": "command", "command": f"{shlex.quote(sys.executable)} -m {module}",
+             "timeout": 5}]}]
             for event, module in hooks.items()}
     if dropped_skills:
         settings["skillOverrides"] = dropped_skills

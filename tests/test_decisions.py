@@ -42,3 +42,14 @@ def test_superseding_marks_the_old_one_and_links_the_new(tmp_path: Path):
     assert by_name[old.stem].status == "superseded"
     index = (directory / "INDEX.md").read_text()
     assert "superseded" in index                     # the index follows the file, not the other way
+
+def test_reading_a_corpus_never_rewrites_it(tmp_path: Path):
+    # Acceptance criterion 12, second half: absorption is a reader, not a migration.
+    repo, root, home = tmp_path / "repo", tmp_path / "root", tmp_path / "home"
+    directory = corpus_dir(root, repo, home)
+    paths = [new_decision(directory, slug_for(repo), f"Call {i}", tags=["t"]) for i in range(3)]
+    before = {p: (p.stat().st_mtime_ns, p.read_bytes()) for p in directory.iterdir()}
+    for _ in range(3):
+        read_store(repo, root, home=home)
+    after = {p: (p.stat().st_mtime_ns, p.read_bytes()) for p in directory.iterdir()}
+    assert before == after and len(paths) == 3

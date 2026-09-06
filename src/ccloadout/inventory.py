@@ -30,7 +30,16 @@ def _inline_list(val: str) -> list[str]:
 def _scalar(val: str) -> str | list[str]:
     return _inline_list(val) if val.startswith("[") and val.endswith("]") else _unquote(val)
 
-def _nested(body: list[str]) -> dict[str, str | list[str]] | list[str]:
+# A key with no spaces, i.e. what a real YAML key looks like in these files. Prose that happens to
+# contain a colon ("Triggers on: do X") must not be mistaken for a mapping — before this guard a
+# plain multi-line description parsed into a dict and the ranker scored the skill on garbage.
+_NESTED_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_.\-]*:(\s|$)")
+
+def _is_mapping(filled: list[str], base: int) -> bool:
+    at_base = [ln.strip() for ln in filled if len(ln) - len(ln.lstrip()) == base]
+    return bool(at_base) and all(_NESTED_KEY.match(ln) for ln in at_base)
+
+def _nested(body: list[str]) -> dict[str, str | list[str]] | list[str] | str:
     # One level of a nested block: either a `- item` sequence or `key: value` pairs.
     # Deeper indentation is consumed but not parsed — the store schema is one level deep.
     filled = [ln for ln in body if ln.strip()]
@@ -40,6 +49,8 @@ def _nested(body: list[str]) -> dict[str, str | list[str]] | list[str]:
     if filled[0].strip().startswith("- "):
         return [_unquote(ln.strip()[2:]) for ln in filled
                 if len(ln) - len(ln.lstrip()) == base and ln.strip().startswith("- ")]
+    if not _is_mapping(filled, base):               # a plain multi-line scalar, folded like YAML does
+        return " ".join(" ".join(ln.strip() for ln in filled).split())
     out: dict[str, str | list[str]] = {}
     for ln in filled:
         if len(ln) - len(ln.lstrip()) != base or ":" not in ln:

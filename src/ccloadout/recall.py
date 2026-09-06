@@ -7,7 +7,7 @@ from datetime import date
 from typing import Callable, Container, Iterable, Mapping, Sequence
 import numpy as np
 from ccloadout.measure import CHARS_PER_TOKEN
-from ccloadout.memory import Entry
+from ccloadout.memory import Entry, one_line
 from ccloadout.ranker import Ranker
 from ccloadout.flags import Flag
 from ccloadout.usage import Usage, promoted_ids
@@ -48,25 +48,47 @@ def sha_of(paths: Sequence[Path]) -> str:
 
 def _anchor_paths(entry: Entry, root: Path) -> list[Path]:
     # `path#symbol` anchors are checked at path level only; symbol resolution is deferred.
-    return [root / anchor.split("#", 1)[0] for anchor in entry.anchors]
+    # Anchors come from files an agent can write, and `root / "/etc/passwd"` is `/etc/passwd`:
+    # anything that resolves outside the repository is dropped rather than read and hashed.
+    out = []
+    base = root.resolve()
+    for anchor in entry.anchors:
+        candidate = (root / anchor.split("#", 1)[0]).resolve()
+        if candidate == base or base in candidate.parents:
+            out.append(candidate)
+    return out
+
+def _anchor_count(entry: Entry) -> int:
+    return len(entry.anchors)
 
 def anchor_state(entry: Entry, root: Path) -> str:
     if not entry.anchors:
         return "none"
     paths = _anchor_paths(entry, root)
+    if len(paths) != _anchor_count(entry):          # an anchor pointing outside the repo
+        return "missing"
     if any(not path.exists() for path in paths):
         return "missing"
     if not entry.content_sha:
         return "unverified"                        # anchored, but nothing recorded to compare
     return "fresh" if sha_of(paths) == entry.content_sha else "changed"
 
-def build_payload(entries: Sequence[Entry], exe: str, total: int, root: Path | None = None) -> str:
+def frame_safe(text: str) -> str:
+    # Entry text is written by whoever wrote the note — possibly an agent, possibly whoever's pull
+    # request you merged. A newline or a literal closing tag would end the untrusted block early
+    # and let the rest read as ordinary system prompt. Collapse the first, defuse the second.
+    return one_line(text).replace("</", "< /")
+
+def build_payload(entries: Sequence[Entry], exe: str, total: int, root: Path | None = None,
+                  states: Mapping[str, str] | None = None) -> str:
     if not entries:
         return ""                                  # nothing selected: inject nothing at all
     def line(entry: Entry) -> str:
-        flag = " (possibly stale — the code it points at changed)" if (
-            root is not None and anchor_state(entry, root) == "changed") else ""
-        return f"- [{entry.kind} · {entry.scope}] {entry.name} — {entry.description}{flag}\n"
+        state = states.get(entry.id) if states is not None else (
+            anchor_state(entry, root) if root is not None else "none")
+        flag = " (possibly stale — the code it points at changed)" if state == "changed" else ""
+        return (f"- [{entry.kind} · {entry.scope}] {frame_safe(entry.name)} — "
+                f"{frame_safe(entry.description)}{flag}\n")
     return _HEADER.format(shown=len(entries), total=total, exe=exe) \
         + "".join(line(e) for e in entries) + _FOOTER
 
@@ -96,12 +118,16 @@ def assess(entries: Iterable[Entry], goal: str,
     all_entries = list(entries)
     usage, flags = usage or {}, flags or {}
     now = today or date.today()
+    total = len(all_entries)                        # what the payload header reports, one source
     # Entries the harness already injects through its own MEMORY.md index are in context before
     # we add anything; recalling them again would spend the budget on a duplicate.
     live = [e for e in all_entries if e.status != "resolved" and e.id not in resident]
+    # Anchor state is hashed once per entry here and reused: computing it inside build_payload made
+    # every re-render re-read every chosen entry's anchored files — quadratic I/O per launch.
+    states = {e.id: (anchor_state(e, root) if root is not None else "none") for e in live}
     scored = []
     for entry, base in Ranker(embed).score(goal, live):
-        score, reasons = _adjust(entry, base, root, usage, flags, decay_days, decay_factor, now)
+        score, reasons = _adjust(entry, base, states, usage, flags, decay_days, decay_factor, now)
         scored.append((entry, base, score, reasons))
     scored.sort(key=lambda row: -row[2])
     pinned = promoted_ids(usage, promote_after)
@@ -112,14 +138,19 @@ def assess(entries: Iterable[Entry], goal: str,
     for entry, base, score, reasons in order:
         promoted = entry.id in pinned
         reasons = reasons + ("promoted",) if promoted else reasons
-        # Promotion spends at most half the budget: past that a pinned entry is refused like any
-        # other, so repeated delivery can never starve ranked recall.
-        cap = budget_tokens // 2 if promoted else budget_tokens
+        # Promotion spends at most half the budget — measured on the *entries*, not on the whole
+        # payload: the header alone is ~150 tokens, so capping the rendered total would make a
+        # promoted entry harder to deliver than an unpromoted one at small budgets.
+        cap = budget_tokens - (budget_tokens // 2 if promoted else 0)
         if score < threshold:
             verdicts.append(Verdict(entry, score, base, reasons + ("below-threshold",), False))
             continue
         trial = chosen + [entry]
-        if estimate_tokens(build_payload(trial, exe=exe, total=len(live), root=root)) > cap:
+        rendered = estimate_tokens(build_payload(trial, exe=exe, total=total, root=root,
+                                                 states=states))
+        overhead = estimate_tokens(build_payload(chosen[:1] or trial[:1], exe=exe, total=total,
+                                                 root=root, states=states)) if promoted else 0
+        if rendered > budget_tokens or (promoted and rendered - overhead > cap - overhead):
             verdicts.append(Verdict(entry, score, base, reasons + ("over-budget",), False))
             continue
         chosen = trial
@@ -144,11 +175,11 @@ def select(entries: Iterable[Entry], goal: str,
                                     decay_factor, today)
             if v.admitted]
 
-def _adjust(entry: Entry, score: float, root: Path | None, usage: Mapping[str, Usage],
+def _adjust(entry: Entry, score: float, states: Mapping[str, str], usage: Mapping[str, Usage],
             flags: Mapping[str, Flag], decay_days: int, decay_factor: float,
             now: date) -> tuple[float, tuple[str, ...]]:
     reasons: list[str] = []
-    if root is not None and anchor_state(entry, root) == "missing":
+    if states.get(entry.id) == "missing":
         score *= STALE_FACTOR
         reasons.append("stale-anchor")
     age = usage[entry.id].days_since(now) if entry.id in usage else None

@@ -6,7 +6,7 @@ turns a signal into something the store carries. Exits 0 on every path; a hook t
 should cost nothing.
 """
 from __future__ import annotations
-import json, os, sys
+import json, os, re, sys
 from pathlib import Path
 
 # Only tools that write: a marker seen in a file we merely read is not debt this session created.
@@ -14,7 +14,10 @@ from pathlib import Path
 # command actually writes. `grep "TODO(loadout)"` matches nothing here, `cat > f <<EOF` does.
 _WRITERS = {"Write", "Edit", "MultiEdit", "NotebookEdit", "str_replace_editor"}
 _TEXT_FIELDS = ("content", "new_string", "new_str", "replace_all_string", "text")
-_WRITING_SHELL = (">", ">>", "<<", "tee ", "sed -i", "patch ")
+# A redirect that writes a file, not `2>&1` or `2>/dev/null` — those are error plumbing, and
+# `grep pattern > out.txt` used to be recorded as debt the session had created.
+_WRITING_SHELL = re.compile(r"(?<![0-9&])>{1,2}\s*[^&\s]|<<|\btee\b|\bsed\s+-i|\bpatch\b")
+LIST_SEP = "\x1f"                                    # a unit separator cannot occur in a pattern
 
 def _written_text(tool_input: dict) -> str:
     parts = [str(tool_input.get(field)) for field in _TEXT_FIELDS if tool_input.get(field)]
@@ -29,7 +32,8 @@ def main() -> int:
         tool = payload.get("tool_name")
         if tool not in _WRITERS and tool != "Bash":
             return 0
-        patterns = [p for p in (os.environ.get("LOADOUT_DEBT_PATTERNS") or "").split(",") if p]
+        raw = os.environ.get("LOADOUT_DEBT_PATTERNS") or ""
+        patterns = [p for p in raw.split(LIST_SEP) if p]
         if not patterns:
             return 0
         tool_input = payload.get("tool_input") or {}
@@ -37,7 +41,7 @@ def main() -> int:
             return 0
         if tool == "Bash":
             command = str(tool_input.get("command") or "")
-            text = command if any(op in command for op in _WRITING_SHELL) else ""
+            text = command if _WRITING_SHELL.search(command) else ""
         else:
             text = _written_text(tool_input)
         hit = next((p for p in patterns if p in text), None)

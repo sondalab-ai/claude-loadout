@@ -59,7 +59,7 @@ def test_payload_labels_provenance_and_untrusted_status():
     text = build_payload(_ON, exe="/x/cld", total=9)
     assert "untrusted" in text.lower()
     assert "memory · repo" in text
-    assert "9 entries" in text and "3" in text
+    assert "9 entries" in text and f"{len(_ON)} of 9" in text
 
 def test_payload_is_empty_when_nothing_was_selected():
     assert build_payload([], exe="/x/cld", total=0) == ""
@@ -86,12 +86,22 @@ def test_search_reaches_an_entry_the_index_excluded_on_relevance():
     found = search(entries, "how do I tune a guitar", embed, limit=1)
     assert [e.name for e, _ in found] == [off_goal.name]            # T2 still reaches it
 
-def test_recall_command_is_runnable_without_path_luck():
-    import subprocess
-    from ccloadout.recall import recall_command
-    cmd = recall_command()
-    assert Path(cmd.split()[0]).is_absolute()
-    assert subprocess.run(cmd.split() + ["--version"], capture_output=True).returncode == 0
+def test_the_command_the_payload_names_actually_returns_entries(tmp_path):
+    # Acceptance criterion 6, asserted the way it is worded: run the exact string the session is
+    # handed, against a store, and require entries back. Under pytest `sys.argv[0]` is the test
+    # runner, so the command is built the way a launch builds it instead of being read off argv.
+    import os, shlex, subprocess, sys
+    root, repo = tmp_path / "root", tmp_path / "repo"
+    mem = repo / "docs" / "memory"; mem.mkdir(parents=True)
+    (mem / "note.md").write_text(
+        "---\nname: scoping-note\ndescription: how skills are pruned per session\n---\nbody\n")
+    (root / "skills").mkdir(parents=True)               # deliberately empty: nothing installed
+    command = f"{sys.executable} -m ccloadout"
+    done = subprocess.run(shlex.split(command) + ["recall", "how are skills pruned"],
+                          cwd=repo, capture_output=True, text=True,
+                          env={**os.environ, "CLAUDE_CONFIG_DIR": str(root)})
+    assert done.returncode == 0, done.stderr
+    assert "scoping-note" in done.stdout
 
 # --- staleness (Slice 2) ------------------------------------------------------
 
@@ -219,3 +229,11 @@ def test_assess_reports_resolved_and_flagged_entries(tmp_path):
     assert verdicts["done"].reasons == ("resolved",) and not verdicts["done"].admitted
     assert "flagged" in verdicts[flagged.name].reasons
     assert verdicts[flagged.name].score < verdicts[flagged.name].base   # flagging demotes
+
+def test_an_anchor_outside_the_repository_is_treated_as_missing(tmp_path):
+    from ccloadout.recall import anchor_state
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "cli.py").write_text("x = 1\n")
+    for escape in ("/etc/passwd", "../../etc/passwd"):
+        assert anchor_state(_anchored("a", "d", [escape]), tmp_path) == "missing"
+    assert anchor_state(_anchored("a", "d", ["src/cli.py"]), tmp_path) == "unverified"

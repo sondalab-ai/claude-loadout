@@ -22,7 +22,12 @@ def usage_path(config_root: Path) -> Path:
     return config_root / "loadout" / "usage.json"
 
 def _repo_key(repo: Path) -> str:
-    return str(repo)
+    # Resolved: the launcher passes `Path.cwd()` (already physical) but the prompt hook is handed
+    # the harness's logical `cwd`, and a symlinked worktree would otherwise get its own counters.
+    try:
+        return str(Path(repo).resolve())
+    except OSError:
+        return str(repo)
 
 def load_usage(config_root: Path, repo: Path) -> dict[str, Usage]:
     per_repo = read_json(usage_path(config_root)).get(_repo_key(repo))

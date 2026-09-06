@@ -1,7 +1,8 @@
 from __future__ import annotations
-import json
+import json, os, tempfile
 from datetime import date, datetime
 from pathlib import Path
+from ccloadout.jsonstore import _Lock
 
 # End-of-session envelopes, appended by the launcher itself once the session exits — the parent
 # survives `subprocess.run`, so this needs no hook (spec §5.3). Candidates are never memories:
@@ -26,7 +27,10 @@ def _rotate(path: Path, max_bytes: int) -> None:
     while target.exists():
         target = path.with_name(f"candidates-{stamp}-{suffix}.jsonl")
         suffix += 1
-    path.rename(target)
+    try:
+        path.rename(target)
+    except OSError:                                 # a peer rotated first; nothing left to do
+        return
 
 def record_session(config_root: Path, repo: Path, goal: str, exit_code: int,
                    changed: list[str], max_bytes: int = DEFAULT_MAX_BYTES) -> None:
@@ -49,14 +53,14 @@ def record_signal(config_root: Path, repo: Path, pattern: str, file: str, excerp
 
 def _append(path: Path, row: dict) -> None:
     row = {"at": datetime.now().astimezone().isoformat(timespec="seconds"), **row}
-    with path.open("a") as fh:
+    with _Lock(path), path.open("a") as fh:        # same lock `drop_rows` takes
         fh.write(json.dumps(row) + "\n")
 
 def load_candidates(config_root: Path, repo: Path | None = None,
                     kind: str | None = None) -> list[dict]:
     try:
-        lines = candidates_path(config_root).read_text().splitlines()
-    except OSError:
+        lines = candidates_path(config_root).read_text(errors="replace").splitlines()
+    except (OSError, ValueError):                   # UnicodeDecodeError is a ValueError
         return []
     rows = []
     for line in lines:
@@ -72,15 +76,36 @@ def load_candidates(config_root: Path, repo: Path | None = None,
     return rows
 
 def drop_rows(config_root: Path, repo: Path, keep: list[dict]) -> None:
-    # Rewrites the file with this repository's rows replaced by `keep`; other repositories'
-    # rows are preserved verbatim. Atomic replace, so a reader never sees a half-written file.
-    import os, tempfile
+    """Replace this repository's rows with `keep`, leaving every other line exactly as it was.
+
+    Lines that do not parse are *kept*, not dropped: `load_candidates` skipping them on read is a
+    tolerance, but rewriting the file from parsed rows would turn that tolerance into deletion —
+    including of other repositories' data. Held under the same lock the appends take, or a session
+    that ends while a consolidate is open loses its candidate.
+    """
     path = candidates_path(config_root)
-    others = [r for r in load_candidates(config_root) if r.get("repo") != str(repo)]
-    rows = others + keep
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".candidates-", suffix=".jsonl")
-    with os.fdopen(fd, "w") as fh:
-        for row in rows:
-            fh.write(json.dumps(row) + "\n")
-    os.replace(tmp, path)
+    with _Lock(path):
+        try:
+            lines = path.read_text(errors="replace").splitlines(keepends=True)
+        except (OSError, ValueError):
+            lines = []
+        surviving = []
+        for line in lines:
+            try:
+                row = json.loads(line)
+            except ValueError:                      # unparsable: not ours to judge, keep it
+                surviving.append(line)
+                continue
+            if not isinstance(row, dict) or row.get("repo") != str(repo):
+                surviving.append(line)
+        fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".candidates-", suffix=".jsonl")
+        try:
+            with os.fdopen(fd, "w") as fh:
+                fh.writelines(surviving)
+                for row in keep:
+                    fh.write(json.dumps(row) + "\n")
+            os.replace(tmp, path)
+        except BaseException:
+            Path(tmp).unlink(missing_ok=True)
+            raise

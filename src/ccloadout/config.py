@@ -102,10 +102,7 @@ def load_config(cwd: Path, environ: Mapping[str, str] | None = None,
     for layer in layers:
         table = layer.get("memory")
         if isinstance(table, dict):
-            fields = {k: v for k, v in table.items() if k in MemoryConfig.__dataclass_fields__}
-            if isinstance(fields.get("debt_patterns"), list):
-                fields["debt_patterns"] = tuple(str(x) for x in fields["debt_patterns"])
-            memory = replace(memory, **fields)
+            memory = replace(memory, **_memory_fields(table))
     if "LOADOUT_ALWAYS_KEEP" in environ:
         always = tuple(x for x in environ["LOADOUT_ALWAYS_KEEP"].split(",") if x)
     if "LOADOUT_THRESHOLD" in environ:
@@ -115,6 +112,29 @@ def load_config(cwd: Path, environ: Mapping[str, str] | None = None,
                   model_name=model, rule_model_path=rule_model,
                   token_costs=token_costs, memory=memory)
 
+
+def _memory_fields(table: dict) -> dict:
+    # Coerce to the declared type and warn instead of trusting the file: a `prompt_timeout_ms`
+    # written as 0.3 used to reach the hook's env verbatim and kill recall for the whole session.
+    out: dict = {}
+    for key, value in table.items():
+        field = MemoryConfig.__dataclass_fields__.get(key)
+        if field is None:
+            continue
+        try:
+            if key == "debt_patterns":
+                out[key] = tuple(str(x) for x in value)
+            elif field.type == "bool":
+                out[key] = bool(value)
+            elif field.type == "int":
+                out[key] = int(value)
+            elif field.type == "float":
+                out[key] = float(value)
+            else:
+                out[key] = value
+        except (TypeError, ValueError):
+            _warn(f"[memory] {key} = {value!r} is not a {field.type}; using the default")
+    return out
 
 def set_memory_enabled(repo: Path, enabled: bool) -> Path:
     """Flip `[memory] enabled` in a repository's own config, leaving everything else alone.
