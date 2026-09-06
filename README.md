@@ -13,21 +13,24 @@ is not loaded for that run.
 
 ## TL;DR
 
-- **Problem:** every session loads *all* your MCP servers, plugins, and skills. Each one puts its
-  self-description into the context window, and every skill's description is also something Claude
-  weighs when it decides what to auto-invoke. More installed means a more crowded, noisier start.
-- **Fix:** `claude-loadout` scopes each session to the tools that fit the task. It detects the goal, ranks
-  your tools against it with a local model, applies your keep/drop rules, and launches Claude Code
-  with only the relevant subset.
-- **Scoped once, then reused:** the first time you scope a repo, the decision is saved to
-  `.loadout/`. Every later launch reuses it; you refresh it deliberately with `claude-loadout update`. An
-  unseeded repo is scoped on the fly at launch.
-- **Also your notes, optionally:** the same ranking can put the memories relevant to *this* session
-  into it — and only those, inside a token budget you set. Off until you run `cld memory enable`.
-  See [Memory recall](#memory-recall).
-- **Safe:** nothing about your global setup changes, and if anything fails claude-loadout falls back to a
-  normal full session.
-- **Install:** `pipx install ccloadout`, then type `claude-loadout` (or its short alias `cld`) in place of `claude` (`cld -p "..."`). It forwards every argument to Claude Code. Aliases are optional.
+Type `cld` instead of `claude`. Every argument is forwarded, everything else works the same.
+
+Before it launches, `claude-loadout`:
+
+1. infers what this repo is about — directory name, marker files, README title; local, offline, no model call;
+2. ranks your installed MCP servers, plugins and skills against that goal with a small local model;
+3. applies your keep/drop rules;
+4. starts Claude Code with only what survived — plus, if you enabled it, the notes from past sessions
+   that are relevant to this one, inside a token budget you set.
+
+Nothing is uninstalled or changed globally; the rest is simply not loaded for that run. The decision is
+cached in `.loadout/` and reused on every later launch until you run `cld update`. If any step fails, you
+get a normal, full session.
+
+```bash
+pipx install ccloadout
+cld            # in place of `claude`
+```
 
 ---
 
@@ -46,42 +49,30 @@ not today's task touches them. Two costs stack up before you type a word:
 
 The more you install, the noisier every session starts, whatever the task.
 
-`claude-loadout` addresses that per session, with nothing to toggle by hand. You keep everything
-installed. The first time you scope a repo, claude-loadout decides what is worth bringing in and saves
-that choice; later launches reuse it, and you refresh it when you want with `claude-loadout update`.
+`claude-loadout` addresses that per session, with nothing to toggle by hand — you keep everything
+installed. A few details behind the four steps above:
 
-## What it does
-
-1. **Figures out the goal.** It reads signals from your working directory, the folder name,
-   marker files like `package.json` or `pyproject.toml`, and any project description it can find
-   (a `description` field, or the README's title and opening line). If it can't tell, it asks once
-   (and remembers your answer). This stays fully local and offline, no model call, just text.
-2. **Ranks your tools against that goal** using a small, fast, local model, no network call, no
-   data leaving your machine.
-3. **Applies your rules.** You can pin tools to always keep, and write plain-language rules like
-   *"this corporate plugin only in work sessions."*
-4. **Launches Claude Code with the relevant subset.** The off-topic servers and plugins simply
-   aren't loaded for that session.
-
-If anything goes wrong at any step, claude-loadout quietly launches the full, normal session instead -
-**it can never leave you unable to start Claude.**
+- **The goal** comes from the directory name, marker files like `package.json` or `pyproject.toml`,
+  and any project description it can find (a `description` field, or the README's title and opening
+  line). If it can't tell, it asks once and remembers the answer. Text only, no model call.
+- **The ranking** runs on a small, fast, local model. No network call, nothing leaves your machine.
+- **The rules** are yours: pin tools to always keep, or write plain-language ones like *"this
+  corporate plugin only in work sessions."*
+- **The cache** means you pay for scoping once per repo. The choice lands in `.loadout/` and later
+  launches reuse it; `claude-loadout update` refreshes it when you want. An unseeded repo is scoped
+  on the fly at launch.
+- **The fallback** is absolute. If anything goes wrong at any step, claude-loadout quietly launches
+  the full, normal session instead — **it can never leave you unable to start Claude.**
 
 ## Quick start
 
-```sh
-pipx install ccloadout
-```
+`pipx install ccloadout` installs two names for the same entrypoint: `claude-loadout` (canonical) and
+`cld` (the short alias). The rest of this README uses `claude-loadout`; substitute `cld` wherever you
+prefer.
 
-The command installs under two names for the same entrypoint: `claude-loadout` (canonical) and
-`cld` (a shorter alias for everyday use). The examples below use `claude-loadout`; substitute `cld`
-wherever you prefer.
-
-The simplest use is to run `claude-loadout` directly, exactly where you would run `claude`: `claude-loadout`,
-`claude-loadout -p "summarize this repo"`, and so on. Every argument is forwarded to Claude Code untouched.
-
-Aliases are an optional convenience. `claude-loadout` figures out which Claude profile you're using from
-the `CLAUDE_CONFIG_DIR` environment variable (default `~/.claude`) and passes it straight through,
-so one install wraps any alias, use whatever names you already have:
+Aliases are an optional convenience. `claude-loadout` reads which Claude profile you're on from the
+`CLAUDE_CONFIG_DIR` environment variable (default `~/.claude`) and passes it straight through, so one
+install wraps any alias, use whatever names you already have:
 
 ```sh
 alias claude-work="CLAUDE_CONFIG_DIR=~/.claude-work claude-loadout"
@@ -90,9 +81,6 @@ alias claude-perso="CLAUDE_CONFIG_DIR=~/.claude-perso claude-loadout"
 # Optional, wrap plain `claude` too:
 # alias claude="claude-loadout"
 ```
-
-That's it. Run `claude-work` (or whatever you aliased) as you always have, every Claude Code
-argument you pass is forwarded untouched, e.g. `claude-work -p "summarize this repo"`.
 
 If you run `claude-loadout` (or `--explain` / `rules`) with **`CLAUDE_CONFIG_DIR` unset** and more than
 one profile exists (`~/.claude`, `~/.claude-perso`, ...), it asks which profile to use rather than
