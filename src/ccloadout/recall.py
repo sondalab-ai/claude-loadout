@@ -1,5 +1,7 @@
 from __future__ import annotations
+import sys
 from math import ceil
+from pathlib import Path
 from typing import Callable, Iterable, Sequence
 import numpy as np
 from ccloadout.measure import CHARS_PER_TOKEN
@@ -45,3 +47,23 @@ def select(entries: Iterable[Entry], goal: str,
             break
         chosen = trial
     return chosen
+
+def recall_command() -> str:
+    # The launched session runs this by absolute path: a bare name that is not on its PATH fails
+    # silently, and the agent cannot tell that from an empty store (spec §5.2.1).
+    exe = Path(sys.argv[0])
+    if exe.name and exe.exists():
+        return str(exe.resolve())
+    return f"{sys.executable} -m ccloadout"
+
+def strip_frontmatter(text: str) -> str:
+    if not text.startswith("---"):
+        return text
+    end = text.find("\n---", 3)
+    return text[end + 4:].lstrip("\n") if end != -1 else text
+
+def search(entries, query: str, embed, limit: int = 3):
+    # No threshold here on purpose: T2 exists to reach entries the launch-time index dropped for
+    # being off-goal, so filtering by the same score would defeat it.
+    scored = sorted(Ranker(embed).score(query, list(entries)), key=lambda pair: -pair[1])
+    return scored[:limit]

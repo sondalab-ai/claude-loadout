@@ -233,8 +233,9 @@ each key** (layers don't merge; a list value is overwritten wholesale):
 | Key | Meaning | Default |
 |---|---|---|
 | `always_keep` | Item ids or glob patterns to never prune. Unknown ids are ignored. | *(empty)* |
-| `threshold` | Cosine cutoff; an item is kept when its relevance score is `>= threshold`. Higher prunes more; lower keeps more. Calibrate with `--explain`. | `0.20` |
+| `threshold` | Cosine cutoff; an item is kept when its relevance score is `>= threshold`. Higher prunes more; lower keeps more. Calibrate with `--explain`. | `0.24` |
 | `model_name` | The embedding model used for ranking. | `minishlab/potion-base-8M` |
+| `[memory]` | Opt-in session memory recall. See [Memory recall](#memory-recall). | *(off)* |
 | `rule_model_path` | Absolute path to a local GGUF instruct model for compiling natural-language rules. **Not bundled, you supply it.** Unset means natural-language rule authoring is off (you still get the *keep / drop / skip* prompt). See [Exclusion rules](#exclusion-rules). | *(unset)* |
 
 ```toml
@@ -242,7 +243,7 @@ each key** (layers don't merge; a list value is overwritten wholesale):
 # always_keep below is an EXAMPLE, the shipped default is empty.
 always_keep = ["superpowers", "remember", "caveman*"]
 
-threshold = 0.20
+threshold = 0.24
 
 # Optional: only needed for natural-language rule authoring (see "Exclusion rules").
 # This model is NOT shipped with claude-loadout, download a GGUF yourself and point here.
@@ -255,6 +256,55 @@ MIT-licensed), a fresh install ranks offline out of the box, with no first-run d
 `model_name` at another model2vec model (a Hub id or a local directory) only if you want to
 override the default; a Hub id is fetched on demand, and if a model can't be loaded at all
 claude-loadout falls back to a keyword-matching heuristic and warns, it still runs.
+
+## Memory recall
+
+**Off by default.** Turned on, claude-loadout treats your notes the way it treats tools: it ranks
+them against the session's goal and injects only what fits a token budget, instead of loading a
+whole memory file into every session.
+
+It reads stores that already exist rather than creating another one:
+
+- `./docs/memory/` in the repository (git-tracked)
+- `$CLAUDE_CONFIG_DIR/projects/<slug>/memory/` — Claude Code's own memory directory
+- `$CLAUDE_CONFIG_DIR/loadout/memory/` for notes that apply across repositories
+- your `debug-decisions` corpus, if you keep one
+
+```toml
+# .loadout/config.toml
+[memory]
+enabled = true
+budget_tokens = 800     # ceiling on the injected block
+threshold = 0.24        # relevance cutoff, same scale as tool ranking
+min_entries = 1         # below this, inject nothing at all
+```
+
+Selected entries ride in as system-prompt text — one line each, labelled with their kind and
+scope — together with the absolute path of the `recall` command, so the session can retrieve
+anything that did not make the cut:
+
+```
+$ cld recall "how are skills pruned"
+```
+
+`cld --explain` reports what was injected and the **net** effect on the context:
+
+```
+  memory
+    injected:       6 of 7 entries  ≈ 366 tokens (heuristic)
+
+  savings
+    up front:       ≈ 3.5k tokens — skill + plugin context, gone from turn one
+    net up front:   ≈ 3.1k tokens — after the memory payload (gain)
+```
+
+Recall costs tokens; the point is that it costs fewer than it saves, and the number is printed
+rather than assumed.
+
+> **One caution.** Injected entries sit in the highest-trust position a session has. The block is
+> labelled as untrusted reference data for exactly that reason: with a store under `./docs/memory/`,
+> a note can reach you through a merged pull request. Leave `[memory]` off in repositories whose
+> notes you would not accept as reference material.
 
 ## Exclusion rules
 

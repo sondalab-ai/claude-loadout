@@ -1051,3 +1051,76 @@ def test_init_verbose_report_lists_each_tool(tmp_path, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "Gmail" in out and "figma@x" in out            # every prunable tool named in the receipt
     assert "kept /" in out and "dropped)" in out          # per-repo count line present
+
+# --- memory recall ------------------------------------------------------------
+
+def _memory_repo(tmp_path, n=2):
+    root = _root(tmp_path)
+    (root / "loadout").mkdir()
+    (root / "loadout" / "config.toml").write_text(
+        "[memory]\nenabled = true\nthreshold = 0.0\n")   # admit regardless of the fixture goal
+    mem = tmp_path / "docs" / "memory"; mem.mkdir(parents=True)
+    for i in range(n):
+        (mem / f"m{i}.md").write_text(
+            f"---\nname: m{i}\ndescription: note number {i} about scoping sessions\n"
+            "metadata:\n  node_type: memory\n---\nbody of m%d\n" % i)
+    return root
+
+def test_memory_off_by_default_injects_nothing(tmp_path, monkeypatch, capsys):
+    _root(tmp_path)
+    mem = tmp_path / "docs" / "memory"; mem.mkdir(parents=True)
+    (mem / "a.md").write_text("---\nname: a\ndescription: x\n---\nbody\n")
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "root"))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "make_model2vec_embed", lambda name: cli.keyword_embed)
+    captured = {}
+    monkeypatch.setattr(cli.subprocess, "run",
+                        lambda argv, **k: captured.__setitem__("argv", argv) or _RC(0))
+    cli.main(["--no-gate"])
+    assert "--append-system-prompt-file" not in captured["argv"]
+
+def test_enabled_memory_is_injected_and_reported(tmp_path, monkeypatch, capsys):
+    _memory_repo(tmp_path)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "root"))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "make_model2vec_embed", lambda name: cli.keyword_embed)
+    monkeypatch.setattr(cli.subprocess, "run", lambda *a, **k: _RC(0))
+    cli.main(["--explain"])
+    out = capsys.readouterr().out
+    assert "memory" in out.lower() and "of 2 entries" in out and "net up front" in out
+
+def test_min_entries_suppresses_the_payload(tmp_path, monkeypatch, capsys):
+    root = _memory_repo(tmp_path, n=1)
+    (root / "loadout" / "config.toml").write_text("[memory]\nenabled = true\nmin_entries = 5\n")
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "make_model2vec_embed", lambda name: cli.keyword_embed)
+    captured = {}
+    monkeypatch.setattr(cli.subprocess, "run",
+                        lambda argv, **k: captured.__setitem__("argv", argv) or _RC(0))
+    cli.main(["--no-gate"])
+    assert "--append-system-prompt-file" not in captured["argv"]
+
+def test_recall_lists_entries_without_a_query(tmp_path, monkeypatch, capsys):
+    _memory_repo(tmp_path)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "root"))
+    monkeypatch.chdir(tmp_path)
+    assert cli.main(["recall"]) == 0
+    out = capsys.readouterr().out
+    assert "m0" in out and "m1" in out
+
+def test_recall_prints_the_body_of_a_match(tmp_path, monkeypatch, capsys):
+    _memory_repo(tmp_path)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "root"))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "make_model2vec_embed", lambda name: cli.keyword_embed)
+    assert cli.main(["recall", "--limit", "1", "scoping sessions"]) == 0
+    out = capsys.readouterr().out
+    assert "body of m" in out and "node_type" not in out      # frontmatter is stripped
+
+def test_recall_on_an_empty_store_says_so(tmp_path, monkeypatch, capsys):
+    _root(tmp_path)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "root"))
+    monkeypatch.chdir(tmp_path)
+    assert cli.main(["recall", "anything"]) == 0
+    assert "no memory entries" in capsys.readouterr().out.lower()

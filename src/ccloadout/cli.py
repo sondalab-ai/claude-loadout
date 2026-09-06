@@ -9,6 +9,9 @@ from ccloadout.inventory import claude_code_inventory, Item
 from ccloadout.goal import detect_goal, write_goal_cache
 from ccloadout.ranker import Ranker, make_model2vec_embed, keyword_embed, bundled_model_path, resolve_model_source
 from ccloadout.compose import compose
+from ccloadout.memory import read_store
+from ccloadout.recall import (build_payload, estimate_tokens, recall_command,
+                              search, select, strip_frontmatter)
 from ccloadout.rules import (load_rules, apply_rules, has_rule, save_rule, write_rules,
                             read_rules, profile_rules_file, rules_for,
                             Rule, Predicate, evaluate)
@@ -141,6 +144,11 @@ def _elicit(item: Item, context: str, compile_fn, save) -> str:
     save(Rule(target=item.id, nl=nl, predicate=pred))
     return evaluate(pred, context)
 
+class _Memory(NamedTuple):
+    shown: int
+    total: int
+    injected: int                                   # resident tokens the payload costs (heuristic)
+
 class _Scope(NamedTuple):
     goal: str
     source: str
@@ -151,6 +159,7 @@ class _Scope(NamedTuple):
     savings: _savings.Savings
     connectors: list                                # (id, tokens) claude.ai connectors strict-mode drops
     measured: bool                                  # whether a costs.json cache was found
+    memory: _Memory | None = None                   # None when [memory] is off
 
 class _EditGate(NamedTuple):
     # Everything the pre-launch review needs to redraw and re-compose a plan.
@@ -162,6 +171,43 @@ class _EditGate(NamedTuple):
     cwd: Path
     cfg: object
     goal: str
+
+def _recall_payload(cfg, cwd: Path, goal: str, embed):
+    # Ranked recall rides in as system-prompt text. Off by default; below min_entries it injects
+    # nothing at all, since an instruction to query an empty store costs tokens for no answer.
+    if not cfg.memory.enabled:
+        return None, None
+    store = read_store(cwd, cfg.config_root)
+    total = len(store.entries)
+    if total < cfg.memory.min_entries:
+        return None, _Memory(0, total, 0)
+    exe = recall_command()
+    chosen = select(store.entries, goal, embed, cfg.memory.threshold,
+                    cfg.memory.budget_tokens, exe=exe)
+    payload = build_payload(chosen, exe=exe, total=total)
+    return payload, _Memory(len(chosen), total, estimate_tokens(payload))
+
+def _cmd_recall(cwd: Path, args: list[str], config_root_override: Path | None = None) -> int:
+    limit = 3
+    if "--limit" in args:
+        at = args.index("--limit")
+        limit = max(1, int(args[at + 1])); args = args[:at] + args[at + 2:]
+    query = " ".join(args).strip()
+    cfg = load_config(cwd=cwd, config_root_override=config_root_override)
+    store = read_store(cwd, cfg.config_root)
+    if not store.entries:
+        print(_paint("no memory entries found for this repository", "dim"))
+        return 0
+    if not query:                                   # no query: name what is there, cheaply
+        for e in store.entries:
+            print(f"  {_paint(f'[{e.kind} · {e.scope}]', 'dim')} {e.name} — {_short_desc(e.description, 60)}")
+        return 0
+    for entry, score in search(store.entries, query, _build_embed(cfg.model_name), limit):
+        print(_paint(f"{entry.name}  ({entry.kind} · {entry.scope} · {score:.3f})", "bold"))
+        print(_paint(f"{entry.path}", "dim"))
+        body = strip_frontmatter(entry.path.read_text(errors="ignore")).strip()
+        print(body + "\n")
+    return 0
 
 def _scoped_plan(passthrough: list[str], cwd: Path, config_root_override: Path | None = None,
                  scope_skills: bool = True):
@@ -189,16 +235,19 @@ def _scoped_plan(passthrough: list[str], cwd: Path, config_root_override: Path |
     # Launch-time keep/drop review is the pre-launch gate (a single checkbox over every prunable
     # tool), not a per-item prompt — see _launch_gate. `claude-loadout rules` remains the per-item /
     # natural-language authoring path.
+    payload, mem = _recall_payload(cfg, cwd, context, embed)
     def _finish(kept, dropped):                    # compose + cost accounting for a keep/drop decision
         plan = compose(kept, items, cfg.config_root, passthrough, cwd=cwd,
                        global_config_path=cfg.global_config_path,
-                       launch_config_dir=_explicit_profile(config_root_override))
+                       launch_config_dir=_explicit_profile(config_root_override),
+                       memory_payload=payload)
         measured = _measure.load_costs(cfg.config_root)
-        saved = _savings.estimate_savings(kept, [i for i, _ in dropped], cfg.token_costs, measured)
+        saved = _savings.estimate_savings(kept, [i for i, _ in dropped], cfg.token_costs, measured,
+                                          injected=mem.injected if mem else 0)
         mcp_ids = {i.id for i in items if i.kind == "mcp"}
         connectors = sorted(_measure.connector_costs(measured, mcp_ids).items(), key=lambda kv: -kv[1])
         scope = _Scope(context, gsource, gconf, cfg.threshold, kept, dropped,
-                       saved, connectors, bool(measured))
+                       saved, connectors, bool(measured), mem)
         return scope, plan
     _is_prunable = lambda i: i.kind in _savings.PRUNABLE and (scope_skills or i.kind != "skill")
     prunable = [i for i in items if _is_prunable(i)]
@@ -931,6 +980,7 @@ def _print_help() -> None:
         f"{_paint('Usage:', 'bold')}\n"
         f"  {cmd('cld [claude-args...]')}   Launch claude with a goal-scoped tool set\n"
         f"  {cmd('cld --explain')}          Print the scoping plan, then exit (no launch)\n"
+        f"  {cmd('cld recall <query>')}    Search the memory store and print matching entries in full\n"
         f"  {cmd('cld rules')}              Author profile-wide keep/drop rules (all repos; launch prompts are repo-local)\n"
         f"  {cmd('cld init [ROOT]')}        Seed local config — this repo, or bulk-seed every project under ROOT\n"
         f"  {cmd('cld update [ROOT]')}      Refresh existing seeds — this repo, or all seeded under ROOT\n"
@@ -975,6 +1025,18 @@ def _print_explain(scope: _Scope, plan) -> None:
         for cid, tok in scope.connectors:
             print(f"    {_paint('✗', 'red')} {cid:<{w}}  {_paint('~' + _savings.human_tokens(tok), 'dim')}")
         print()
+    if scope.memory is not None:
+        m = scope.memory
+        print(_paint("  memory", "bold"))
+        if m.total == 0:
+            print(_paint("    store is empty — nothing injected", "dim"))
+        elif m.shown == 0:
+            print(_paint(f"    {_plural(m.total, 'entry')} in store, none injected "
+                         "(below min_entries or threshold)", "dim"))
+        else:
+            print(f"    injected:       {m.shown} of {m.total} entries  "
+                  f"{_paint('≈ ' + _savings.human_tokens(m.injected) + ' tokens (heuristic)', 'yellow')}")
+        print()
     s = scope.savings
     on_demand = s.deferred + conn_tok
     print(_paint("  savings", "bold"))
@@ -982,6 +1044,12 @@ def _print_explain(scope: _Scope, plan) -> None:
     print(f"    up front:       "
           f"{_paint('≈ ' + _savings.human_tokens(s.eager) + ' tokens', 'green', 'bold')} "
           f"{_paint('— skill + plugin context, gone from turn one', 'dim')}")
+    if s.injected:
+        net = _savings.human_tokens(abs(s.net))
+        sign = "gain" if s.net >= 0 else "cost"
+        print(f"    net up front:   "
+              f"{_paint(('≈ ' if s.net >= 0 else '≈ -') + net + ' tokens', 'bold')} "
+              f"{_paint(f'— after the memory payload ({sign})', 'dim')}")
     if on_demand:
         note = "measured" if scope.connectors else "estimate"
         print(f"    on-demand:      {_paint('≈ ' + _savings.human_tokens(on_demand) + ' tokens', 'dim')} "
@@ -1069,6 +1137,8 @@ def _run(argv: list[str] | None = None) -> int:
         return 0
     if argv and argv[0] == "doctor":                # doctor enumerates every profile itself
         return _cmd_doctor(cwd)
+    if argv and argv[0] == "recall":                # T2 retrieval: no scoping, no launch
+        return _cmd_recall(cwd, argv[1:], _resolve_config_root(os.environ, []))
     if argv and argv[0] == "measure":               # opt-in, connects to servers; no scoping
         return _cmd_measure(cwd)
     if argv and argv[0] == "init":                  # bulk-seed repo config; resolves profiles itself
