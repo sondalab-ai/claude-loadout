@@ -322,6 +322,18 @@ $ cld memory consolidate
     [k]eep as a memory / [d]iscard / [s]kip?
 ```
 
+### Recall on every prompt (optional)
+
+`[memory] prompt_recall = true` adds a `UserPromptSubmit` hook to the session that re-ranks the
+store against what you actually typed, and adds at most two entries the launch payload did not
+already include. It scores lexically rather than with the embedding model — loading that model
+costs ~520 ms, and this runs on every prompt — and measures **38 ms median, 56 ms worst** end to
+end.
+
+It exits successfully on every path, including its own timeout: on `UserPromptSubmit` a failing
+hook does not merely error, it blocks the prompt and erases what you were typing. A missed recall
+is invisible; a lost prompt is not.
+
 ### Debt you left behind
 
 The one thing neither a session log nor a decision record captures is the shim you meant to remove:

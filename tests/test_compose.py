@@ -80,3 +80,16 @@ def test_passthrough_still_comes_last(tmp_path: Path):
     plan = compose([], [], tmp_path, ["--model", "opus"], environ={}, cwd=tmp_path,
                    global_config_path=tmp_path / ".claude.json", memory_payload="notes")
     assert plan.argv[-2:] == ["--model", "opus"]
+
+def test_prompt_recall_adds_a_hook_and_its_environment(tmp_path: Path):
+    plan = compose([], [], tmp_path, [], environ={}, cwd=tmp_path,
+                   global_config_path=tmp_path / ".claude.json",
+                   prompt_recall={"LOADOUT_CONFIG_ROOT": "/x", "LOADOUT_PROMPT_MAX": 2})
+    hook = _settings_of(plan)["hooks"]["UserPromptSubmit"][0]["hooks"][0]
+    assert hook["type"] == "command" and "ccloadout.prompt_hook" in hook["command"]
+    assert plan.env["LOADOUT_CONFIG_ROOT"] == "/x" and plan.env["LOADOUT_PROMPT_MAX"] == "2"
+
+def test_no_prompt_recall_means_no_hooks_key(tmp_path: Path):
+    plan = compose([], [], tmp_path, [], environ={}, cwd=tmp_path,
+                   global_config_path=tmp_path / ".claude.json")
+    assert "hooks" not in _settings_of(plan)

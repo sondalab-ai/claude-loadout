@@ -199,16 +199,22 @@ self-reference it introduces.
    is invisible in review and in tests. One embedder per index, recorded in the index header and
    checked on read.
 
-   > **Measured during Slice 1, and it gates Slice 3.** `keyword_embed` does not rank memories
+   > **Measured, and resolved by a fourth option (Slice 3).** `keyword_embed` does not rank memories
    > usably: on a fixture of 3 on-topic and 6 off-topic entries it puts an off-topic entry above two
-   > on-topic ones, while `potion-base-8M` separates them cleanly (0.32–0.48 against ≤0.17). Both
-   > results are pinned by tests. So T1.5 cannot have both requirement 2 and useful ranking as
-   > written: either it holds a warm process that keeps the real model loaded, or it accepts
-   > keyword-grade recall, or it is dropped. That choice belongs to Slice 3 and is not made here.
-3. A hard wall-clock timeout (default 300 ms), enforced inside the hook.
+   > on-topic ones, while `potion-base-8M` separates them cleanly (0.32–0.48 against ≤0.17). Loading
+   > that model costs ~520 ms, past this timeout. Rather than choose between a warm process,
+   > keyword-grade recall and dropping the tier, Slice 3 scores the hot path **lexically** — BM25
+   > with inverse document frequency and crude suffix stripping (`src/ccloadout/lexical.py`), no
+   > model and no numpy. Why it works where the crc32 fallback does not: hashing collides and
+   > weights every token alike, while IDF ignores words the whole store shares and stemming lets a
+   > prompt's "skills pruned" meet an entry's "skill pruning". Measured end to end, hook process
+   > included: **38 ms median, 56 ms worst of seven**, against a 300 ms budget.
+3. A hard wall-clock timeout (default 300 ms), enforced inside the hook with `setitimer`.
 4. `exit 0` on **every** path — timeout, missing index, import error, corrupt store. A recall miss
    is invisible; a non-zero exit destroys the user's typed prompt (lever G).
 5. Off by default, behind `[memory] prompt_recall = false`.
+6. The hook is told which entries the launch payload already made resident and never repeats one,
+   so the two tiers add context instead of duplicating it.
 
 ### 5.3 Write path
 

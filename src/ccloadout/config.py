@@ -23,6 +23,9 @@ class MemoryConfig:
     decay_days: int = 90         # no delivery for this long demotes an entry (never deletes it)
     decay_factor: float = 0.5
     git_tracked: bool = True     # new entries land in <repo>/docs/memory and travel in git
+    prompt_recall: bool = False  # re-rank the store against each prompt (adds a hook to the session)
+    prompt_recall_max: int = 2   # entries the prompt hook may add per turn
+    prompt_timeout_ms: int = 300 # the hook's own wall-clock ceiling; it exits 0 when it fires
 
 @dataclass(frozen=True)
 class Config:

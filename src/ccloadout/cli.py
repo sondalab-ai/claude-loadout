@@ -335,6 +335,17 @@ def _cmd_debt(cwd: Path, args: list[str], override: Path | None = None) -> int:
         print(f"  {state}  {e.name} — {_short_desc(e.description, 60)}{mark}")
     return 0
 
+def _prompt_recall_env(cfg, cwd: Path, mem) -> dict | None:
+    # Slice 3: a per-prompt hook, off unless asked for. It re-ranks lexically (no model, ~40 ms
+    # measured) and is told what is already resident so it never repeats the launch payload.
+    if not (cfg.memory.enabled and cfg.memory.prompt_recall) or mem is None:
+        return None
+    return {"LOADOUT_CONFIG_ROOT": str(cfg.config_root),
+            "LOADOUT_REPO": str(cwd),
+            "LOADOUT_RESIDENT_IDS": ",".join(mem.delivered),
+            "LOADOUT_PROMPT_MAX": cfg.memory.prompt_recall_max,
+            "LOADOUT_PROMPT_TIMEOUT_MS": cfg.memory.prompt_timeout_ms}
+
 def _cmd_decision(cwd: Path, args: list[str], override: Path | None = None) -> int:
     action, rest = (args[0], args[1:]) if args else ("list", [])
     cfg = load_config(cwd=cwd, config_root_override=override)
@@ -432,11 +443,12 @@ def _scoped_plan(passthrough: list[str], cwd: Path, config_root_override: Path |
     # tool), not a per-item prompt — see _launch_gate. `claude-loadout rules` remains the per-item /
     # natural-language authoring path.
     payload, mem = _recall_payload(cfg, cwd, context, embed)
+    prompt_recall = _prompt_recall_env(cfg, cwd, mem)
     def _finish(kept, dropped):                    # compose + cost accounting for a keep/drop decision
         plan = compose(kept, items, cfg.config_root, passthrough, cwd=cwd,
                        global_config_path=cfg.global_config_path,
                        launch_config_dir=_explicit_profile(config_root_override),
-                       memory_payload=payload)
+                       memory_payload=payload, prompt_recall=prompt_recall)
         measured = _measure.load_costs(cfg.config_root)
         saved = _savings.estimate_savings(kept, [i for i, _ in dropped], cfg.token_costs, measured,
                                           injected=mem.injected if mem else 0)
