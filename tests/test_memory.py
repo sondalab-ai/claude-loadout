@@ -274,3 +274,10 @@ def test_setting_a_key_on_a_file_without_frontmatter_is_refused(tmp_path: Path):
     path = _write(tmp_path / "n.md", "just a body\n")
     with pytest.raises(NoStatus):
         set_meta(path, "scope", "global")
+
+def test_a_decision_without_a_status_key_reads_as_active(tmp_path: Path):
+    repo, root, home = tmp_path / "repo", tmp_path / "root", tmp_path / "home"
+    _write(root / "debug-decisions" / slug_for(repo) / "2026-01-01-0900-old.md",
+           "---\nid: 2026-01-01-0900-old\ndate: 2026-01-01T09:00+01:00\ntags: [a]\n---\n\n# Old\n")
+    e, = read_store(repo, root, home=home).entries
+    assert e.status == "active"

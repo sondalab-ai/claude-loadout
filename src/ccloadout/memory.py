@@ -107,7 +107,9 @@ def _decision_entry(path: Path, project: str) -> Entry | None:
     heading = _HEADING.search(body)
     return Entry(id=f"decision:{project}/{did}", kind="decision", name=did,
                  description=heading.group(1).strip() if heading else "",
-                 path=path, scope="repo", status=_str(fm.get("status")))
+                 # Decisions written before the skill recorded a status are active: that is what
+                 # its own INDEX.md shows for them, and "?" would read as an error, not a fact.
+                 path=path, scope="repo", status=_str(fm.get("status")) or "active")
 
 def _locations(cwd: Path, config_root: Path, home: Path) -> list[tuple[Path, str, str]]:
     # Precedence order (spec §5.1): repo-tracked, harness-native, cross-project, then the two
