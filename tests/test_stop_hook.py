@@ -131,16 +131,28 @@ def test_old_state_markers_are_cleaned_up(tmp_path):
          {"LOADOUT_CONFIG_ROOT": str(root)})
     assert not stale.exists() and fresh.exists()
 
-def test_only_the_tail_of_a_huge_transcript_is_read(tmp_path):
-    # compose gives every injected hook a 5 s ceiling; parsing a whole long session would spend it.
-    filler = [_said("noise " + "x" * 400) for _ in range(4000)]
-    transcript = _transcript(tmp_path, filler + _long_session([_used("EnterPlanMode")]))
-    assert transcript.stat().st_size > 1_000_000
+def test_a_big_transcript_is_read_whole_and_stays_inside_the_budget(tmp_path):
+    # The signals sit wherever they happened, usually not in the last few KB: reading only the tail
+    # was measured to miss almost all of them. compose allows 5 s, and the whole file fits in it.
+    signal_first = [_used("EnterPlanMode")] + [_said("noise " + "x" * 400) for _ in range(4000)]
+    transcript = _transcript(tmp_path, signal_first + [_said(f"turn {i}") for i in range(6)])
+    assert transcript.stat().st_size > 1_500_000
     start = time.monotonic()
     out = _run({"session_id": "s1", "cwd": _REPO, "transcript_path": str(transcript)},
                {"LOADOUT_CONFIG_ROOT": str(tmp_path / "root")})
-    assert out.returncode == 0 and out.stdout != ""
+    assert out.returncode == 0 and "hookSpecificOutput" in out.stdout
     assert time.monotonic() - start < 2.0
+
+def test_past_the_cap_only_the_tail_is_read(tmp_path, monkeypatch):
+    from ccloadout import stop_hook
+    transcript = _transcript(tmp_path, [_said("early " + "x" * 400) for _ in range(200)]
+                             + [_said("late turn")])
+    monkeypatch.setattr(stop_hook, "_MAX_BYTES", 4096)
+    monkeypatch.setattr(stop_hook, "_TAIL_BYTES", 2048)
+    text, truncated = stop_hook.read_transcript(transcript)
+    assert truncated and "late turn" in text and len(text) <= 2048
+    text, truncated = stop_hook.read_transcript(_transcript(tmp_path, [_said("small")], "s.jsonl"))
+    assert not truncated and "small" in text
 
 def _hooks_for(tmp_path: Path, toml: str):
     from ccloadout.cli import _session_hooks

@@ -481,8 +481,8 @@ registered something is not asked again.
 This is the one thing a hook buys here: everything else about a finished session is captured by the
 launcher after it exits, but once the session is gone there is nobody left to say *why* a choice was
 made. It is read independently of `enabled` — the reminder asks you to write, and an empty store is
-where a first note is worth most — and it parses only the tail of the transcript, since every
-injected hook has five seconds.
+where a first note is worth most. Every injected hook has five seconds, and reading the whole
+transcript fits: the largest one measured, 52 MB, costs 0.29 s.
 
 > **One caution.** Injected notes sit in the highest-trust position a session has. The block says so
 > — it is labelled untrusted reference data — because with `git_tracked = true` a note can reach you

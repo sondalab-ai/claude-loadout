@@ -26,6 +26,11 @@ KEYWORDS = ("choose", "decid", "approach", "alternativ", "trade-off",   # en
 # Invoking one of these is a statement that the session was designing, not typing.
 _DESIGN_SKILL = re.compile(r"^(superpowers:(brainstorming|writing-plans)|feature-dev:)")
 _TMP_SLUG = re.compile(r"(-T$|-tmp-|-private-var-folders-)")
+# A transcript is a few thousand very long lines, not millions of short ones, so the whole
+# file is affordable: 52 MB measured at 0.29 s end to end against the 5 s `compose` allows.
+# The cap only exists so a pathological file cannot spend the budget; past it, the tail is
+# read instead and `truncated` says the turn count is a floor, not a measurement.
+_MAX_BYTES = 64 * 1024 * 1024
 _TAIL_BYTES = 512 * 1024
 _STATE_MAX_AGE = 7 * 24 * 3600                      # prompted-markers older than this are noise
 _WRITERS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
@@ -61,14 +66,18 @@ def _cleanup_state(config_root: Path) -> None:
         except OSError:                             # a peer removed it first, or it is not ours
             continue
 
-def _read_tail(path: Path) -> tuple[str, bool]:
-    # Returns (text, truncated). A partial first line is dropped: it would fail to parse anyway.
+def read_transcript(path: Path) -> tuple[str, bool]:
+    # Returns (text, truncated). Reading only the tail was measured to lose almost everything the
+    # signals are made of — on a 52 MB transcript it saw 2 turns and 0 edited files where the whole
+    # file has 37 and 5 — and to hide the messages that say a decision was already registered,
+    # which is what has to keep the hook quiet. So the tail is the fallback, not the rule.
     with path.open("rb") as handle:
         handle.seek(0, os.SEEK_END)
         size = handle.tell()
-        truncated = size > _TAIL_BYTES
-        handle.seek(max(0, size - _TAIL_BYTES))
+        truncated = size > _MAX_BYTES
+        handle.seek(max(0, size - _TAIL_BYTES) if truncated else 0)
         raw = handle.read().decode("utf-8", errors="ignore")
+    # A partial first line is dropped: it would fail to parse anyway.
     return (raw.split("\n", 1)[-1] if truncated else raw), truncated
 
 def parse_transcript(text: str) -> dict:
@@ -151,7 +160,7 @@ def main() -> int:
             return 0                                # one reminder per session, whatever else runs
         cwd = str(payload.get("cwd") or os.environ.get("LOADOUT_REPO") or "")
         transcript = payload.get("transcript_path")
-        text, truncated = _read_tail(Path(transcript)) if transcript else ("", False)
+        text, truncated = read_transcript(Path(transcript)) if transcript else ("", False)
         from ccloadout.debt_hook import LIST_SEP     # one separator for every env-passed list
         keywords = tuple(w for w in (os.environ.get("LOADOUT_DECISION_KEYWORDS") or "")
                          .lower().split(LIST_SEP) if w)

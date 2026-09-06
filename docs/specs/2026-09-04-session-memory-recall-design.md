@@ -280,8 +280,13 @@ control when it exits (lever F). That splits capture in two, and only one half n
   stems for en/it/es/de by default, replaceable per profile with `[memory] decision_keywords`;
   the other three signals are language-independent). It is
   ported from the `debug-decisions` skill, whose surface this tool absorbed. No inference beyond
-  counting those signals, no model call, one reminder per `session_id`, and only the **tail** of the
-  transcript is parsed — `compose` caps every injected hook at 5 s.
+  counting those signals, no model call, one reminder per `session_id`, and the transcript is read whole
+  up to a 64 MB cap, past which only the tail is parsed. `compose` caps every injected hook at 5 s;
+  measured against 400 real transcripts the slowest single file — 52 MB — costs 0.29 s, because a
+  transcript is a few thousand very long lines rather than millions of short ones. An earlier draft
+  read only the last 512 KB: on that same file it saw 2 turns and 0 edited files where the whole
+  file has 37 and 5, and it hid the messages that say a decision was already registered, which is
+  what has to keep the hook quiet.
 
   Its gate is `[memory] stop_prompt`, read independently of `[memory] enabled`: the hook asks the
   session to *write*, and an empty store is where a first note is worth most.
