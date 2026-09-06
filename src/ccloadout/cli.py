@@ -4,7 +4,7 @@ from fnmatch import fnmatch
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import NamedTuple
-from ccloadout.config import load_config
+from ccloadout.config import load_config, set_memory_enabled
 from ccloadout.inventory import claude_code_inventory, Item
 from ccloadout.goal import detect_goal, write_goal_cache
 from ccloadout.ranker import Ranker, make_model2vec_embed, keyword_embed, bundled_model_path, resolve_model_source
@@ -349,6 +349,118 @@ def _prompt_recall_env(cfg, cwd: Path, mem) -> dict | None:
             "LOADOUT_PROMPT_TIMEOUT_MS": cfg.memory.prompt_timeout_ms}
 
 _AUDIT_HINT = "↑/↓ move · space keep/drop · a all/none · enter apply · q cancel"
+_INTRO_MARKER = ".memory-intro-seen"                # printed once per profile, then never again
+
+def _memory_state(cwd: Path, cfg) -> dict:
+    store = read_store(cwd, cfg.config_root)
+    usage = load_usage(cfg.config_root, cwd)
+    return {"entries": store.entries,
+            "kinds": {k: sum(1 for e in store.entries if e.kind == k)
+                      for k in sorted({e.kind for e in store.entries})},
+            "usage": usage,
+            "promoted": sum(1 for r in usage.values() if r.uses >= cfg.memory.promote_after),
+            "flags": load_flags(cfg.config_root, cwd),
+            "candidates": load_candidates(cfg.config_root, cwd),
+            "gone": [e for e in store.entries if anchor_state(e, cwd) == "missing"],
+            "debt": [e for e in store.entries if e.kind == "debt" and e.status != "resolved"],
+            "shadowed": store.shadowed}
+
+def _memory_next_steps(state: dict, enabled: bool) -> list[tuple[str, str]]:
+    # At most three, chosen by what the store actually needs right now — an empty list means
+    # there is nothing to do, which is worth saying plainly rather than filling with advice.
+    if not enabled:
+        return [("claude-loadout memory enable", "turn ranked recall on for this repository")]
+    steps = []
+    if state["candidates"]:
+        steps.append(("claude-loadout memory consolidate",
+                      f"{_plural(len(state['candidates']), 'recorded session')} not yet a memory"))
+    if state["flags"] or state["gone"]:
+        why = " and ".join(filter(None, [
+            _plural(len(state["flags"]), "flag") if state["flags"] else "",
+            f"{_plural(len(state['gone']), 'dead anchor')}" if state["gone"] else ""]))
+        steps.append(("claude-loadout memory audit", f"{why} to review"))
+    if not state["entries"]:
+        steps.append(("claude-loadout memory add <note>", "the store is empty; nothing to recall"))
+    if state["debt"]:
+        steps.append(("claude-loadout debt list",
+                      f"{_plural(len(state['debt']), 'open item')} still outstanding"))
+    if not steps and state["entries"]:
+        steps.append(("claude-loadout memory audit --context '<goal>'",
+                      "see what a session on that goal would recall, and why"))
+    return steps[:3]
+
+def _print_memory_status(cwd: Path, cfg) -> int:
+    on = cfg.memory.enabled
+    head = _paint("on", "green") if on else _paint("off", "dim")
+    print(f"{_paint('  memory', 'bold')} — {head} for this repository")
+    if not on:
+        print(_paint("    Ranked recall puts only the notes relevant to a session into its "
+                     "context,", "dim"))
+        print(_paint("    inside a token budget you set. Nothing is loaded until you turn it on.",
+                     "dim"))
+    state = _memory_state(cwd, cfg)
+    if on or state["entries"]:
+        kinds = ", ".join(f"{n} {k}" for k, n in state["kinds"].items())
+        print(f"    entries:      {len(state['entries'])}" + (f"  ({kinds})" if kinds else ""))
+        if state["usage"]:
+            print(f"    delivered:    {len(state['usage'])}, "
+                  f"{state['promoted']} promoted")
+        if state["candidates"]:
+            print(f"    candidates:   {len(state['candidates'])} "
+                  + _paint("sessions waiting to be reviewed", "dim"))
+        for label, rows in (("flags", state["flags"]), ("dead anchors", state["gone"]),
+                            ("open debt", state["debt"])):
+            if rows:
+                print(f"    {label + ':':<14}{_paint(str(len(rows)), 'yellow')}")
+    steps = _memory_next_steps(state, on)
+    if steps:
+        print()
+        print(_paint("  next", "bold"))
+        width = max(len(cmd) for cmd, _ in steps)
+        for command, why in steps:
+            print(f"    {_paint(command.ljust(width), 'cyan')}  {_paint(why, 'dim')}")
+    return 0
+
+def _cmd_memory_toggle(cwd: Path, enabled: bool, override: Path | None) -> int:
+    path = set_memory_enabled(cwd, enabled)
+    word = "enabled" if enabled else "disabled"
+    print(f"{_paint(word, 'green' if enabled else 'dim')} memory recall for this repository "
+          + _paint(f"({path})", "dim"))
+    if enabled:
+        cfg = load_config(cwd=cwd, config_root_override=override)
+        state = _memory_state(cwd, cfg)
+        if not state["entries"]:
+            print(_paint("  the store is empty — notes arrive with `claude-loadout memory add`, "
+                         "or from sessions you consolidate", "dim"))
+        else:
+            print(_paint(f"  {_plural(len(state['entries']), 'entry')} ready; "
+                         "`claude-loadout memory audit --context \'<goal>\'` shows what a "
+                         "session would get", "dim"))
+    return 0
+
+def _memory_intro_once(mem) -> None:
+    # The first injection is otherwise invisible: the user sees no difference and does not know
+    # anything can be reviewed or undone. Said once per profile, never again.
+    if mem is None or not mem.shown or mem.config_root is None:
+        return
+    marker = mem.config_root / "loadout" / _INTRO_MARKER
+    if marker.exists():
+        return
+    p = lambda s: print(s, file=sys.stderr)
+    dim = lambda s: _paint(s, "dim", err=True)
+    p("")
+    p(f"{_paint('claude-loadout:', 'yellow', err=True)} "
+      f"{_plural(mem.shown, 'note')} from earlier sessions went into this one "
+      f"(~{_savings.human_tokens(mem.injected)} tokens).")
+    p(dim("    the session can search the rest itself with `claude-loadout recall`"))
+    p(dim("    review or delete them:  claude-loadout memory audit"))
+    p(dim("    turn it off here:       claude-loadout memory disable"))
+    p("")
+    try:
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text("")
+    except OSError:                                 # unwritable profile: say it once per run, not never
+        pass
 
 def _entry_signals(entry, cwd: Path, usage, flags, shadowed_ids: set) -> str:
     bits = []
@@ -1036,6 +1148,7 @@ def _cmd_init(cwd: Path, args: list[str], environ) -> int:
     seeded = 0
     chosen = set(selected)                          # eligible projects the user left out of the run
     skipped: list[tuple[Path, str]] = [(r, "not selected") for r in eligible if r not in chosen]
+    seeded_repos: list[Path] = []
     for repo in selected:
         profile = sticky
         if not yes and len(profiles) > 1:
@@ -1060,9 +1173,30 @@ def _cmd_init(cwd: Path, args: list[str], environ) -> int:
             kept_ids = set(picked) | locked         # pinned tools always survive
         kept, dropped = _seed_repo(repo, cfg, items, kept_ids, goal)
         seeded += 1
+        seeded_repos.append(repo)
         _report_repo(repo, kept, dropped)
+    _offer_memory(seeded_repos, yes)
     _print_init_summary(seeded, skipped, already_list)
     return 0
+
+def _offer_memory(repos: list[Path], yes: bool) -> None:
+    # Asked once for the whole run, not per repo, and only where something was actually seeded.
+    # Default is no: recall spends context, and a user who has not asked for it should not pay.
+    if not repos or yes or not _interactive([]):
+        return
+    print()
+    print(_paint("  memory recall", "bold"))
+    print(_paint("    Puts the notes relevant to a session into its context, inside a token "
+                 "budget.", "dim"))
+    print(_paint("    Off unless you say otherwise; reversible with "
+                 "`claude-loadout memory disable`.", "dim"))
+    if not _ask(f"    enable it for {_plural(len(repos), 'repo')}? [y/N] ").strip().lower()\
+            .startswith("y"):
+        print(_paint("    left off — turn it on later with `claude-loadout memory enable`", "dim"))
+        return
+    for repo in repos:
+        set_memory_enabled(repo, True)
+    print(f"    {_paint('enabled', 'green')} for {_plural(len(repos), 'repo')}")
 
 def _report_repo(repo: Path, kept: list[Item], dropped: list[Item]) -> None:
     # Verbose per-repo receipt: the count line, then the full kept/dropped id lists.
@@ -1197,6 +1331,7 @@ def _cmd_update(cwd: Path, args: list[str], environ) -> int:
     updated = 0
     chosen = set(selected)
     skipped: list[tuple[Path, str]] = [(r, "not selected") for r in eligible if r not in chosen]
+    seeded_repos: list[Path] = []
     for repo in selected:
         profile = sticky
         if not yes and len(profiles) > 1:
@@ -1314,6 +1449,11 @@ def _cmd_doctor(cwd: Path) -> int:
     print(f"         {_paint('claude-loadout --explain', 'cyan')}")
     print("    3. Scope tools with plain-language rules:")
     print(f"         {_paint('claude-loadout rules', 'cyan')}")
+    steps = _memory_next_steps(_memory_state(cwd, cfg), cfg.memory.enabled)
+    if steps:
+        command, why = steps[0]
+        print(f"    4. {why[0].upper()}{why[1:]}:")
+        print(f"         {_paint(command, 'cyan')}")
     return 0
 
 def _cmd_measure(cwd: Path) -> int:
@@ -1548,11 +1688,16 @@ def _run(argv: list[str] | None = None) -> int:
             return _cmd_write_entry(cwd, argv[2:], "memory", _resolve_config_root(os.environ, []))
         if sub == "consolidate":
             return _cmd_consolidate(cwd, _resolve_config_root(os.environ, []))
+        if not sub:                                 # a bare `memory` is the entry point, not an error
+            return _print_memory_status(cwd, load_config(
+                cwd=cwd, config_root_override=_resolve_config_root(os.environ, [])))
+        if sub in ("enable", "disable"):
+            return _cmd_memory_toggle(cwd, sub == "enable", _resolve_config_root(os.environ, []))
         if sub == "audit":
             return _cmd_audit(cwd, argv[2:], _resolve_config_root(os.environ, []))
         if sub == "flag":
             return _cmd_flag(cwd, argv[2:], _resolve_config_root(os.environ, []))
-        _warn("memory takes: add, audit, flag or consolidate")
+        _warn(f"unknown memory command {sub!r}; try enable, add, audit, flag or consolidate")
         return 2
     if argv and argv[0] == "recall":                # T2 retrieval: no scoping, no launch
         return _cmd_recall(cwd, argv[1:], _resolve_config_root(os.environ, []))
@@ -1589,6 +1734,7 @@ def _run(argv: list[str] | None = None) -> int:
         _cleanup(plan.tmp_paths)
         return 0
     scope, plan = _launch_gate(scope, plan, gate, passthrough, no_gate)   # read/adjust before claude takes the screen
+    _memory_intro_once(scope.memory)                # the first injection explains itself, once
     _record_delivery(scope, cwd)                    # only a real launch counts as a delivery
     # Only when recall is on: a launcher that captures nothing should not shell out to git.
     head_before = _git(cwd, "rev-parse", "HEAD") if getattr(scope, "memory", None) else None

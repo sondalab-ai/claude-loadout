@@ -111,3 +111,31 @@ def load_config(cwd: Path, environ: Mapping[str, str] | None = None,
                   always_keep=always, threshold=threshold,
                   model_name=model, rule_model_path=rule_model,
                   token_costs=token_costs, memory=memory)
+
+
+def set_memory_enabled(repo: Path, enabled: bool) -> Path:
+    """Flip `[memory] enabled` in a repository's own config, leaving everything else alone.
+
+    Surgical on purpose: the file may already carry a seeded threshold, model and other
+    sections, and a rewrite would silently drop them. The key is placed inside the [memory]
+    table and nowhere else — an `enabled` key belonging to another section is not ours to touch.
+    """
+    path = repo / ".loadout" / "config.toml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    value = "true" if enabled else "false"
+    lines = path.read_text().splitlines() if path.exists() else []
+    start = next((i for i, ln in enumerate(lines) if ln.strip() == "[memory]"), None)
+    if start is None:
+        block = ["", "[memory]", f"enabled = {value}"]
+        path.write_text("\n".join([*lines, *block]).lstrip("\n") + "\n")
+        return path
+    end = next((i for i in range(start + 1, len(lines)) if lines[i].lstrip().startswith("[")),
+               len(lines))
+    at = next((i for i in range(start + 1, end) if lines[i].split("=")[0].strip() == "enabled"),
+              None)
+    if at is None:
+        lines.insert(start + 1, f"enabled = {value}")
+    else:
+        lines[at] = f"enabled = {value}"
+    path.write_text("\n".join(lines) + "\n")
+    return path

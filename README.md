@@ -22,6 +22,9 @@ is not loaded for that run.
 - **Scoped once, then reused:** the first time you scope a repo, the decision is saved to
   `.loadout/`. Every later launch reuses it; you refresh it deliberately with `claude-loadout update`. An
   unseeded repo is scoped on the fly at launch.
+- **Also your notes, optionally:** the same ranking can put the memories relevant to *this* session
+  into it — and only those, inside a token budget you set. Off until you run `cld memory enable`.
+  See [Memory recall](#memory-recall).
 - **Safe:** nothing about your global setup changes, and if anything fails claude-loadout falls back to a
   normal full session.
 - **Install:** `pipx install ccloadout`, then type `claude-loadout` (or its short alias `cld`) in place of `claude` (`cld -p "..."`). It forwards every argument to Claude Code. Aliases are optional.
@@ -259,13 +262,41 @@ claude-loadout falls back to a keyword-matching heuristic and warns, it still ru
 
 ## Memory recall
 
-**Off by default.** Turned on, claude-loadout treats your notes the way it treats tools: it ranks
-them against the session's goal and injects only what fits a token budget, instead of loading a
-whole memory file into every session.
+Your notes from past sessions, ranked against what this session is about, and only the ones that fit
+a token budget. **Off until you turn it on.**
 
-It reads stores that already exist rather than creating another one:
+```sh
+cld memory enable      # this repository
+cld memory             # status, and what to do next
+```
 
-- `./docs/memory/` in the repository (git-tracked)
+`cld init` asks once per run whether to enable it for the repositories it seeds. Everything is
+reversible with `cld memory disable`.
+
+### How the pieces fit
+
+```
+   you write a note ──┐
+                      ├─→  store  ──rank──→  session context  ──→  cld recall (session asks for more)
+   a session ends ────┘      ↑                     │
+   (candidate)               │                     └──→  cld memory flag  (session says "this is wrong")
+                             └── cld memory audit  ←──────────────┘
+```
+
+Four verbs, in the order you meet them:
+
+| | |
+|---|---|
+| `cld memory add "<note>"` | write something down now |
+| `cld memory consolidate` | turn finished sessions into notes, one confirmation each |
+| `cld recall "<query>"` | search the store and print entries in full |
+| `cld memory audit` | review what you have, delete what has gone stale |
+
+### Where notes live
+
+It reads stores that already exist rather than inventing another one:
+
+- `./docs/memory/` in the repository (git-tracked — this is where new notes go by default)
 - `$CLAUDE_CONFIG_DIR/projects/<slug>/memory/` — Claude Code's own memory directory
 - `$CLAUDE_CONFIG_DIR/loadout/memory/` for notes that apply across repositories
 - your `debug-decisions` corpus, if you keep one
@@ -274,23 +305,17 @@ It reads stores that already exist rather than creating another one:
 # .loadout/config.toml
 [memory]
 enabled = true
-budget_tokens = 800     # ceiling on the injected block
+budget_tokens = 800     # ceiling on what recall may inject
 threshold = 0.24        # relevance cutoff, same scale as tool ranking
-min_entries = 1         # below this, inject nothing at all
-git_tracked = true      # new entries land in ./docs/memory and travel with the repo
-promote_after = 3       # deliveries after which an entry is pinned into recall
-decay_days = 90         # no delivery for this long demotes an entry (never deletes it)
+git_tracked = true      # new notes land in ./docs/memory and travel with the repo
+promote_after = 3       # deliveries after which a note is pinned into recall
+decay_days = 90         # untouched for this long, a note is demoted (never deleted)
+prompt_recall = false   # also re-rank on every prompt (see below)
 ```
 
-Selected entries ride in as system-prompt text — one line each, labelled with their kind and
-scope — together with the absolute path of the `recall` command, so the session can retrieve
-anything that did not make the cut:
+### What it costs, and what it saves
 
-```
-$ cld recall "how are skills pruned"
-```
-
-`cld --explain` reports what was injected and the **net** effect on the context:
+`cld --explain` shows both, because recall spends the tokens pruning saves:
 
 ```
   memory
@@ -301,57 +326,14 @@ $ cld recall "how are skills pruned"
     net up front:   ≈ 3.1k tokens — after the memory payload (gain)
 ```
 
-Recall costs tokens; the point is that it costs fewer than it saves, and the number is printed
-rather than assumed.
+### Auditing
 
-### What the store learns
+Notes rot. `cld memory audit` lists them with the signals that decide whether they still earn their
+place — how often used, an anchor that disappeared, a flag someone raised. Unchecking marks a note
+for deletion; nothing is removed until you type `delete`. Add `--all-repos` for every project at
+once, which is where the forgotten ones live.
 
-Delivery counters live in `$CLAUDE_CONFIG_DIR/loadout/usage.json`, never in the entries themselves,
-so a launch never dirties a git-tracked file. An entry delivered `promote_after` times is admitted
-before better-ranked ones — but promotion can never take more than half the budget, or it would
-starve the ranking it rides on. An entry not delivered for `decay_days` is demoted, and only ever
-demoted: nothing is deleted without you asking.
-
-Finished sessions are recorded as *candidates* — goal, exit code, files touched — and stay
-candidates until you promote them:
-
-```
-$ cld memory consolidate
-  2 sessions · goal-aware launcher that scopes claude code sessions
-    touched: src/ccloadout/recall.py, tests/test_recall.py
-    [k]eep as a memory / [d]iscard / [s]kip?
-```
-
-### Recall on every prompt (optional)
-
-`[memory] prompt_recall = true` adds a `UserPromptSubmit` hook to the session that re-ranks the
-store against what you actually typed, and adds at most two entries the launch payload did not
-already include. It scores lexically rather than with the embedding model — loading that model
-costs ~520 ms, and this runs on every prompt — and measures **38 ms median, 56 ms worst** end to
-end.
-
-It exits successfully on every path, including its own timeout: on `UserPromptSubmit` a failing
-hook does not merely error, it blocks the prompt and erases what you were typing. A missed recall
-is invisible; a lost prompt is not.
-
-### Auditing the store
-
-Memory rots. `cld memory audit` opens the store for this repository as a checklist, one row per
-entry, carrying the signals that decide whether it still earns its place — deliveries, last use,
-an anchor that disappeared, a flag a session raised, an entry shadowed by a higher-precedence
-store. Unchecking marks an entry for deletion; nothing is removed until you type `delete`.
-
-```
-$ cld memory audit
-  this repository
-  > [x] skill-scoping-mechanism    How loadout prunes user-level skills…   4 uses · last 2026-09-04
-    [ ] old-threshold-note         The threshold is 0.20…                  anchor gone  never delivered
-```
-
-`--all-repos` widens it to every project under the profile, which is where the entries you have
-forgotten actually live.
-
-To ask why a specific session recalled what it did — or failed to:
+To see why a session recalled what it did:
 
 ```
 $ cld memory audit --context "how does skill scoping work"
@@ -364,49 +346,55 @@ $ cld memory audit --context "how does skill scoping work"
     · 0.157  memo strict-mcp-config-connectors           How --strict-mcp-config affects clau…  below-threshold
 ```
 
-Every entry gets a verdict and a reason: `below-threshold`, `over-budget`, `stale-anchor`,
-`decayed`, `promoted`, `flagged`, `resolved`. That is the difference between "recall did not work"
-and "recall worked and this entry lost, here is by how much".
+Every note gets a score and a reason: `below-threshold`, `over-budget`, `stale-anchor`, `decayed`,
+`promoted`, `flagged`, `resolved`.
 
-### Flags: the session notices, you decide
+### When a session finds a bad note
 
-A session that spots a wrong or outdated note can say so, but not act on it:
+It can say so, but not act on it:
 
+```sh
+cld memory flag skill-scoping-mechanism --reason "names a lever renamed in 2.1.261"
 ```
-$ cld memory flag skill-scoping-mechanism --reason "names a lever that was renamed in 2.1.261"
-```
 
-A flag is a sidecar entry, never an edit to your notes. It demotes the entry in ranking and hides
-it from per-prompt recall immediately, shows up in the audit for you to resolve, and clears with
-`--clear`. `cld memory audit --json` gives a session the whole store to read. Curation stays a
-human decision: an agent should not hold the pen on your memory.
+The flag is stored beside your notes, never inside them. It demotes the note straight away and
+hides it from per-prompt recall; you resolve it in the audit, or clear it with `--clear`.
+`cld memory audit --json` gives a session the whole store to read. Deleting stays yours.
 
 ### Debt you left behind
 
-The one thing neither a session log nor a decision record captures is the shim you meant to remove:
+The thing neither a session log nor a decision record captures is the shim you meant to remove:
 
-```
-$ cld debt add --anchor src/ccloadout/rules.py "fail-fast stub until the compiler lands"
-$ cld debt list
-  open  fail-fast-stub-until-the-compiler-lands — …  ⚠ anchor gone
-$ cld debt resolve fail-fast-stub-until-the-compiler-lands
+```sh
+cld debt add --anchor src/ccloadout/rules.py "fail-fast stub until the compiler lands"
+cld debt list
+cld debt resolve fail-fast-stub-until-the-compiler-lands
 ```
 
 A file changing under an anchor never closes an entry by itself — an unrelated edit would silently
-close real debt. It flags it as possibly stale and leaves the decision to you. Resolved entries stop
-being injected but stay findable with `cld recall`.
+close real debt. It flags it and leaves the call to you. Resolved entries stop being injected but
+stay findable with `cld recall`.
 
 ### Decisions
 
-`cld decision new|list|show|supersede` writes the same file shape as the `debug-decisions` skill,
-in the same directory, so both tools see one corpus and neither migrates the other's files.
-`cld decision revert` is deliberately absent: executing destructive git operations does not belong
-in a launcher.
+`cld decision new|list|show|supersede` writes the same files as the `debug-decisions` skill, in the
+same directory, so both tools see one corpus. `cld decision revert` is deliberately absent:
+executing destructive git operations does not belong in a launcher.
 
-> **One caution.** Injected entries sit in the highest-trust position a session has. The block is
-> labelled as untrusted reference data for exactly that reason: with `git_tracked = true`, a note
-> can reach you through a merged pull request. Set it to `false`, or leave `[memory]` off entirely,
-> in repositories whose notes you would not accept as reference material.
+### Recall on every prompt (optional)
+
+`prompt_recall = true` adds a hook that re-ranks the store against what you actually typed and adds
+at most two notes the session did not already have. It scores lexically rather than with the
+embedding model — loading that costs ~520 ms, and this runs on every prompt — and measures **38 ms
+median, 56 ms worst** end to end.
+
+It exits successfully on every path, including its own timeout: on `UserPromptSubmit` a failing hook
+does not merely error, it erases what you were typing.
+
+> **One caution.** Injected notes sit in the highest-trust position a session has. The block says so
+> — it is labelled untrusted reference data — because with `git_tracked = true` a note can reach you
+> through a merged pull request. Set it to `false`, or leave `[memory]` off, in repositories whose
+> notes you would not accept as reference material.
 
 ## Exclusion rules
 

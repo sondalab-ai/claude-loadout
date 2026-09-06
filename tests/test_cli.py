@@ -771,7 +771,7 @@ def test_init_interactive_selects_subset(tmp_path, monkeypatch):
     repos = tmp_path / "repos"; r1 = _proj(repos, "proj1"); r2 = _proj(repos, "proj2")
     _fake_stdin(monkeypatch, tty=True)
     answers = iter(["1", ""])                            # pick repo 1, then accept its goal
-    monkeypatch.setattr(cli, "_ask", lambda prompt: next(answers))
+    monkeypatch.setattr(cli, "_ask", lambda prompt: next(answers, ""))
     rc = cli.main(["init", str(repos)])
     assert rc == 0
     assert (r1 / ".loadout" / "config.toml").is_file()
@@ -784,7 +784,7 @@ def test_init_goal_override_persists(tmp_path, monkeypatch):
     repos = tmp_path / "repos"; r1 = _proj(repos, "proj1")
     _fake_stdin(monkeypatch, tty=True)
     answers = iter(["all", "frontend work"])             # select all, override goal
-    monkeypatch.setattr(cli, "_ask", lambda prompt: next(answers))
+    monkeypatch.setattr(cli, "_ask", lambda prompt: next(answers, ""))  # later prompts: default
     rc = cli.main(["init", str(repos)])
     assert rc == 0
     assert (r1 / ".loadout" / "goal").read_text().strip() == "frontend work"
@@ -1379,3 +1379,71 @@ def test_audit_across_repositories_groups_by_project(tmp_path, monkeypatch, caps
     monkeypatch.setattr(cli, "_interactive", lambda passthrough: False)
     cli.main(["memory", "audit", "--all-repos"])
     assert "from another repo" in capsys.readouterr().out
+
+# --- guidance: status, first-run intro, init offer -----------------------------
+
+def test_bare_memory_command_is_a_status_not_an_error(tmp_path, monkeypatch, capsys):
+    _root(tmp_path)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "root"))
+    monkeypatch.chdir(tmp_path)
+    assert cli.main(["memory"]) == 0
+    out = capsys.readouterr().out
+    assert "off for this repository" in out and "memory enable" in out
+
+def test_status_names_what_to_do_next(tmp_path, monkeypatch, capsys):
+    from ccloadout.candidates import record_session
+    root = _memory_repo(tmp_path, n=1)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
+    monkeypatch.chdir(tmp_path)
+    record_session(root, tmp_path, goal="g", exit_code=0, changed=[])
+    cli.main(["memory", "flag", "m0", "--reason", "outdated"])
+    capsys.readouterr()
+    cli.main(["memory"])
+    out = capsys.readouterr().out
+    assert "on for this repository" in out
+    assert "memory consolidate" in out and "memory audit" in out
+
+def test_enable_and_disable_write_the_repo_config(tmp_path, monkeypatch, capsys):
+    _root(tmp_path)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "root"))
+    monkeypatch.chdir(tmp_path)
+    assert cli.main(["memory", "enable"]) == 0
+    assert "enabled = true" in (tmp_path / ".loadout" / "config.toml").read_text()
+    assert "store is empty" in capsys.readouterr().out
+    assert cli.main(["memory", "disable"]) == 0
+    assert "enabled = false" in (tmp_path / ".loadout" / "config.toml").read_text()
+
+def test_first_injection_explains_itself_exactly_once(tmp_path, monkeypatch, capsys):
+    root = _memory_repo(tmp_path)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "make_model2vec_embed", lambda name: cli.keyword_embed)
+    monkeypatch.setattr(cli.subprocess, "run", lambda *a, **k: _RC(0))
+    cli.main(["--no-gate"])
+    assert "went into this one" in capsys.readouterr().err
+    cli.main(["--no-gate"])
+    assert "went into this one" not in capsys.readouterr().err     # said once, then never
+
+def test_init_offers_memory_and_respects_a_no(tmp_path, monkeypatch):
+    root = _root(tmp_path); monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
+    monkeypatch.setattr(cli, "make_model2vec_embed", lambda name: cli.keyword_embed)
+    monkeypatch.setattr(cli, "_discover_profiles", lambda active: [active])
+    repos = tmp_path / "repos"; r1 = _proj(repos, "proj1")
+    _fake_stdin(monkeypatch, tty=True)
+    answers = iter(["all", "", "n"])                  # select all, keep goal, decline memory
+    monkeypatch.setattr(cli, "_ask", lambda prompt: next(answers, ""))
+    assert cli.main(["init", str(repos)]) == 0
+    assert "[memory]" not in (r1 / ".loadout" / "config.toml").read_text()
+
+def test_init_enables_memory_when_accepted(tmp_path, monkeypatch):
+    root = _root(tmp_path); monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
+    monkeypatch.setattr(cli, "make_model2vec_embed", lambda name: cli.keyword_embed)
+    monkeypatch.setattr(cli, "_discover_profiles", lambda active: [active])
+    repos = tmp_path / "repos"; r1 = _proj(repos, "proj1")
+    _fake_stdin(monkeypatch, tty=True)
+    answers = iter(["all", "", "y"])
+    monkeypatch.setattr(cli, "_ask", lambda prompt: next(answers, ""))
+    assert cli.main(["init", str(repos)]) == 0
+    text = (r1 / ".loadout" / "config.toml").read_text()
+    assert "[memory]" in text and "enabled = true" in text
+    assert "threshold" in text                        # the seeded settings survived the edit
