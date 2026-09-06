@@ -72,3 +72,23 @@ def test_payload_fits_the_budget_it_was_selected_for():
 
 def test_selection_is_empty_for_an_empty_store():
     assert select([], _GOAL, keyword_embed, threshold=0.0, budget_tokens=1000) == []
+
+def test_search_reaches_an_entry_the_index_excluded_on_relevance():
+    # Acceptance criterion 4: T2 earns its keep only if it finds what T1 dropped for being
+    # off-goal — so search applies no threshold of its own.
+    from ccloadout.ranker import make_model2vec_embed
+    from ccloadout.recall import search
+    embed = make_model2vec_embed("minishlab/potion-base-8M")
+    off_goal = _e("guitar-tuning", "tuning a nylon string guitar by ear")
+    entries = _ON + [off_goal]
+    injected = select(entries, _GOAL, embed, threshold=0.24, budget_tokens=10_000)
+    assert off_goal.name not in {e.name for e in injected}          # T1 drops it
+    found = search(entries, "how do I tune a guitar", embed, limit=1)
+    assert [e.name for e, _ in found] == [off_goal.name]            # T2 still reaches it
+
+def test_recall_command_is_runnable_without_path_luck():
+    import subprocess
+    from ccloadout.recall import recall_command
+    cmd = recall_command()
+    assert Path(cmd.split()[0]).is_absolute()
+    assert subprocess.run(cmd.split() + ["--version"], capture_output=True).returncode == 0
