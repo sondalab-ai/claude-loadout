@@ -184,3 +184,38 @@ def test_decay_leaves_recently_delivered_entries_alone():
     usage = {f"memory:{e.name}": _usage(1, days_ago=5) for e in _ON}
     assert [e.name for e in select(_ON, _GOAL, embed, threshold=0.0, budget_tokens=10_000,
                                    usage=usage, decay_days=90)] == [e.name for e in baseline]
+
+# --- assessment: why an entry did or did not make it (audit) ------------------
+
+def test_assess_explains_every_entry_not_only_the_admitted_ones():
+    from ccloadout.ranker import make_model2vec_embed
+    from ccloadout.recall import assess
+    embed = make_model2vec_embed("minishlab/potion-base-8M")
+    verdicts = assess(_ON + _OFF, _GOAL, embed, threshold=0.24, budget_tokens=10_000)
+    assert len(verdicts) == len(_ON) + len(_OFF)
+    by_name = {v.entry.name: v for v in verdicts}
+    assert all(by_name[e.name].admitted for e in _ON)
+    assert all("below-threshold" in by_name[e.name].reasons for e in _OFF)
+    assert by_name[_ON[0].name].base > 0            # the raw relevance is kept for the audit view
+
+def test_assess_names_the_budget_as_the_reason(tmp_path):
+    from ccloadout.ranker import make_model2vec_embed
+    from ccloadout.recall import assess
+    embed = make_model2vec_embed("minishlab/potion-base-8M")
+    verdicts = assess(_ON, _GOAL, embed, threshold=0.0, budget_tokens=130)
+    assert any("over-budget" in v.reasons for v in verdicts if not v.admitted)
+
+def test_assess_reports_resolved_and_flagged_entries(tmp_path):
+    from ccloadout.flags import Flag
+    from ccloadout.ranker import make_model2vec_embed
+    from ccloadout.recall import assess
+    embed = make_model2vec_embed("minishlab/potion-base-8M")
+    done = Entry(id="debt:done", kind="debt", name="done", description="a resolved shim",
+                 path=Path("/s/done.md"), scope="repo", status="resolved")
+    flagged = _ON[0]
+    verdicts = {v.entry.name: v for v in assess(
+        _ON + [done], _GOAL, embed, threshold=0.0, budget_tokens=10_000,
+        flags={flagged.id: Flag(reason="says the fix is where it no longer is", at="2026-09-06")})}
+    assert verdicts["done"].reasons == ("resolved",) and not verdicts["done"].admitted
+    assert "flagged" in verdicts[flagged.name].reasons
+    assert verdicts[flagged.name].score < verdicts[flagged.name].base   # flagging demotes

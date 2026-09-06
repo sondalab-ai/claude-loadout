@@ -1,5 +1,6 @@
 from __future__ import annotations
 import hashlib, sys
+from dataclasses import dataclass
 from math import ceil
 from pathlib import Path
 from datetime import date
@@ -8,6 +9,7 @@ import numpy as np
 from ccloadout.measure import CHARS_PER_TOKEN
 from ccloadout.memory import Entry
 from ccloadout.ranker import Ranker
+from ccloadout.flags import Flag
 from ccloadout.usage import Usage, promoted_ids
 
 # The launched session sees this text in the highest-trust position it has, so the block says
@@ -65,48 +67,88 @@ def build_payload(entries: Sequence[Entry], exe: str, total: int, root: Path | N
     return _HEADER.format(shown=len(entries), total=total, exe=exe) \
         + "".join(line(e) for e in entries) + _FOOTER
 
+@dataclass(frozen=True)
+class Verdict:
+    # Why an entry did or did not reach the session. `select` keeps the admitted ones; `audit`
+    # prints all of them, which is the only way to answer "why was this not recalled?".
+    entry: Entry
+    score: float                        # after every adjustment below
+    base: float                         # raw relevance to the goal
+    reasons: tuple[str, ...]
+    admitted: bool
+
+def assess(entries: Iterable[Entry], goal: str,
+           embed: Callable[[list[str]], np.ndarray], threshold: float,
+           budget_tokens: int, exe: str = _ASSUMED_EXE,
+           root: Path | None = None,
+           usage: Mapping[str, Usage] | None = None,
+           flags: Mapping[str, Flag] | None = None,
+           promote_after: int = 3, decay_days: int = 90, decay_factor: float = 0.5,
+           today: date | None = None) -> list[Verdict]:
+    # One admission rule (spec §5.4): rank order until the budget is spent — no top-K. Entries
+    # promoted by repeated delivery go first, but never past half the budget, or promotion would
+    # eventually starve ranked recall. The payload is re-rendered per candidate because its header
+    # carries the count, so the cost is not a running sum.
+    all_entries = list(entries)
+    usage, flags = usage or {}, flags or {}
+    now = today or date.today()
+    live = [e for e in all_entries if e.status != "resolved"]
+    scored = []
+    for entry, base in Ranker(embed).score(goal, live):
+        score, reasons = _adjust(entry, base, root, usage, flags, decay_days, decay_factor, now)
+        scored.append((entry, base, score, reasons))
+    scored.sort(key=lambda row: -row[2])
+    pinned = promoted_ids(usage, promote_after)
+    order = ([row for row in scored if row[0].id in pinned]
+             + [row for row in scored if row[0].id not in pinned])
+    verdicts: list[Verdict] = []
+    chosen: list[Entry] = []
+    for entry, base, score, reasons in order:
+        promoted = entry.id in pinned
+        reasons = reasons + ("promoted",) if promoted else reasons
+        # Promotion spends at most half the budget: past that a pinned entry is refused like any
+        # other, so repeated delivery can never starve ranked recall.
+        cap = budget_tokens // 2 if promoted else budget_tokens
+        if score < threshold:
+            verdicts.append(Verdict(entry, score, base, reasons + ("below-threshold",), False))
+            continue
+        trial = chosen + [entry]
+        if estimate_tokens(build_payload(trial, exe=exe, total=len(live), root=root)) > cap:
+            verdicts.append(Verdict(entry, score, base, reasons + ("over-budget",), False))
+            continue
+        chosen = trial
+        verdicts.append(Verdict(entry, score, base, reasons, True))
+    verdicts += [Verdict(e, 0.0, 0.0, ("resolved",), False)
+                 for e in all_entries if e.status == "resolved"]
+    return verdicts
+
 def select(entries: Iterable[Entry], goal: str,
            embed: Callable[[list[str]], np.ndarray], threshold: float,
            budget_tokens: int, exe: str = _ASSUMED_EXE,
            root: Path | None = None,
            usage: Mapping[str, Usage] | None = None,
+           flags: Mapping[str, Flag] | None = None,
            promote_after: int = 3, decay_days: int = 90, decay_factor: float = 0.5,
            today: date | None = None) -> list[Entry]:
-    # One admission rule (spec §5.4): rank order until the budget is spent — no top-K. Entries
-    # promoted by repeated delivery go first, but never past half the budget, or promotion would
-    # eventually starve ranked recall. The payload is re-rendered per candidate because its header
-    # carries the count, so the cost is not a running sum.
-    # A resolved debt entry is noise in a session's resident context; `recall` can still find it.
-    items = [e for e in entries if e.status != "resolved"]
-    usage = usage or {}
-    now = today or date.today()
-    scored = [(entry, _adjust(entry, score, root, usage, decay_days, decay_factor, now))
-              for entry, score in Ranker(embed).score(goal, items)]
-    scored = sorted(scored, key=lambda pair: -pair[1])
-    eligible = [(e, s) for e, s in scored if s >= threshold]
-    pinned = promoted_ids(usage, promote_after)
-    chosen = _admit([pair for pair in eligible if pair[0].id in pinned],
-                    [], exe, len(items), root, budget_tokens // 2)
-    return _admit([pair for pair in eligible if pair[0].id not in pinned],
-                  chosen, exe, len(items), root, budget_tokens)
+    return [v.entry for v in assess(entries, goal, embed, threshold, budget_tokens, exe, root,
+                                    usage, flags, promote_after, decay_days, decay_factor, today)
+            if v.admitted]
 
 def _adjust(entry: Entry, score: float, root: Path | None, usage: Mapping[str, Usage],
-            decay_days: int, decay_factor: float, now: date) -> float:
+            flags: Mapping[str, Flag], decay_days: int, decay_factor: float,
+            now: date) -> tuple[float, tuple[str, ...]]:
+    reasons: list[str] = []
     if root is not None and anchor_state(entry, root) == "missing":
         score *= STALE_FACTOR
+        reasons.append("stale-anchor")
     age = usage[entry.id].days_since(now) if entry.id in usage else None
     if age is not None and age > decay_days:        # not delivered in a long time: demote, keep
         score *= decay_factor
-    return score
-
-def _admit(candidates: Sequence[tuple[Entry, float]], chosen: list[Entry], exe: str,
-           total: int, root: Path | None, budget_tokens: int) -> list[Entry]:
-    for entry, _ in candidates:
-        trial = chosen + [entry]
-        if estimate_tokens(build_payload(trial, exe=exe, total=total, root=root)) > budget_tokens:
-            break
-        chosen = trial
-    return chosen
+        reasons.append("decayed")
+    if entry.id in flags:                           # a session said this entry is wrong
+        score *= STALE_FACTOR
+        reasons.append("flagged")
+    return score, tuple(reasons)
 
 def recall_command() -> str:
     # The launched session runs this by absolute path: a bare name that is not on its PATH fails

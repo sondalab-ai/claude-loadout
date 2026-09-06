@@ -66,3 +66,12 @@ def test_stays_well_inside_its_latency_budget(tmp_path):
              {"LOADOUT_CONFIG_ROOT": str(root)})
         times.append((time.perf_counter() - started) * 1000)
     assert statistics.median(times) < 300
+
+def test_flagged_entries_are_not_surfaced(tmp_path):
+    from ccloadout.flags import set_flag
+    root, repo = _store(tmp_path)
+    set_flag(root, repo, "memory:m0", "wrong since the rename")
+    set_flag(root, repo, "memory:m1", "same")
+    out = _run({"prompt": "how are skills pruned", "cwd": str(repo)},
+               {"LOADOUT_CONFIG_ROOT": str(root)})
+    assert out.returncode == 0 and out.stdout == ""

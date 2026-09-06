@@ -334,6 +334,53 @@ It exits successfully on every path, including its own timeout: on `UserPromptSu
 hook does not merely error, it blocks the prompt and erases what you were typing. A missed recall
 is invisible; a lost prompt is not.
 
+### Auditing the store
+
+Memory rots. `cld memory audit` opens the store for this repository as a checklist, one row per
+entry, carrying the signals that decide whether it still earns its place — deliveries, last use,
+an anchor that disappeared, a flag a session raised, an entry shadowed by a higher-precedence
+store. Unchecking marks an entry for deletion; nothing is removed until you type `delete`.
+
+```
+$ cld memory audit
+  this repository
+  > [x] skill-scoping-mechanism    How loadout prunes user-level skills…   4 uses · last 2026-09-04
+    [ ] old-threshold-note         The threshold is 0.20…                  anchor gone  never delivered
+```
+
+`--all-repos` widens it to every project under the profile, which is where the entries you have
+forgotten actually live.
+
+To ask why a specific session recalled what it did — or failed to:
+
+```
+$ cld memory audit --context "how does skill scoping work"
+  what a session on 'how does skill scoping work' would recall
+  threshold 0.24 · budget 800 tokens
+
+    ✓ 0.632  deci 2026-08-21-1326-per-session-skill-sco… Per-session skill scoping: settings-f…
+    ✓ 0.536  memo skill-scoping-mechanism                How loadout prunes user-level skills…
+    ── below the line ──
+    · 0.157  memo strict-mcp-config-connectors           How --strict-mcp-config affects clau…  below-threshold
+```
+
+Every entry gets a verdict and a reason: `below-threshold`, `over-budget`, `stale-anchor`,
+`decayed`, `promoted`, `flagged`, `resolved`. That is the difference between "recall did not work"
+and "recall worked and this entry lost, here is by how much".
+
+### Flags: the session notices, you decide
+
+A session that spots a wrong or outdated note can say so, but not act on it:
+
+```
+$ cld memory flag skill-scoping-mechanism --reason "names a lever that was renamed in 2.1.261"
+```
+
+A flag is a sidecar entry, never an edit to your notes. It demotes the entry in ranking and hides
+it from per-prompt recall immediately, shows up in the audit for you to resolve, and clears with
+`--clear`. `cld memory audit --json` gives a session the whole store to read. Curation stays a
+human decision: an agent should not hold the pen on your memory.
+
 ### Debt you left behind
 
 The one thing neither a session log nor a decision record captures is the shim you meant to remove:

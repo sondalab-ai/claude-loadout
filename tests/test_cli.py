@@ -1295,3 +1295,87 @@ def test_doctor_says_memory_is_off_when_it_is(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(cli, "make_model2vec_embed", lambda name: cli.keyword_embed)
     cli.main(["doctor"])
     assert "off — enable with" in capsys.readouterr().out
+
+# --- memory audit -------------------------------------------------------------
+
+def test_audit_lists_entries_with_their_signals(tmp_path, monkeypatch, capsys):
+    _memory_repo(tmp_path, n=2)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "root"))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "_interactive", lambda passthrough: False)
+    assert cli.main(["memory", "audit"]) == 0
+    out = capsys.readouterr().out
+    assert "m0" in out and "m1" in out and "never delivered" in out
+
+def test_audit_json_is_machine_readable(tmp_path, monkeypatch, capsys):
+    _memory_repo(tmp_path, n=1)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "root"))
+    monkeypatch.chdir(tmp_path)
+    cli.main(["memory", "audit", "--json"])
+    rows = json.loads(capsys.readouterr().out)
+    assert rows[0]["name"] == "m0" and rows[0]["uses"] == 0
+    assert rows[0]["anchor_state"] == "none" and rows[0]["flagged"] is None
+
+def test_audit_context_explains_admission_and_rejection(tmp_path, monkeypatch, capsys):
+    root = _memory_repo(tmp_path, n=2)
+    (root / "loadout" / "config.toml").write_text(
+        "[memory]\nenabled = true\nthreshold = 0.99\n")     # nothing clears this bar
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "make_model2vec_embed", lambda name: cli.keyword_embed)
+    cli.main(["memory", "audit", "--context", "note number 0 about scoping sessions"])
+    out = capsys.readouterr().out
+    assert "would recall" in out and "threshold" in out
+    assert "below the line" in out and "below-threshold" in out
+
+def test_flagging_demotes_an_entry_and_shows_up_in_the_audit(tmp_path, monkeypatch, capsys):
+    _memory_repo(tmp_path, n=2)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "root"))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "make_model2vec_embed", lambda name: cli.keyword_embed)
+    assert cli.main(["memory", "flag", "m0"]) == 2                 # a flag without a reason
+    assert cli.main(["memory", "flag", "m0", "--reason", "the file it names was renamed"]) == 0
+    capsys.readouterr()
+    cli.main(["memory", "audit", "--json"])
+    row = next(r for r in json.loads(capsys.readouterr().out) if r["name"] == "m0")
+    assert "renamed" in row["flagged"]
+    cli.main(["memory", "audit", "--context", "scoping sessions", "--json"])
+    verdict = next(v for v in json.loads(capsys.readouterr().out) if v["name"] == "m0")
+    assert "flagged" in verdict["reasons"] and verdict["score"] < verdict["base"]
+    assert cli.main(["memory", "flag", "m0", "--clear"]) == 0
+
+def test_audit_deletes_only_after_a_typed_confirmation(tmp_path, monkeypatch, capsys):
+    _memory_repo(tmp_path, n=2)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "root"))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "_interactive", lambda passthrough: True)
+    monkeypatch.setattr(cli, "_checkbox_select",
+                        lambda *a, **k: [0])                        # keep m0, drop m1
+    monkeypatch.setattr(cli, "_ask", lambda prompt: "no")
+    cli.main(["memory", "audit"])
+    assert (tmp_path / "docs" / "memory" / "m1.md").exists()        # refused: nothing deleted
+    monkeypatch.setattr(cli, "_ask", lambda prompt: "delete")
+    cli.main(["memory", "audit"])
+    assert not (tmp_path / "docs" / "memory" / "m1.md").exists()
+    assert (tmp_path / "docs" / "memory" / "m0.md").exists()
+
+def test_audit_cancelled_changes_nothing(tmp_path, monkeypatch, capsys):
+    _memory_repo(tmp_path, n=2)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "root"))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "_interactive", lambda passthrough: True)
+    monkeypatch.setattr(cli, "_checkbox_select", lambda *a, **k: None)
+    cli.main(["memory", "audit"])
+    assert (tmp_path / "docs" / "memory" / "m1.md").exists()
+
+def test_audit_across_repositories_groups_by_project(tmp_path, monkeypatch, capsys):
+    from ccloadout.memory import harness_slug
+    root = _memory_repo(tmp_path, n=1)
+    other = root / "projects" / harness_slug(tmp_path / "elsewhere") / "memory"
+    other.mkdir(parents=True)
+    (other / "x.md").write_text("---\nname: x\ndescription: from another repo\n---\nbody\n")
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "_interactive", lambda passthrough: False)
+    cli.main(["memory", "audit", "--all-repos"])
+    assert "from another repo" in capsys.readouterr().out

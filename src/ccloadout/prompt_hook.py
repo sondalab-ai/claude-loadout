@@ -29,9 +29,11 @@ def main() -> int:
         resident = set(filter(None, (os.environ.get("LOADOUT_RESIDENT_IDS") or "").split(",")))
 
         from ccloadout.lexical import rank_lexically     # imported late: nothing costs until needed
+        from ccloadout.flags import load_flags
         from ccloadout.memory import read_store
+        flagged = set(load_flags(config_root, repo))    # a session said these are wrong
         entries = [e for e in read_store(repo, config_root).entries
-                   if e.id not in resident and e.status != "resolved"]
+                   if e.id not in resident and e.id not in flagged and e.status != "resolved"]
         limit = int(os.environ.get("LOADOUT_PROMPT_MAX") or _DEFAULT_MAX)
         hits = [(e, s) for e, s in rank_lexically(entries, prompt) if s > 0][:limit]
         if hits:

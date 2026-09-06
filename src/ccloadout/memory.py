@@ -102,21 +102,11 @@ def read_store(cwd: Path, config_root: Path, home: Path | None = None) -> Store:
     seen_paths: set[Path] = set()                  # realpath: memory-org symlinks one store onto another
     by_id: dict[str, Entry] = {}
     for directory, scope, kind in _locations(cwd, config_root, home):
-        try:
-            files = sorted(p for p in directory.iterdir() if p.suffix == ".md")
-        except OSError:                            # absent store is the normal case
-            continue
-        for path in files:
-            if path.name in _INDEX_NAMES:
-                continue
-            real = path.resolve()
-            if real in seen_paths:
+        for entry in _read_dir(directory, scope, kind, slug):
+            real = entry.path.resolve()
+            if real in seen_paths:                 # memory-org symlinks one store onto another
                 continue
             seen_paths.add(real)
-            entry = (_memory_entry(path, scope) if kind == "memory"
-                     else _decision_entry(path, slug))
-            if entry is None:
-                continue
             if entry.id in by_id:                  # distinct files, same slug: earlier wins
                 shadowed.append((by_id[entry.id], entry))
                 continue
@@ -166,3 +156,40 @@ def set_status(path: Path, status: str) -> None:
             path.write_text("\n".join(lines) + "\n")
             return
     raise ValueError(f"{path} has no status field to set")
+
+def read_all(config_root: Path, home: Path | None = None) -> dict[str, tuple[Entry, ...]]:
+    # Every project's store under this profile, for auditing across repositories — memories
+    # accumulate per project, and the ones worth deleting are usually in a repo you left behind.
+    home = Path.home() if home is None else home
+    out: dict[str, tuple[Entry, ...]] = {}
+    for base, kind in ((config_root / "projects", "memory"),
+                       (config_root / "debug-decisions", "decision"),
+                       (home / ".claude" / "debug-decisions", "decision")):
+        try:
+            slugs = sorted(p for p in base.iterdir() if p.is_dir())
+        except OSError:
+            continue
+        for slug_dir in slugs:
+            directory = slug_dir / "memory" if kind == "memory" else slug_dir
+            entries = _read_dir(directory, "repo", kind, slug_dir.name)
+            if entries:
+                out[slug_dir.name] = out.get(slug_dir.name, ()) + entries
+    globals_ = _read_dir(config_root / "loadout" / "memory", "global", "memory", "")
+    if globals_:
+        out["(global)"] = globals_
+    return out
+
+def _read_dir(directory: Path, scope: str, kind: str, project: str) -> tuple[Entry, ...]:
+    try:
+        files = sorted(p for p in directory.iterdir() if p.suffix == ".md")
+    except OSError:
+        return ()
+    out = []
+    for path in files:
+        if path.name in _INDEX_NAMES:
+            continue
+        entry = (_memory_entry(path, scope) if kind == "memory"
+                 else _decision_entry(path, project))
+        if entry is not None:
+            out.append(entry)
+    return tuple(out)

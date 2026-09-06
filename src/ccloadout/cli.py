@@ -1,5 +1,5 @@
 from __future__ import annotations
-import os, re, subprocess, sys, time
+import json, os, re, subprocess, sys, time
 from fnmatch import fnmatch
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
@@ -9,11 +9,13 @@ from ccloadout.inventory import claude_code_inventory, Item
 from ccloadout.goal import detect_goal, write_goal_cache
 from ccloadout.ranker import Ranker, make_model2vec_embed, keyword_embed, bundled_model_path, resolve_model_source
 from ccloadout.compose import compose
-from ccloadout.memory import EntryExists, read_store, set_status, slug_for, write_entry
+from ccloadout.memory import (EntryExists, read_all, read_store, set_status,
+                              slug_for, write_entry)
+from ccloadout.flags import clear_flag, load_flags, set_flag
 from ccloadout.usage import load_usage, record_delivery
 from ccloadout.candidates import drop_rows, load_candidates, record_session
 from ccloadout.decisions import corpus_dir, new_decision, supersede
-from ccloadout.recall import (anchor_state, build_payload, estimate_tokens,
+from ccloadout.recall import (anchor_state, assess, build_payload, estimate_tokens,
                               recall_command, search, select, strip_frontmatter)
 from ccloadout.rules import (load_rules, apply_rules, has_rule, save_rule, write_rules,
                             read_rules, profile_rules_file, rules_for,
@@ -345,6 +347,155 @@ def _prompt_recall_env(cfg, cwd: Path, mem) -> dict | None:
             "LOADOUT_RESIDENT_IDS": ",".join(mem.delivered),
             "LOADOUT_PROMPT_MAX": cfg.memory.prompt_recall_max,
             "LOADOUT_PROMPT_TIMEOUT_MS": cfg.memory.prompt_timeout_ms}
+
+_AUDIT_HINT = "↑/↓ move · space keep/drop · a all/none · enter apply · q cancel"
+
+def _entry_signals(entry, cwd: Path, usage, flags, shadowed_ids: set) -> str:
+    bits = []
+    state = anchor_state(entry, cwd)
+    if state == "missing":
+        bits.append(_paint("anchor gone", "red", err=True))
+    elif state == "changed":
+        bits.append(_paint("code changed", "yellow", err=True))
+    if entry.id in flags:
+        bits.append(_paint(f"flagged: {_short_desc(flags[entry.id].reason, 40)}", "yellow", err=True))
+    if entry.id in shadowed_ids:
+        bits.append(_paint("shadowed", "dim", err=True))
+    if entry.status == "resolved":
+        bits.append(_paint("resolved", "dim", err=True))
+    rec = usage.get(entry.id)
+    if rec:
+        bits.append(_paint(f"{_plural(rec.uses, 'use')} · last {rec.last_used}", "dim", err=True))
+    else:
+        bits.append(_paint("never delivered", "dim", err=True))
+    return "  ".join(bits)
+
+def _audit_rows(cwd: Path, cfg, all_repos: bool):
+    usage, flags = load_usage(cfg.config_root, cwd), load_flags(cfg.config_root, cwd)
+    if not all_repos:
+        store = read_store(cwd, cfg.config_root)
+        shadowed = {dropped.id for _, dropped in store.shadowed}
+        return [("this repository", e) for e in store.entries], usage, flags, shadowed
+    rows = [(project, e) for project, entries in sorted(read_all(cfg.config_root).items())
+            for e in entries]
+    return rows, usage, flags, set()
+
+def _cmd_audit(cwd: Path, args: list[str], override: Path | None = None) -> int:
+    args, contexts = _pop_flag(list(args), "--context")
+    all_repos, as_json = "--all-repos" in args, "--json" in args
+    cfg = load_config(cwd=cwd, config_root_override=override)
+    rows, usage, flags, shadowed = _audit_rows(cwd, cfg, all_repos)
+    if not rows:
+        print(_paint("no memory entries to audit", "dim"))
+        return 0
+    if contexts:
+        return _audit_context(cwd, cfg, [e for _, e in rows], contexts[0], usage, flags, as_json)
+    if as_json:
+        print(json.dumps([{"project": project, "id": e.id, "kind": e.kind, "scope": e.scope,
+                           "name": e.name, "description": e.description, "path": str(e.path),
+                           "status": e.status, "anchors": list(e.anchors),
+                           "anchor_state": anchor_state(e, cwd),
+                           "uses": usage[e.id].uses if e.id in usage else 0,
+                           "last_used": usage[e.id].last_used if e.id in usage else None,
+                           "flagged": flags[e.id].reason if e.id in flags else None,
+                           "shadowed": e.id in shadowed}
+                          for project, e in rows], indent=1))
+        return 0
+    if not _interactive([]):
+        for project, e in rows:
+            print(f"  {_paint(f'[{e.kind} · {project}]', 'dim')} {e.name} — "
+                  f"{_short_desc(e.description, 50)}")
+            signals = _entry_signals(e, cwd, usage, flags, shadowed)
+            if signals:
+                print(f"      {signals}")
+        return 0
+    return _audit_interactive(cwd, cfg, rows, usage, flags, shadowed)
+
+def _audit_interactive(cwd: Path, cfg, rows, usage, flags, shadowed) -> int:
+    labels, headers, seen = [], {}, None
+    for i, (project, entry) in enumerate(rows):
+        if project != seen:
+            headers[i] = project
+            seen = project
+        signals = _entry_signals(entry, cwd, usage, flags, shadowed)
+        labels.append(f"{_short_desc(entry.name, 34):<34} {_short_desc(entry.description, 44)}"
+                      + (f"   {signals}" if signals else ""))
+    title = (_paint("claude-loadout — memory audit", "bold", err=True) + "\n"
+             + _paint("  unchecked entries are proposed for deletion", "dim", err=True))
+    keep = _checkbox_select(title, labels, hint=_AUDIT_HINT, headers=headers, allow_empty=True)
+    if keep is None:
+        _warn("audit cancelled; nothing was changed")
+        return 0
+    doomed = [rows[i][1] for i in range(len(rows)) if i not in set(keep)]
+    if not doomed:
+        print(_paint("nothing to delete", "dim"))
+        return 0
+    print(_paint(f"  about to delete {_plural(len(doomed), 'entry')}:", "bold"))
+    for entry in doomed:
+        print(f"    {_paint('✗', 'red')} {entry.path}")
+    if not _ask("  type 'delete' to confirm: ").strip().lower().startswith("delete"):
+        _warn("nothing was deleted")
+        return 0
+    for entry in doomed:
+        try:
+            entry.path.unlink()
+        except OSError as exc:
+            _warn(f"could not delete {entry.path} ({exc})")
+            continue
+        clear_flag(cfg.config_root, cwd, entry.id)
+    print(f"  {_paint('deleted', 'green')} {_plural(len(doomed), 'entry')}")
+    return 0
+
+def _audit_context(cwd: Path, cfg, entries, context: str, usage, flags, as_json: bool) -> int:
+    verdicts = assess(entries, context, _build_embed(cfg.model_name), cfg.memory.threshold,
+                      cfg.memory.budget_tokens, exe=recall_command(), root=cwd,
+                      usage=usage, flags=flags, promote_after=cfg.memory.promote_after,
+                      decay_days=cfg.memory.decay_days, decay_factor=cfg.memory.decay_factor)
+    if as_json:
+        print(json.dumps([{"id": v.entry.id, "name": v.entry.name, "score": round(v.score, 4),
+                           "base": round(v.base, 4), "reasons": list(v.reasons),
+                           "admitted": v.admitted} for v in verdicts], indent=1))
+        return 0
+    print(_paint(f"  what a session on {context!r} would recall", "bold"))
+    print(_paint(f"  threshold {cfg.memory.threshold} · budget {cfg.memory.budget_tokens} tokens",
+                 "dim"))
+    print()
+    cut_drawn = False
+    for v in verdicts:
+        if not v.admitted and not cut_drawn:
+            print(_paint("    ── below the line ──", "dim"))
+            cut_drawn = True
+        mark = _paint("✓", "green") if v.admitted else _paint("·", "dim")
+        why = _paint("  " + ", ".join(v.reasons), "dim") if v.reasons else ""
+        moved = "" if abs(v.score - v.base) < 1e-9 else _paint(f" (from {v.base:.3f})", "dim")
+        print(f"    {mark} {v.score:.3f}{moved}  "
+              f"{_paint(v.entry.kind[:4], 'dim')} {_short_desc(v.entry.name, 38):<38} "
+              f"{_short_desc(v.entry.description, 38)}{why}")
+    return 0
+
+def _cmd_flag(cwd: Path, args: list[str], override: Path | None = None) -> int:
+    args, reasons = _pop_flag(list(args), "--reason")
+    clearing = "--clear" in args
+    names = [a for a in args if not a.startswith("--")]
+    if not names:
+        _warn("memory flag needs the name of an entry")
+        return 2
+    cfg = load_config(cwd=cwd, config_root_override=override)
+    match = next((e for e in read_store(cwd, cfg.config_root).entries
+                  if e.name == names[0] or e.name.startswith(names[0])), None)
+    if match is None:
+        _warn(f"no entry named {names[0]!r}")
+        return 1
+    if clearing:
+        clear_flag(cfg.config_root, cwd, match.id)
+        print(f"{_paint('cleared', 'green')} {match.name}")
+        return 0
+    if not reasons:
+        _warn("flagging needs --reason; a flag without one cannot be judged later")
+        return 2
+    set_flag(cfg.config_root, cwd, match.id, reasons[0])
+    print(f"{_paint('flagged', 'yellow')} {match.name} — {reasons[0]}")
+    return 0
 
 def _cmd_decision(cwd: Path, args: list[str], override: Path | None = None) -> int:
     action, rest = (args[0], args[1:]) if args else ("list", [])
@@ -1225,6 +1376,10 @@ def _print_help() -> None:
         f"  {cmd('cld recall <query>')}    Search the memory store and print matching entries in full\n"
         f"  {cmd('cld memory add <text>')} Record a note for this repo (--name slug, --anchor path)\n"
         f"  {cmd('cld memory consolidate')}  Review recorded sessions and promote them to memories\n"
+        f"  {cmd('cld memory audit')}     Review the store and delete what no longer earns its place\n"
+        f"                                (--context '<goal>' to see what it would recall and why,\n"
+        f"                                 --all-repos for every project, --json for a session to read)\n"
+        f"  {cmd('cld memory flag <name>')}  Mark an entry as wrong (--reason ..., --clear to undo)\n"
         f"  {cmd('cld debt add|list|resolve')}  Track shims, stubs and skipped tests you left behind\n"
         f"  {cmd('cld decision new|list|show|supersede')}  Architectural decisions, versioned per repo\n"
         f"  {cmd('cld rules')}              Author profile-wide keep/drop rules (all repos; launch prompts are repo-local)\n"
@@ -1393,7 +1548,11 @@ def _run(argv: list[str] | None = None) -> int:
             return _cmd_write_entry(cwd, argv[2:], "memory", _resolve_config_root(os.environ, []))
         if sub == "consolidate":
             return _cmd_consolidate(cwd, _resolve_config_root(os.environ, []))
-        _warn("memory takes: add <description> [--name slug] [--anchor path], or consolidate")
+        if sub == "audit":
+            return _cmd_audit(cwd, argv[2:], _resolve_config_root(os.environ, []))
+        if sub == "flag":
+            return _cmd_flag(cwd, argv[2:], _resolve_config_root(os.environ, []))
+        _warn("memory takes: add, audit, flag or consolidate")
         return 2
     if argv and argv[0] == "recall":                # T2 retrieval: no scoping, no launch
         return _cmd_recall(cwd, argv[1:], _resolve_config_root(os.environ, []))
