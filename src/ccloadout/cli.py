@@ -558,6 +558,8 @@ def _entry_signals(entry, cwd: Path | None, usage, flags, shadowed_ids: set) -> 
     # cwd is None for rows read from another project: its anchors, counters and flags are relative
     # to a root we do not have, and reporting them against this one produces confident nonsense.
     bits = []
+    if entry.scope == "global":                     # a session can write these; they reach everywhere
+        bits.append(_paint("global", "cyan", err=True))
     if cwd is None:
         return _paint("another project — signals not evaluated here", "dim", err=True)
     state = anchor_state(entry, cwd)

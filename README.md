@@ -382,6 +382,12 @@ You write with `cld memory add`, and the session is invited to: the injected blo
 a root cause, a dead end, a decision you made together. Not routine progress. Whatever it writes is
 an ordinary note: ranked, budgeted, and deletable in the audit like any other.
 
+It is also told how to choose the reach, with a test it can actually apply: a fact about **this
+repository** stays here, a fact about a tool, the harness or how you work — still true in a
+different repository — goes in with `--global`. Global notes are marked as such in the audit,
+because a wrong one costs you in every session rather than one; `cld memory scope <name> repo`
+demotes it.
+
 Finished sessions and debt markers are captured automatically, but as *candidates* — never notes:
 
 ```toml

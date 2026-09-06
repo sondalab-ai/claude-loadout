@@ -1672,3 +1672,15 @@ def test_scopes_config_can_shut_out_other_projects(tmp_path, monkeypatch, capsys
     _capture_launch(monkeypatch, seen)
     cli.main(["--no-gate"])
     assert "a cross-project note" not in seen.get("payload", "")
+
+def test_the_audit_marks_notes_that_reach_every_project(tmp_path, monkeypatch, capsys):
+    root = _memory_repo(tmp_path, n=1)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.chdir(tmp_path)
+    cli.main(["memory", "add", "--global", "--name", "lever", "a harness fact"])
+    monkeypatch.setattr(cli, "_interactive", lambda passthrough: False)
+    capsys.readouterr()
+    cli.main(["memory", "audit"])
+    out = capsys.readouterr().out
+    assert "global" in out and "lever" in out

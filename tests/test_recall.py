@@ -171,11 +171,14 @@ def test_promotion_cannot_take_more_than_half_the_budget():
     embed = make_model2vec_embed("minishlab/potion-base-8M")
     entries = _ON + _OFF
     usage = {f"memory:{e.name}": _usage(9) for e in _OFF}      # every off-topic entry promoted
-    budget = 260
+    budget = 400
     chosen = select(entries, _GOAL, embed, threshold=0.0, budget_tokens=budget,
                     usage=usage, promote_after=3)
     pinned = [e for e in chosen if e.name.startswith("off-")]
-    assert estimate_tokens(build_payload(pinned, exe="/x/cld", total=len(entries))) <= budget // 2
+    header = estimate_tokens(build_payload(chosen[:1], exe="/x/cld", total=len(entries)))
+    spent_on_pinned = estimate_tokens(
+        build_payload(pinned, exe="/x/cld", total=len(entries))) - header
+    assert spent_on_pinned <= (budget - header) // 2      # half of what the entries may spend
     assert any(not e.name.startswith("off-") for e in chosen)  # ranked recall still gets in
 
 def test_decay_demotes_an_entry_not_delivered_for_a_long_time():
@@ -292,3 +295,9 @@ def test_the_payload_says_why_a_linked_note_is_there():
     text = build_payload(admitted, exe="/x/cld", total=2,
                          linked={"memory:obscure-detail": "skill-scoping"})
     assert "linked to skill-scoping" in text
+
+def test_the_payload_teaches_both_scopes_with_a_criterion():
+    text = build_payload(_ON, exe="/x/cld", total=9)
+    assert '/x/cld memory add "<one line>"' in text
+    assert '/x/cld memory add --global "<one line>"' in text
+    assert "THIS repository" in text and "different repository" in text

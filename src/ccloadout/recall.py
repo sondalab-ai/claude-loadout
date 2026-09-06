@@ -20,8 +20,11 @@ _HEADER = ("<claude-loadout-memory>\n"
            "{shown} of {total} entries shown. Retrieve one in full, or search the rest, with:\n"
            "  {exe} recall \"<query>\"\n"
            "If this session establishes something a later one would have to rediscover — a root\n"
-           "cause, a dead end, a decision made with the user — record it, briefly and factually:\n"
-           "  {exe} memory add \"<one line>\"   (not routine progress; the user reviews these)\n")
+           "cause, a dead end, a decision made with the user — record it, briefly and factually.\n"
+           "Not routine progress, and the user reviews everything you write:\n"
+           "  {exe} memory add \"<one line>\"            a fact about THIS repository\n"
+           "  {exe} memory add --global \"<one line>\"   a fact about a tool, the harness, or how\n"
+           "      the user works — something that would still be true in a different repository\n")
 _FOOTER = "</claude-loadout-memory>"
 
 # select() must know the payload's size before it has a real path to render, so it assumes a
@@ -136,24 +139,23 @@ def assess(entries: Iterable[Entry], goal: str,
     pinned = promoted_ids(usage, promote_after)
     order = ([row for row in scored if row[0].id in pinned]
              + [row for row in scored if row[0].id not in pinned])
+    header = estimate_tokens(_HEADER.format(shown=0, total=total, exe=exe) + _FOOTER)
     verdicts: list[Verdict] = []
     chosen: list[Entry] = []
     for entry, base, score, reasons in order:
         promoted = entry.id in pinned
         reasons = reasons + ("promoted",) if promoted else reasons
-        # Promotion spends at most half the budget — measured on the *entries*, not on the whole
-        # payload: the header alone is ~150 tokens, so capping the rendered total would make a
-        # promoted entry harder to deliver than an unpromoted one at small budgets.
-        cap = budget_tokens - (budget_tokens // 2 if promoted else 0)
+        # Promotion spends at most half of what is left for *entries* once the header is paid
+        # for. Capping the rendered total instead would make a promoted entry harder to deliver
+        # than an unpromoted one at small budgets — the header is ~200 tokens on its own.
+        cap = budget_tokens if not promoted else header + (budget_tokens - header) // 2
         if score < threshold:
             verdicts.append(Verdict(entry, score, base, reasons + ("below-threshold",), False))
             continue
         trial = chosen + [entry]
         rendered = estimate_tokens(build_payload(trial, exe=exe, total=total, root=root,
                                                  states=states))
-        overhead = estimate_tokens(build_payload(chosen[:1] or trial[:1], exe=exe, total=total,
-                                                 root=root, states=states)) if promoted else 0
-        if rendered > budget_tokens or (promoted and rendered - overhead > cap - overhead):
+        if rendered > cap:
             verdicts.append(Verdict(entry, score, base, reasons + ("over-budget",), False))
             continue
         chosen = trial

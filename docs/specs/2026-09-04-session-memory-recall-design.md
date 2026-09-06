@@ -192,7 +192,14 @@ installed into `$CLAUDE_CONFIG_DIR/skills/` and a fresh `pip install ccloadout` 
 Instead the T1 payload — already resident, already budgeted — carries a short usage contract naming
 the store and the command. Two requirements:
 
-0. The payload teaches **two** commands, not one: `recall` to read, and `memory add` to write.
+0. The payload teaches **two** commands, not one: `recall` to read, and `memory add` to write —
+   and for the write, both scopes with a criterion the model can apply: a fact about *this*
+   repository, versus a fact about a tool, the harness or the user's way of working that would
+   still hold in another repository. "Is it important?" is not a discernible test; "would it still
+   be true elsewhere?" is. The asymmetry is stated where it belongs — a wrong global entry costs
+   every session rather than one — and is bounded by the same machinery as everything else: it
+   still ranks, still competes for the budget, is marked `global` in the audit, and
+   `cld memory scope <name> repo` demotes it.
    Without the second, the only party that knows what a session learned — the session — has no way
    to say so, and every note has to come from the user by hand. The invitation is deliberately
    narrow (a root cause, a dead end, a decision made with the user; not routine progress), and what
