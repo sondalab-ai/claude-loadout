@@ -2,11 +2,13 @@ from __future__ import annotations
 import hashlib, sys
 from math import ceil
 from pathlib import Path
-from typing import Callable, Iterable, Sequence
+from datetime import date
+from typing import Callable, Iterable, Mapping, Sequence
 import numpy as np
 from ccloadout.measure import CHARS_PER_TOKEN
 from ccloadout.memory import Entry
 from ccloadout.ranker import Ranker
+from ccloadout.usage import Usage, promoted_ids
 
 # The launched session sees this text in the highest-trust position it has, so the block says
 # what it is: reference data written by past sessions, not instructions (spec §11).
@@ -66,21 +68,41 @@ def build_payload(entries: Sequence[Entry], exe: str, total: int, root: Path | N
 def select(entries: Iterable[Entry], goal: str,
            embed: Callable[[list[str]], np.ndarray], threshold: float,
            budget_tokens: int, exe: str = _ASSUMED_EXE,
-           root: Path | None = None) -> list[Entry]:
-    # One admission rule (spec §5.4): rank order until the budget is spent — no top-K. The payload
-    # is re-rendered per candidate because its header carries the count, so the cost is not a sum.
+           root: Path | None = None,
+           usage: Mapping[str, Usage] | None = None,
+           promote_after: int = 3, decay_days: int = 90, decay_factor: float = 0.5,
+           today: date | None = None) -> list[Entry]:
+    # One admission rule (spec §5.4): rank order until the budget is spent — no top-K. Entries
+    # promoted by repeated delivery go first, but never past half the budget, or promotion would
+    # eventually starve ranked recall. The payload is re-rendered per candidate because its header
+    # carries the count, so the cost is not a running sum.
     items = list(entries)
-    scored = Ranker(embed).score(goal, items)
-    if root is not None:
-        scored = [(entry, score * STALE_FACTOR if anchor_state(entry, root) == "missing" else score)
-                  for entry, score in scored]
+    usage = usage or {}
+    now = today or date.today()
+    scored = [(entry, _adjust(entry, score, root, usage, decay_days, decay_factor, now))
+              for entry, score in Ranker(embed).score(goal, items)]
     scored = sorted(scored, key=lambda pair: -pair[1])
-    chosen: list[Entry] = []
-    for entry, score in scored:
-        if score < threshold:
-            break
+    eligible = [(e, s) for e, s in scored if s >= threshold]
+    pinned = promoted_ids(usage, promote_after)
+    chosen = _admit([pair for pair in eligible if pair[0].id in pinned],
+                    [], exe, len(items), root, budget_tokens // 2)
+    return _admit([pair for pair in eligible if pair[0].id not in pinned],
+                  chosen, exe, len(items), root, budget_tokens)
+
+def _adjust(entry: Entry, score: float, root: Path | None, usage: Mapping[str, Usage],
+            decay_days: int, decay_factor: float, now: date) -> float:
+    if root is not None and anchor_state(entry, root) == "missing":
+        score *= STALE_FACTOR
+    age = usage[entry.id].days_since(now) if entry.id in usage else None
+    if age is not None and age > decay_days:        # not delivered in a long time: demote, keep
+        score *= decay_factor
+    return score
+
+def _admit(candidates: Sequence[tuple[Entry, float]], chosen: list[Entry], exe: str,
+           total: int, root: Path | None, budget_tokens: int) -> list[Entry]:
+    for entry, _ in candidates:
         trial = chosen + [entry]
-        if estimate_tokens(build_payload(trial, exe=exe, total=len(items), root=root)) > budget_tokens:
+        if estimate_tokens(build_payload(trial, exe=exe, total=total, root=root)) > budget_tokens:
             break
         chosen = trial
     return chosen

@@ -137,3 +137,50 @@ def test_payload_without_a_root_makes_no_staleness_claim(tmp_path):
     from ccloadout.recall import build_payload
     changed = _anchored("changed", "a note", ["src/cli.py"], "sha")
     assert "possibly stale" not in build_payload([changed], exe="/x/cld", total=1)
+
+# --- promotion and decay (Slice 2) -------------------------------------------
+
+def _usage(uses, days_ago=0):
+    from datetime import date, timedelta
+    from ccloadout.usage import Usage
+    return Usage(uses=uses, last_used=(date.today() - timedelta(days=days_ago)).isoformat())
+
+def test_a_promoted_entry_is_admitted_before_better_ranked_ones():
+    from ccloadout.ranker import make_model2vec_embed
+    embed = make_model2vec_embed("minishlab/potion-base-8M")
+    entries = _ON + _OFF
+    plain = select(entries, _GOAL, embed, threshold=0.0, budget_tokens=10_000)
+    assert plain[0].name != "off-3"
+    promoted = select(entries, _GOAL, embed, threshold=0.0, budget_tokens=10_000,
+                      usage={"memory:off-3": _usage(5)}, promote_after=3)
+    assert promoted[0].name == "off-3"
+
+def test_promotion_cannot_take_more_than_half_the_budget():
+    from ccloadout.ranker import make_model2vec_embed
+    from ccloadout.recall import build_payload, estimate_tokens
+    embed = make_model2vec_embed("minishlab/potion-base-8M")
+    entries = _ON + _OFF
+    usage = {f"memory:{e.name}": _usage(9) for e in _OFF}      # every off-topic entry promoted
+    budget = 260
+    chosen = select(entries, _GOAL, embed, threshold=0.0, budget_tokens=budget,
+                    usage=usage, promote_after=3)
+    pinned = [e for e in chosen if e.name.startswith("off-")]
+    assert estimate_tokens(build_payload(pinned, exe="/x/cld", total=len(entries))) <= budget // 2
+    assert any(not e.name.startswith("off-") for e in chosen)  # ranked recall still gets in
+
+def test_decay_demotes_an_entry_not_delivered_for_a_long_time():
+    from ccloadout.ranker import make_model2vec_embed
+    embed = make_model2vec_embed("minishlab/potion-base-8M")
+    fresh, stale = _ON[0], _ON[1]
+    usage = {f"memory:{stale.name}": _usage(1, days_ago=400)}
+    order = select([fresh, stale], _GOAL, embed, threshold=0.0, budget_tokens=10_000,
+                   usage=usage, decay_days=90, decay_factor=0.1)
+    assert order[-1].name == stale.name
+
+def test_decay_leaves_recently_delivered_entries_alone():
+    from ccloadout.ranker import make_model2vec_embed
+    embed = make_model2vec_embed("minishlab/potion-base-8M")
+    baseline = select(_ON, _GOAL, embed, threshold=0.0, budget_tokens=10_000)
+    usage = {f"memory:{e.name}": _usage(1, days_ago=5) for e in _ON}
+    assert [e.name for e in select(_ON, _GOAL, embed, threshold=0.0, budget_tokens=10_000,
+                                   usage=usage, decay_days=90)] == [e.name for e in baseline]

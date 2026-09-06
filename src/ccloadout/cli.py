@@ -10,6 +10,7 @@ from ccloadout.goal import detect_goal, write_goal_cache
 from ccloadout.ranker import Ranker, make_model2vec_embed, keyword_embed, bundled_model_path, resolve_model_source
 from ccloadout.compose import compose
 from ccloadout.memory import read_store
+from ccloadout.usage import load_usage, record_delivery
 from ccloadout.recall import (anchor_state, build_payload, estimate_tokens,
                               recall_command, search, select, strip_frontmatter)
 from ccloadout.rules import (load_rules, apply_rules, has_rule, save_rule, write_rules,
@@ -148,6 +149,8 @@ class _Memory(NamedTuple):
     shown: int
     total: int
     injected: int                                   # resident tokens the payload costs (heuristic)
+    delivered: tuple = ()                           # entry ids in the payload, counted only on launch
+    config_root: Path | None = None
 
 class _Scope(NamedTuple):
     goal: str
@@ -183,9 +186,21 @@ def _recall_payload(cfg, cwd: Path, goal: str, embed):
         return None, _Memory(0, total, 0)
     exe = recall_command()
     chosen = select(store.entries, goal, embed, cfg.memory.threshold,
-                    cfg.memory.budget_tokens, exe=exe, root=cwd)
+                    cfg.memory.budget_tokens, exe=exe, root=cwd,
+                    usage=load_usage(cfg.config_root, cwd),
+                    promote_after=cfg.memory.promote_after,
+                    decay_days=cfg.memory.decay_days, decay_factor=cfg.memory.decay_factor)
     payload = build_payload(chosen, exe=exe, total=total, root=cwd)
-    return payload, _Memory(len(chosen), total, estimate_tokens(payload))
+    return payload, _Memory(len(chosen), total, estimate_tokens(payload),
+                            tuple(e.id for e in chosen), cfg.config_root)
+
+def _record_delivery(scope, cwd: Path) -> None:
+    mem = getattr(scope, "memory", None)
+    if mem and mem.delivered and mem.config_root is not None:
+        try:
+            record_delivery(mem.config_root, cwd, mem.delivered)
+        except OSError as exc:                      # a counter is never worth failing a launch for
+            _warn(f"could not record memory usage ({exc})")
 
 def _cmd_recall(cwd: Path, args: list[str], config_root_override: Path | None = None) -> int:
     limit = 3
@@ -1176,6 +1191,7 @@ def _run(argv: list[str] | None = None) -> int:
         _cleanup(plan.tmp_paths)
         return 0
     scope, plan = _launch_gate(scope, plan, gate, passthrough, no_gate)   # read/adjust before claude takes the screen
+    _record_delivery(scope, cwd)                    # only a real launch counts as a delivery
     try:
         return subprocess.run(plan.argv, env=plan.env).returncode
     finally:

@@ -19,6 +19,9 @@ class MemoryConfig:
     budget_tokens: int = 800     # ceiling on the resident recall payload
     threshold: float = DEFAULT_THRESHOLD
     min_entries: int = 1         # below this, inject nothing at all — not even the usage contract
+    promote_after: int = 3       # deliveries in a repo after which an entry is pinned into recall
+    decay_days: int = 90         # no delivery for this long demotes an entry (never deletes it)
+    decay_factor: float = 0.5
 
 @dataclass(frozen=True)
 class Config:

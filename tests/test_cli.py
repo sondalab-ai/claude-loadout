@@ -1135,3 +1135,17 @@ def test_recall_marks_an_entry_whose_anchor_is_gone(tmp_path, monkeypatch, capsy
     monkeypatch.setattr(cli, "make_model2vec_embed", lambda name: cli.keyword_embed)
     cli.main(["recall", "scoping"])
     assert "anchored code is gone" in capsys.readouterr().out
+
+def test_launch_records_a_delivery_but_explain_does_not(tmp_path, monkeypatch):
+    from ccloadout.usage import load_usage
+    root = _memory_repo(tmp_path)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "make_model2vec_embed", lambda name: cli.keyword_embed)
+    monkeypatch.setattr(cli.subprocess, "run", lambda *a, **k: _RC(0))
+    cli.main(["--explain"])
+    assert load_usage(root, tmp_path) == {}                  # printed a plan, launched nothing
+    cli.main(["--no-gate"])
+    usage = load_usage(root, tmp_path)
+    assert {k.split(":")[-1] for k in usage} == {"m0", "m1"}
+    assert all(rec.uses == 1 for rec in usage.values())
