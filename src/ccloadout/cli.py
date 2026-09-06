@@ -417,20 +417,26 @@ def _cmd_debt(cwd: Path, args: list[str], override: Path | None = None) -> int:
     return 0
 
 def _session_hooks(cfg, cwd: Path, mem) -> tuple[dict | None, dict | None]:
-    # Two optional hooks, each installed only when it has work to do. Both read env and stdin,
-    # never argv, and both exit 0 on every path.
-    if not cfg.memory.enabled or mem is None:
-        return None, None
+    # Optional hooks, each installed only when it has work to do. All read env and stdin,
+    # never argv, and all exit 0 on every path.
     hooks: dict[str, str] = {}
     env = {"LOADOUT_CONFIG_ROOT": str(cfg.config_root), "LOADOUT_REPO": str(cwd)}
-    if cfg.memory.prompt_recall:                   # re-rank per prompt; told what is already resident
-        hooks["UserPromptSubmit"] = "ccloadout.prompt_hook"
-        env.update({"LOADOUT_RESIDENT_IDS": _LIST_SEP.join(mem.delivered),
-                    "LOADOUT_PROMPT_MAX": cfg.memory.prompt_recall_max,
-                    "LOADOUT_PROMPT_TIMEOUT_MS": cfg.memory.prompt_timeout_ms})
-    if cfg.memory.debt_patterns:                   # notice configured debt markers being written
-        hooks["PostToolUse"] = "ccloadout.debt_hook"
-        env["LOADOUT_DEBT_PATTERNS"] = _LIST_SEP.join(cfg.memory.debt_patterns)
+    if cfg.memory.enabled and mem is not None:     # recall is running; these two ride along with it
+        if cfg.memory.prompt_recall:               # re-rank per prompt; told what is already resident
+            hooks["UserPromptSubmit"] = "ccloadout.prompt_hook"
+            env.update({"LOADOUT_RESIDENT_IDS": _LIST_SEP.join(mem.delivered),
+                        "LOADOUT_PROMPT_MAX": cfg.memory.prompt_recall_max,
+                        "LOADOUT_PROMPT_TIMEOUT_MS": cfg.memory.prompt_timeout_ms})
+        if cfg.memory.debt_patterns:               # notice configured debt markers being written
+            hooks["PostToolUse"] = "ccloadout.debt_hook"
+            env["LOADOUT_DEBT_PATTERNS"] = _LIST_SEP.join(cfg.memory.debt_patterns)
+    # The end-of-session reminder asks the session to *write*, so it does not depend on recall
+    # being on, nor on the store holding anything yet: an empty store is where a note is worth most.
+    if cfg.memory.stop_prompt:
+        hooks["Stop"] = "ccloadout.stop_hook"
+        env["LOADOUT_EXE"] = recall_command()
+        if cfg.memory.decision_keywords:
+            env["LOADOUT_DECISION_KEYWORDS"] = _LIST_SEP.join(cfg.memory.decision_keywords)
     return (hooks or None), (env if hooks else None)
 
 _AUDIT_HINT = "↑/↓ move · space keep/drop · a all/none · enter apply · q cancel"

@@ -271,9 +271,29 @@ control when it exits (lever F). That splits capture in two, and only one half n
   A signal becomes a *candidate*, never a ledger entry. `cld memory consolidate` shows it and the
   user turns it into open debt, anchored to the file, or discards it.
 
-`debug-decisions` registers a `Stop` hook of its own (a retrospective nudge). Hooks merge rather
-than shadow (lever A), so it is unaffected either way; absorption removes the duplication by making
-the skill unnecessary, never by disabling it behind the user's back.
+- **End of session, inside it — `Stop` hook (lever A), default off.** The parent can record what a
+  session did, but it cannot ask the session to write down *why* it did it: once `subprocess.run`
+  returns there is nobody left to answer. That is the one thing this hook buys, and the reason it is
+  not covered by the bullet above. It emits a single line of `additionalContext` naming
+  `cld decision new` and `cld memory add`, and only when the transcript shows decision signals
+  (plan mode, three or more files edited, a design skill invoked, or a deliberation keyword —
+  stems for en/it/es/de by default, replaceable per profile with `[memory] decision_keywords`;
+  the other three signals are language-independent). It is
+  ported from the `debug-decisions` skill, whose surface this tool absorbed. No inference beyond
+  counting those signals, no model call, one reminder per `session_id`, and the transcript is read whole
+  up to a 64 MB cap, past which only the tail is parsed. `compose` caps every injected hook at 5 s;
+  measured against 400 real transcripts the slowest single file — 52 MB — costs 0.29 s, because a
+  transcript is a few thousand very long lines rather than millions of short ones. An earlier draft
+  read only the last 512 KB: on that same file it saw 2 turns and 0 edited files where the whole
+  file has 37 and 5, and it hid the messages that say a decision was already registered, which is
+  what has to keep the hook quiet.
+
+  Its gate is `[memory] stop_prompt`, read independently of `[memory] enabled`: the hook asks the
+  session to *write*, and an empty store is where a first note is worth most.
+
+`debug-decisions` used to register a `Stop` hook of its own. Hooks merge rather than shadow (lever
+A), so both could run; the port above exists so that removing the skill loses nothing, and it stays
+default-off so absorption never turns a hook on behind the user's back.
 
 Candidates are never memories. Promotion is a separate, out-of-band step —
 `cld memory consolidate` — which deduplicates, merges near-duplicates, and asks for confirmation on
@@ -440,6 +460,9 @@ git_tracked = true       # false for shared monorepos where Claude artifacts mus
                          # Also a trust setting: a git-tracked store accepts entries from anyone
                          # who can merge a PR (§11)
 prompt_recall = false    # T1.5, Slice 3
+stop_prompt = false      # end-of-session reminder to record decisions (§5.3);
+                         # read independently of `enabled`
+decision_keywords = []   # empty keeps the built-in en/it/es/de deliberation stems
 min_entries = 1          # below this, T1 injects nothing at all (§5.4)
 decay_days = 90
 decay_factor = 0.5       # rank multiplier applied to an entry past decay_days (§5.5)
