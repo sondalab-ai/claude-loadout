@@ -10,8 +10,8 @@ from ccloadout.goal import detect_goal, write_goal_cache
 from ccloadout.ranker import Ranker, make_model2vec_embed, keyword_embed, bundled_model_path, resolve_model_source
 from ccloadout.compose import compose
 from ccloadout.memory import read_store
-from ccloadout.recall import (build_payload, estimate_tokens, recall_command,
-                              search, select, strip_frontmatter)
+from ccloadout.recall import (anchor_state, build_payload, estimate_tokens,
+                              recall_command, search, select, strip_frontmatter)
 from ccloadout.rules import (load_rules, apply_rules, has_rule, save_rule, write_rules,
                             read_rules, profile_rules_file, rules_for,
                             Rule, Predicate, evaluate)
@@ -183,8 +183,8 @@ def _recall_payload(cfg, cwd: Path, goal: str, embed):
         return None, _Memory(0, total, 0)
     exe = recall_command()
     chosen = select(store.entries, goal, embed, cfg.memory.threshold,
-                    cfg.memory.budget_tokens, exe=exe)
-    payload = build_payload(chosen, exe=exe, total=total)
+                    cfg.memory.budget_tokens, exe=exe, root=cwd)
+    payload = build_payload(chosen, exe=exe, total=total, root=cwd)
     return payload, _Memory(len(chosen), total, estimate_tokens(payload))
 
 def _cmd_recall(cwd: Path, args: list[str], config_root_override: Path | None = None) -> int:
@@ -203,7 +203,11 @@ def _cmd_recall(cwd: Path, args: list[str], config_root_override: Path | None = 
             print(f"  {_paint(f'[{e.kind} · {e.scope}]', 'dim')} {e.name} — {_short_desc(e.description, 60)}")
         return 0
     for entry, score in search(store.entries, query, _build_embed(cfg.model_name), limit):
-        print(_paint(f"{entry.name}  ({entry.kind} · {entry.scope} · {score:.3f})", "bold"))
+        state = anchor_state(entry, cwd)
+        mark = {"missing": "  ⚠ anchored code is gone",
+                "changed": "  ⚠ anchored code changed since this was written"}.get(state, "")
+        print(_paint(f"{entry.name}  ({entry.kind} · {entry.scope} · {score:.3f})", "bold")
+              + _paint(mark, "yellow"))
         print(_paint(f"{entry.path}", "dim"))
         body = strip_frontmatter(entry.path.read_text(errors="ignore")).strip()
         print(body + "\n")

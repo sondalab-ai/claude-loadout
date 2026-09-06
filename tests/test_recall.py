@@ -92,3 +92,48 @@ def test_recall_command_is_runnable_without_path_luck():
     cmd = recall_command()
     assert Path(cmd.split()[0]).is_absolute()
     assert subprocess.run(cmd.split() + ["--version"], capture_output=True).returncode == 0
+
+# --- staleness (Slice 2) ------------------------------------------------------
+
+def _anchored(name, desc, anchors, sha=None):
+    return Entry(id=f"memory:{name}", kind="memory", name=name, description=desc,
+                 path=Path(f"/store/{name}.md"), scope="repo",
+                 anchors=tuple(anchors), content_sha=sha)
+
+def test_anchor_state_reports_missing_changed_and_matching(tmp_path):
+    from ccloadout.recall import anchor_state, sha_of
+    src = tmp_path / "src" / "cli.py"
+    src.parent.mkdir(parents=True); src.write_text("print('one')\n")
+    assert anchor_state(_anchored("a", "d", []), tmp_path) == "none"
+    assert anchor_state(_anchored("a", "d", ["src/nope.py"]), tmp_path) == "missing"
+    assert anchor_state(_anchored("a", "d", ["src/cli.py"]), tmp_path) == "unverified"
+    recorded = sha_of([src])
+    assert anchor_state(_anchored("a", "d", ["src/cli.py"], recorded), tmp_path) == "fresh"
+    src.write_text("print('two')\n")                 # the code moved on, the note did not
+    assert anchor_state(_anchored("a", "d", ["src/cli.py"], recorded), tmp_path) == "changed"
+
+def test_symbol_anchors_are_checked_at_path_level_only(tmp_path):
+    from ccloadout.recall import anchor_state
+    (tmp_path / "src").mkdir(); (tmp_path / "src" / "cli.py").write_text("x = 1\n")
+    assert anchor_state(_anchored("a", "d", ["src/cli.py#missing_symbol"]), tmp_path) == "unverified"
+
+def test_missing_anchor_demotes_but_changed_sha_does_not(tmp_path):
+    from ccloadout.ranker import make_model2vec_embed
+    embed = make_model2vec_embed("minishlab/potion-base-8M")
+    (tmp_path / "src").mkdir(); (tmp_path / "src" / "cli.py").write_text("x = 1\n")
+    live = _anchored("live", "how the embedding ranker scores skills", ["src/cli.py"], "deadbeef")
+    gone = _anchored("gone", "how the embedding ranker scores plugins", ["src/nope.py"])
+    chosen = select([live, gone], _GOAL, embed, threshold=0.0, budget_tokens=10_000, root=tmp_path)
+    assert [e.name for e in chosen][0] == "live"      # the demoted one sinks below its twin
+
+def test_payload_flags_entries_whose_anchor_changed(tmp_path):
+    from ccloadout.recall import build_payload
+    (tmp_path / "src").mkdir(); (tmp_path / "src" / "cli.py").write_text("x = 1\n")
+    changed = _anchored("changed", "a note", ["src/cli.py"], "not-the-current-sha")
+    text = build_payload([changed], exe="/x/cld", total=1, root=tmp_path)
+    assert "possibly stale" in text
+
+def test_payload_without_a_root_makes_no_staleness_claim(tmp_path):
+    from ccloadout.recall import build_payload
+    changed = _anchored("changed", "a note", ["src/cli.py"], "sha")
+    assert "possibly stale" not in build_payload([changed], exe="/x/cld", total=1)

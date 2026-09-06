@@ -1124,3 +1124,14 @@ def test_recall_on_an_empty_store_says_so(tmp_path, monkeypatch, capsys):
     monkeypatch.chdir(tmp_path)
     assert cli.main(["recall", "anything"]) == 0
     assert "no memory entries" in capsys.readouterr().out.lower()
+
+def test_recall_marks_an_entry_whose_anchor_is_gone(tmp_path, monkeypatch, capsys):
+    _memory_repo(tmp_path, n=1)
+    (tmp_path / "docs" / "memory" / "m0.md").write_text(
+        "---\nname: m0\ndescription: note about scoping sessions\nmetadata:\n"
+        "  node_type: memory\n  anchors: [src/vanished.py]\n---\nbody of m0\n")
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "root"))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "make_model2vec_embed", lambda name: cli.keyword_embed)
+    cli.main(["recall", "scoping"])
+    assert "anchored code is gone" in capsys.readouterr().out
