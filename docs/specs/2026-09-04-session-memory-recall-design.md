@@ -122,8 +122,15 @@ metadata:
 are deliberately *absent* from the file — they live in a sidecar (§5.5).
 
 Locations, in precedence order: `<repo>/docs/memory/` (git-tracked, the `memory-org` convention
-absorbed), then `<config_root>/projects/<slug>/memory/` (the harness's own directory), then
-`<config_root>/loadout/memory/` for cross-project entries. Where `memory-org` has been applied the
+absorbed), then `<config_root>/projects/<slug>/memory/` (the harness's own directory).
+
+**Cross-project reach is a property, not a place.** An earlier draft put shared entries in
+`<config_root>/loadout/memory/`; that was wrong on two counts. It was unreachable — nothing ever
+wrote there — and it would have made uninstalling this tool strand notes in a directory no other
+tool reads. Instead an entry carries `metadata.scope: global` and stays in whichever canonical store
+it was born in; the reader collects globals from every project's directory. `[memory] scopes`
+selects which halves a session sees, and is the knob that makes this configurable rather than
+absolute. Where `memory-org` has been applied the
 first two are the same files through a symlink, so the reader deduplicates by resolved real path;
 where it has not — the common case, including this repo — they are two distinct stores, and turning
 on `git_tracked` creates a second one rather than linking the first. When two distinct files share a
@@ -377,7 +384,14 @@ than given a goal it does not serve.
 | `cld doctor` store health | no goal — operability | 1 |
 | `cld decision supersede` | G1 (a superseded decision must stop being recalled) | 2 |
 
-**Deferred — not in this contract:** `[[wikilink]]` traversal to co-select linked entries;
+**Link expansion (§5.2.2).** After admission, each admitted entry pulls in the entries it names —
+`metadata.links` or `[[wikilink]]` in its body — when they fit the remaining budget, marked in the
+payload as *linked to X*. Depth is one, and links are followed only from entries admitted on their
+own score: a rejected entry cannot smuggle its neighbours in, and a second hop would fill the budget
+with cousins. It answers the case ranking cannot: two notes that are each incomplete alone.
+
+**Deferred — not in this contract:** deeper link traversal; similarity-derived edges (that is the
+ranking again, under another name);
 read-only ingestion adapters for `.remember/`; export/import; a `cld memory` terminal user interface
 (TUI); symbol-level anchors (§5.6). Each is defensible later; none is required by G1–G3.
 

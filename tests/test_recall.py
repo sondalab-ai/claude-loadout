@@ -237,3 +237,58 @@ def test_an_anchor_outside_the_repository_is_treated_as_missing(tmp_path):
     for escape in ("/etc/passwd", "../../etc/passwd"):
         assert anchor_state(_anchored("a", "d", [escape]), tmp_path) == "missing"
     assert anchor_state(_anchored("a", "d", ["src/cli.py"]), tmp_path) == "unverified"
+
+# --- link expansion: a note pulls in what it points at ------------------------
+
+def _linked(name, desc, links=()):
+    return Entry(id=f"memory:{name}", kind="memory", name=name, description=desc,
+                 path=Path(f"/s/{name}.md"), scope="repo", links=tuple(links))
+
+def test_an_admitted_note_pulls_in_what_it_links_to():
+    from ccloadout.ranker import make_model2vec_embed
+    from ccloadout.recall import assess
+    embed = make_model2vec_embed("minishlab/potion-base-8M")
+    anchor = _linked("skill-scoping", "per-session skill pruning through the settings overlay",
+                     links=["obscure-detail"])
+    linked = _linked("obscure-detail", "the 2.1.238 quirk")          # far below threshold alone
+    verdicts = {v.entry.name: v for v in assess([anchor, linked] + _OFF, _GOAL, embed,
+                                                threshold=0.24, budget_tokens=10_000)}
+    assert verdicts["skill-scoping"].admitted
+    assert verdicts["obscure-detail"].admitted
+    assert "linked" in verdicts["obscure-detail"].reasons
+
+def test_a_link_from_a_rejected_note_pulls_in_nothing():
+    from ccloadout.ranker import make_model2vec_embed
+    from ccloadout.recall import assess
+    embed = make_model2vec_embed("minishlab/potion-base-8M")
+    rejected = _linked("off-topic", "knitting a raglan sleeve", links=["friend"])
+    friend = _linked("friend", "another unrelated note about tides")
+    verdicts = {v.entry.name: v for v in assess([rejected, friend] + _ON, _GOAL, embed,
+                                                threshold=0.24, budget_tokens=10_000)}
+    assert not verdicts["off-topic"].admitted and not verdicts["friend"].admitted
+
+def test_expansion_stops_at_the_budget_and_does_not_recurse():
+    from ccloadout.ranker import make_model2vec_embed
+    from ccloadout.recall import assess
+    embed = make_model2vec_embed("minishlab/potion-base-8M")
+    anchor = _linked("skill-scoping", "per-session skill pruning through the settings overlay",
+                     links=["hop1"])
+    hop1 = _linked("hop1", "first hop, unrelated to the goal", links=["hop2"])
+    hop2 = _linked("hop2", "second hop, further still")
+    verdicts = {v.entry.name: v for v in assess([anchor, hop1, hop2], _GOAL, embed,
+                                                threshold=0.24, budget_tokens=10_000)}
+    assert verdicts["hop1"].admitted                 # one step out
+    assert not verdicts["hop2"].admitted             # never two
+
+def test_the_payload_says_why_a_linked_note_is_there():
+    from ccloadout.ranker import make_model2vec_embed
+    from ccloadout.recall import assess, build_payload
+    embed = make_model2vec_embed("minishlab/potion-base-8M")
+    anchor = _linked("skill-scoping", "per-session skill pruning through the settings overlay",
+                     links=["obscure-detail"])
+    linked = _linked("obscure-detail", "the 2.1.238 quirk")
+    verdicts = assess([anchor, linked], _GOAL, embed, threshold=0.24, budget_tokens=10_000)
+    admitted = [v.entry for v in verdicts if v.admitted]
+    text = build_payload(admitted, exe="/x/cld", total=2,
+                         linked={"memory:obscure-detail": "skill-scoping"})
+    assert "linked to skill-scoping" in text

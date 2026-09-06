@@ -1583,15 +1583,16 @@ def test_unknown_subcommands_still_reach_claude(tmp_path, monkeypatch):
         assert cli.main([*words, "--no-gate"]) == 0
         assert seen["argv"][0] == "claude" and words[0] in seen["argv"]
 
-def test_debt_resolve_reports_a_note_without_a_status_key(tmp_path, monkeypatch, capsys):
+def test_debt_resolve_works_on_a_note_written_by_hand(tmp_path, monkeypatch, capsys):
     _debt_repo(tmp_path)
     mem = tmp_path / "docs" / "memory"; mem.mkdir(parents=True)
     (mem / "handwritten.md").write_text(          # a note someone wrote themselves: no status line
         "---\nname: handwritten\ndescription: a shim\nmetadata:\n  loadout_kind: debt\n---\nbody\n")
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "root"))
     monkeypatch.chdir(tmp_path)
-    assert cli.main(["debt", "resolve", "handwritten"]) == 1
-    assert "could not resolve" in capsys.readouterr().err
+    assert cli.main(["debt", "resolve", "handwritten"]) == 0     # the key is added, not demanded
+    assert "status: resolved" in (mem / "handwritten.md").read_text()
+    assert "a shim" in (mem / "handwritten.md").read_text()      # nothing else was touched
 
 def test_recall_limit_rejects_a_non_number(tmp_path, monkeypatch, capsys):
     _memory_repo(tmp_path, n=1)
@@ -1625,3 +1626,49 @@ def test_a_hostile_note_cannot_close_the_injected_frame(tmp_path, monkeypatch):
     payload = seen["payload"]
     assert payload.count("</claude-loadout-memory>") == 1
     assert payload.rstrip().endswith("</claude-loadout-memory>")
+
+def test_a_global_note_written_here_reaches_another_repository(tmp_path, monkeypatch, capsys):
+    from ccloadout.memory import harness_slug
+    root = _memory_repo(tmp_path, n=0)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.chdir(tmp_path)
+    assert cli.main(["memory", "add", "--global", "--name", "lever",
+                     "how the settings overlay merges hooks"]) == 0
+    written = root / "projects" / harness_slug(tmp_path) / "memory" / "lever.md"
+    assert written.exists() and "scope: global" in written.read_text()
+    assert not (root / "loadout" / "memory").exists()      # no folder of ours holds a note
+    elsewhere = tmp_path / "elsewhere"; elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    cli.main(["recall"])
+    assert "lever" in capsys.readouterr().out
+
+def test_scope_can_be_changed_after_the_fact(tmp_path, monkeypatch, capsys):
+    _memory_repo(tmp_path, n=1)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "root"))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.chdir(tmp_path)
+    assert cli.main(["memory", "scope", "m0", "global"]) == 0
+    assert "scope: global" in (tmp_path / "docs" / "memory" / "m0.md").read_text()
+    assert cli.main(["memory", "scope", "m0", "sideways"]) == 2
+    assert cli.main(["memory", "scope", "nope", "global"]) == 1
+
+def test_scopes_config_can_shut_out_other_projects(tmp_path, monkeypatch, capsys):
+    from ccloadout.memory import harness_slug
+    root = _memory_repo(tmp_path, n=1)
+    other = root / "projects" / harness_slug(tmp_path / "other") / "memory"
+    other.mkdir(parents=True)
+    (other / "g.md").write_text("---\nname: g\ndescription: a cross-project note\n"
+                                "metadata:\n  scope: global\n---\nbody\n")
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.chdir(tmp_path)
+    cli.main(["recall"])
+    assert "g" in capsys.readouterr().out
+    (root / "loadout" / "config.toml").write_text(
+        "[memory]\nenabled = true\nthreshold = 0.0\nscopes = [\"repo\"]\n")
+    monkeypatch.setattr(cli, "make_model2vec_embed", lambda name: cli.keyword_embed)
+    seen = {}
+    _capture_launch(monkeypatch, seen)
+    cli.main(["--no-gate"])
+    assert "a cross-project note" not in seen.get("payload", "")

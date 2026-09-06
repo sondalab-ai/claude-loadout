@@ -10,6 +10,10 @@ def _entry(name: str, desc: str, **meta) -> str:
     block = "".join("  %s: %s\n" % kv for kv in (meta or {"node_type": "memory"}).items())
     return "---\nname: %s\ndescription: %s\nmetadata:\n%s---\nbody\n" % (name, desc, block)
 
+def _global_entry(name: str, desc: str) -> str:
+    return (f"---\nname: {name}\ndescription: {desc}\nmetadata:\n  node_type: memory\n"
+            "  scope: global\n---\nbody\n")
+
 def _decision(did: str, title: str, status: str = "active") -> str:
     return (f"---\nid: {did}\ndate: 2026-06-08T11:01+02:00\nstatus: {status}\n"
             f"tags: [a, b]\n---\n\n# {title}\n\n## Context\nwhy\n")
@@ -18,12 +22,13 @@ def test_reads_all_memory_locations_with_scope(tmp_path: Path):
     repo, root = tmp_path / "repo", tmp_path / "root"
     _write(repo / "docs" / "memory" / "a.md", _entry("a", "repo tracked memory"))
     _write(root / "projects" / slug_for(repo) / "memory" / "b.md", _entry("b", "harness memory"))
-    _write(root / "loadout" / "memory" / "c.md", _entry("c", "cross project memory"))
+    _write(root / "projects" / slug_for(repo) / "memory" / "c.md",
+           _global_entry("c", "cross project memory"))
     store = read_store(repo, root, home=tmp_path / "home")
     by_name = {e.name: e for e in store.entries}
     assert set(by_name) == {"a", "b", "c"}
     assert by_name["a"].scope == "repo" and by_name["b"].scope == "repo"
-    assert by_name["c"].scope == "global"
+    assert by_name["c"].scope == "global"           # the note says so, not the folder
     assert by_name["a"].kind == "memory"
     assert by_name["a"].id == "memory:a"
 
@@ -49,11 +54,11 @@ def test_symlinked_location_is_deduplicated_by_realpath(tmp_path: Path):
 def test_same_slug_in_two_stores_shadows_the_later_one(tmp_path: Path):
     repo, root = tmp_path / "repo", tmp_path / "root"
     _write(repo / "docs" / "memory" / "a.md", _entry("dup", "wins — earlier location"))
-    _write(root / "loadout" / "memory" / "a.md", _entry("dup", "loses"))
+    _write(root / "projects" / slug_for(repo) / "memory" / "a.md", _entry("dup", "loses"))
     store = read_store(repo, root, home=tmp_path / "h")
     assert [e.description for e in store.entries] == ["wins — earlier location"]
     (kept, dropped), = store.shadowed
-    assert kept.scope == "repo" and dropped.scope == "global"
+    assert kept.path.parent == repo / "docs" / "memory"
 
 def test_metadata_block_populates_lifecycle_fields(tmp_path: Path):
     repo, root = tmp_path / "repo", tmp_path / "root"
@@ -202,3 +207,70 @@ def test_deleting_an_entry_removes_its_index_line(tmp_path: Path):
     assert not path.exists()
     text = (mem / "MEMORY.md").read_text()
     assert "doomed" not in text and "- [Keep](keep.md) — hook" in text
+
+# --- scope: a property of the note, not a folder of ours ----------------------
+
+def test_a_global_note_reaches_another_project(tmp_path: Path):
+    from ccloadout.memory import harness_slug
+    here, there, root = tmp_path / "here", tmp_path / "there", tmp_path / "root"
+    _write(root / "projects" / harness_slug(there) / "memory" / "g.md",
+           _global_entry("harness-lever", "how the settings overlay merges hooks"))
+    _write(root / "projects" / harness_slug(there) / "memory" / "local.md",
+           _entry("their-local", "something only that repo cares about"))
+    store = read_store(here, root, home=tmp_path / "h")
+    assert [e.name for e in store.entries] == ["harness-lever"]
+    assert store.entries[0].scope == "global"
+
+def test_scope_is_read_from_the_note_not_from_its_folder(tmp_path: Path):
+    repo, root = tmp_path / "repo", tmp_path / "root"
+    _write(repo / "docs" / "memory" / "g.md", _global_entry("g", "cross-project"))
+    _write(repo / "docs" / "memory" / "r.md", _entry("r", "repo-local"))
+    scopes = {e.name: e.scope for e in read_store(repo, root, home=tmp_path / "h").entries}
+    assert scopes == {"g": "global", "r": "repo"}
+
+def test_the_scopes_filter_excludes_what_it_names(tmp_path: Path):
+    repo, root = tmp_path / "repo", tmp_path / "root"
+    _write(repo / "docs" / "memory" / "g.md", _global_entry("g", "cross-project"))
+    _write(repo / "docs" / "memory" / "r.md", _entry("r", "repo-local"))
+    only_repo = read_store(repo, root, home=tmp_path / "h", scopes=("repo",))
+    only_global = read_store(repo, root, home=tmp_path / "h", scopes=("global",))
+    assert [e.name for e in only_repo.entries] == ["r"]
+    assert [e.name for e in only_global.entries] == ["g"]
+
+def test_a_global_note_is_written_into_the_canonical_store(tmp_path: Path):
+    from ccloadout.memory import harness_slug, write_entry
+    repo, root = tmp_path / "repo", tmp_path / "root"; repo.mkdir()
+    path = write_entry(root, repo, name="lever", description="d", kind="memory",
+                       git_tracked=False, scope="global")
+    assert path == root / "projects" / harness_slug(repo) / "memory" / "lever.md"
+    assert "scope: global" in path.read_text()      # the note says so; no folder of ours exists
+    assert not (root / "loadout").exists()
+
+def test_links_are_read_from_frontmatter_and_from_the_body(tmp_path: Path):
+    repo, root = tmp_path / "repo", tmp_path / "root"
+    _write(repo / "docs" / "memory" / "a.md",
+           "---\nname: a\ndescription: d\nmetadata:\n  node_type: memory\n"
+           "  links: [b, c]\n---\nsee also [[d]] and [[b]]\n")
+    e, = read_store(repo, root, home=tmp_path / "h").entries
+    assert e.links == ("b", "c", "d")               # deduplicated, frontmatter first
+
+def test_setting_a_key_that_is_absent_inserts_it(tmp_path: Path):
+    from ccloadout.memory import set_meta
+    path = _write(tmp_path / "n.md",
+                  "---\nname: n\ndescription: d\nmetadata:\n  node_type: memory\n---\nbody\n")
+    set_meta(path, "scope", "global")
+    text = path.read_text()
+    assert "  scope: global" in text and "node_type: memory" in text and text.endswith("body\n")
+
+def test_setting_a_key_with_no_metadata_block_creates_one(tmp_path: Path):
+    from ccloadout.memory import set_meta
+    path = _write(tmp_path / "n.md", "---\nname: n\ndescription: d\n---\nbody\n")
+    set_meta(path, "scope", "global")
+    assert "metadata:\n  scope: global" in path.read_text()
+
+def test_setting_a_key_on_a_file_without_frontmatter_is_refused(tmp_path: Path):
+    from ccloadout.memory import NoStatus, set_meta
+    import pytest
+    path = _write(tmp_path / "n.md", "just a body\n")
+    with pytest.raises(NoStatus):
+        set_meta(path, "scope", "global")

@@ -80,15 +80,18 @@ def frame_safe(text: str) -> str:
     return one_line(text).replace("</", "< /")
 
 def build_payload(entries: Sequence[Entry], exe: str, total: int, root: Path | None = None,
-                  states: Mapping[str, str] | None = None) -> str:
+                  states: Mapping[str, str] | None = None,
+                  linked: Mapping[str, str] | None = None) -> str:
     if not entries:
         return ""                                  # nothing selected: inject nothing at all
     def line(entry: Entry) -> str:
         state = states.get(entry.id) if states is not None else (
             anchor_state(entry, root) if root is not None else "none")
         flag = " (possibly stale — the code it points at changed)" if state == "changed" else ""
+        via = (linked or {}).get(entry.id)
+        note = f" (linked to {frame_safe(via)})" if via else ""
         return (f"- [{entry.kind} · {entry.scope}] {frame_safe(entry.name)} — "
-                f"{frame_safe(entry.description)}{flag}\n")
+                f"{frame_safe(entry.description)}{flag}{note}\n")
     return _HEADER.format(shown=len(entries), total=total, exe=exe) \
         + "".join(line(e) for e in entries) + _FOOTER
 
@@ -155,6 +158,8 @@ def assess(entries: Iterable[Entry], goal: str,
             continue
         chosen = trial
         verdicts.append(Verdict(entry, score, base, reasons, True))
+    verdicts, chosen = _expand_links(verdicts, chosen, live, exe, total, root, states,
+                                     budget_tokens)
     verdicts += [Verdict(e, 0.0, 0.0, ("already-in-context",), False)
                  for e in all_entries if e.status != "resolved" and e.id in resident]
     verdicts += [Verdict(e, 0.0, 0.0, ("resolved",), False)
@@ -174,6 +179,46 @@ def select(entries: Iterable[Entry], goal: str,
                                     usage, flags, resident, promote_after, decay_days,
                                     decay_factor, today)
             if v.admitted]
+
+def _expand_links(verdicts: list[Verdict], chosen: list[Entry], live: list[Entry], exe: str,
+                  total: int, root: Path | None, states: Mapping[str, str],
+                  budget_tokens: int) -> tuple[list[Verdict], list[Entry]]:
+    """Pull in what an admitted note points at, one step out and no further.
+
+    A note whose own description scores badly can still be the other half of one that scored well
+    — the pair `[[wikilink]]` each other precisely because neither is complete alone. Depth stays
+    at one: past that, relevance evaporates and the budget fills with cousins. Links are followed
+    only from *admitted* notes, so a rejected note cannot smuggle its neighbours in.
+    """
+    by_name = {e.name: e for e in live}
+    admitted = {v.entry.id for v in verdicts if v.admitted}
+    wanted: dict[str, str] = {}                     # linked entry id -> the note that named it
+    for verdict in verdicts:
+        if not verdict.admitted:
+            continue
+        for name in verdict.entry.links:
+            target = by_name.get(name)
+            if target is not None and target.id not in admitted:
+                wanted.setdefault(target.id, verdict.entry.name)
+    if not wanted:
+        return verdicts, chosen
+    out: list[Verdict] = []
+    for verdict in verdicts:
+        via = wanted.get(verdict.entry.id)
+        if verdict.admitted or via is None:
+            out.append(verdict)
+            continue
+        trial = chosen + [verdict.entry]
+        if estimate_tokens(build_payload(trial, exe=exe, total=total, root=root,
+                                         states=states)) > budget_tokens:
+            out.append(Verdict(verdict.entry, verdict.score, verdict.base,
+                               verdict.reasons + ("linked", "over-budget"), False))
+            continue
+        chosen = trial
+        out.append(Verdict(verdict.entry, verdict.score, verdict.base,
+                           tuple(r for r in verdict.reasons if r != "below-threshold") + ("linked",),
+                           True))
+    return out, chosen
 
 def _adjust(entry: Entry, score: float, states: Mapping[str, str], usage: Mapping[str, Usage],
             flags: Mapping[str, Flag], decay_days: int, decay_factor: float,

@@ -27,6 +27,7 @@ class MemoryConfig:
     prompt_recall_max: int = 2   # entries the prompt hook may add per turn
     prompt_timeout_ms: int = 300 # the hook's own wall-clock ceiling; it exits 0 when it fires
     debt_patterns: tuple[str, ...] = ("TODO(loadout)",)   # markers a PostToolUse hook watches for
+    scopes: tuple[str, ...] = ("repo", "global")   # which notes a session may see
 
 @dataclass(frozen=True)
 class Config:
@@ -122,7 +123,7 @@ def _memory_fields(table: dict) -> dict:
         if field is None:
             continue
         try:
-            if key == "debt_patterns":
+            if key in ("debt_patterns", "scopes"):
                 out[key] = tuple(str(x) for x in value)
             elif field.type == "bool":
                 out[key] = bool(value)

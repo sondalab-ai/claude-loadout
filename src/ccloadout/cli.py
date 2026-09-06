@@ -10,7 +10,8 @@ from ccloadout.goal import detect_goal, write_goal_cache
 from ccloadout.ranker import Ranker, make_model2vec_embed, keyword_embed, bundled_model_path, resolve_model_source
 from ccloadout.compose import compose
 from ccloadout.memory import (EntryExists, NoStatus, forget_entry, indexed_files,
-                              read_all, read_store, set_status, slug_for, write_entry)
+                              read_all, read_store, set_meta, set_status, slug_for,
+                              write_entry)
 from ccloadout.flags import clear_flag, load_flags, set_flag
 from ccloadout.usage import load_usage, record_delivery
 from ccloadout.candidates import drop_rows, load_candidates, record_session
@@ -192,19 +193,25 @@ def _recall_payload(cfg, cwd: Path, goal: str, embed):
     # nothing at all, since an instruction to query an empty store costs tokens for no answer.
     if not cfg.memory.enabled:
         return None, None
-    store = read_store(cwd, cfg.config_root)
+    store = read_store(cwd, cfg.config_root, scopes=cfg.memory.scopes)
     total = len(store.entries)
     if total < cfg.memory.min_entries:
         return None, _Memory(0, total, 0)
     exe = recall_command()
     resident = _resident_ids(cfg, cwd, store.entries)
-    chosen = select(store.entries, goal, embed, cfg.memory.threshold,
-                    cfg.memory.budget_tokens, exe=exe, root=cwd,
-                    usage=load_usage(cfg.config_root, cwd),
-                    flags=load_flags(cfg.config_root, cwd), resident=resident,
-                    promote_after=cfg.memory.promote_after,
-                    decay_days=cfg.memory.decay_days, decay_factor=cfg.memory.decay_factor)
-    payload = build_payload(chosen, exe=exe, total=total, root=cwd)  # same count assess estimated with
+    verdicts = assess(store.entries, goal, embed, cfg.memory.threshold,
+                      cfg.memory.budget_tokens, exe=exe, root=cwd,
+                      usage=load_usage(cfg.config_root, cwd),
+                      flags=load_flags(cfg.config_root, cwd), resident=resident,
+                      promote_after=cfg.memory.promote_after,
+                      decay_days=cfg.memory.decay_days, decay_factor=cfg.memory.decay_factor)
+    chosen = [v.entry for v in verdicts if v.admitted]
+    by_name = {e.name: e for e in store.entries}    # who pulled a linked note in, for the payload
+    linked = {v.entry.id: next((a.entry.name for a in verdicts
+                                if a.admitted and v.entry.name in a.entry.links), "")
+              for v in verdicts if v.admitted and "linked" in v.reasons}
+    payload = build_payload(chosen, exe=exe, total=total, root=cwd,
+                            linked={k: v for k, v in linked.items() if v})
     return payload, _Memory(len(chosen), total, estimate_tokens(payload), len(resident),
                             tuple(e.id for e in chosen), cfg.config_root)
 
@@ -338,7 +345,8 @@ def _pop_flag(args: list[str], flag: str) -> tuple[list[str], list[str]]:
 def _cmd_write_entry(cwd: Path, args: list[str], kind: str, override: Path | None) -> int:
     args, names = _pop_flag(list(args), "--name")
     args, anchors = _pop_flag(args, "--anchor")
-    description = " ".join(args).strip()
+    scope = "global" if "--global" in args else "repo"
+    description = " ".join(a for a in args if a != "--global").strip()
     if not description:
         _warn(f"{kind} add needs a description")
         return 2
@@ -346,11 +354,31 @@ def _cmd_write_entry(cwd: Path, args: list[str], kind: str, override: Path | Non
     try:
         path = write_entry(cfg.config_root, cwd, name=names[0] if names else _slugify(description),
                            description=description, kind=kind,
-                           git_tracked=cfg.memory.git_tracked, anchors=anchors)
+                           git_tracked=cfg.memory.git_tracked, anchors=anchors, scope=scope)
     except EntryExists as exc:
         _warn(f"an entry already exists at {exc}; pick another --name")
         return 1
-    print(f"{_paint('wrote', 'green')} {path}")
+    where = " (every project)" if scope == "global" else ""
+    print(f"{_paint('wrote', 'green')} {path}{_paint(where, 'dim')}")
+    return 0
+
+def _cmd_scope(cwd: Path, args: list[str], override: Path | None = None) -> int:
+    if len(args) < 2 or args[1] not in ("repo", "global"):
+        _warn("memory scope needs a name and either 'repo' or 'global'")
+        return 2
+    cfg = load_config(cwd=cwd, config_root_override=override)
+    match = next((e for e in read_store(cwd, cfg.config_root).entries
+                  if e.name == args[0] or e.name.startswith(args[0])), None)
+    if match is None:
+        _warn(f"no entry named {args[0]!r}")
+        return 1
+    try:
+        set_meta(match.path, "scope", args[1])
+    except (NoStatus, OSError) as exc:
+        _warn(f"could not change the scope of {match.name}: {exc}")
+        return 1
+    reach = "every project" if args[1] == "global" else "this repository only"
+    print(f"{_paint(args[1], 'green')} — {match.name} now reaches {reach}")
     return 0
 
 def _cmd_debt(cwd: Path, args: list[str], override: Path | None = None) -> int:
@@ -407,7 +435,7 @@ def _session_hooks(cfg, cwd: Path, mem) -> tuple[dict | None, dict | None]:
 
 _AUDIT_HINT = "↑/↓ move · space keep/drop · a all/none · enter apply · q cancel"
 _LIST_SEP = "\x1f"                                  # env-passed lists: see debt_hook.LIST_SEP
-_MEMORY_ACTIONS = frozenset({"enable", "disable", "add", "audit", "flag", "consolidate"})
+_MEMORY_ACTIONS = frozenset({"enable", "disable", "add", "audit", "flag", "consolidate", "scope"})
 _DEBT_ACTIONS = frozenset({"add", "list", "resolve"})
 _DECISION_ACTIONS = frozenset({"new", "list", "show", "supersede"})
 
@@ -1589,7 +1617,8 @@ def _print_help() -> None:
         f"  {cmd('cld [claude-args...]')}   Launch claude with a goal-scoped tool set\n"
         f"  {cmd('cld --explain')}          Print the scoping plan, then exit (no launch)\n"
         f"  {cmd('cld recall <query>')}    Search the memory store and print matching entries in full\n"
-        f"  {cmd('cld memory add <text>')} Record a note for this repo (--name slug, --anchor path)\n"
+        f"  {cmd('cld memory add <text>')} Record a note (--global for every repo, --anchor path)\n"
+        f"  {cmd('cld memory scope <name> repo|global')}  Change how far an existing note reaches\n"
         f"  {cmd('cld memory consolidate')}  Review recorded sessions and promote them to memories\n"
         f"  {cmd('cld memory audit')}     Review the store and delete what no longer earns its place\n"
         f"                                (--context '<goal>' to see what it would recall and why,\n"
@@ -1772,6 +1801,8 @@ def _run(argv: list[str] | None = None) -> int:
         if not sub:                                 # a bare `memory` is the entry point, not an error
             return _print_memory_status(cwd, load_config(
                 cwd=cwd, config_root_override=_resolve_config_root(os.environ, [])))
+        if sub == "scope":
+            return _cmd_scope(cwd, argv[2:], _resolve_config_root(os.environ, []))
         if sub in ("enable", "disable"):
             return _cmd_memory_toggle(cwd, sub == "enable", _resolve_config_root(os.environ, []))
         if sub == "audit":

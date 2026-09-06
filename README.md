@@ -298,8 +298,39 @@ It reads stores that already exist rather than inventing another one:
 
 - `./docs/memory/` in the repository (git-tracked — this is where new notes go by default)
 - `$CLAUDE_CONFIG_DIR/projects/<slug>/memory/` — Claude Code's own memory directory
-- `$CLAUDE_CONFIG_DIR/loadout/memory/` for notes that apply across repositories
 - your `debug-decisions` corpus, if you keep one
+
+**No note is ever written to a folder of ours.** Uninstall `claude-loadout` and every note stays
+exactly where it is, in a directory Claude Code already reads. There is nothing to migrate.
+
+### Notes that follow you between projects
+
+A note about a tool, a harness quirk or the way you like to work is not about the repository you
+happened to discover it in. Mark it global and every session sees it:
+
+```sh
+cld memory add --global "the settings overlay merges hooks, it does not replace them"
+cld memory scope some-old-note global        # promote one you already have
+```
+
+Global is a property of the note — `scope: global` in its frontmatter — not a special location, so
+the file still lives in a canonical store. `[memory] scopes = ["repo"]` turns the cross-project half
+off entirely.
+
+### Notes that point at each other
+
+Two notes often only make sense together: a decision and the constraint behind it, a bug and the
+lever that caused it. Link them, in the frontmatter or with `[[wikilinks]]` in the body, and a note
+that gets recalled brings what it points at:
+
+```
+- [memory · repo] skill-scoping-mechanism — how loadout prunes user skills…
+- [memory · repo] overlay-merge-quirk — hooks merge, they do not replace (linked to skill-scoping-mechanism)
+```
+
+One step out, never two: past that, relevance evaporates and the budget fills with cousins. Links
+are followed only from notes that were admitted on their own merit, so a rejected note cannot
+smuggle its neighbours in.
 
 ```toml
 # .loadout/config.toml
@@ -308,6 +339,7 @@ enabled = true
 budget_tokens = 800     # ceiling on what recall may inject
 threshold = 0.24        # relevance cutoff, same scale as tool ranking
 git_tracked = true      # new notes land in ./docs/memory and travel with the repo
+scopes = ["repo", "global"]   # drop "global" to see only this repository's notes
 promote_after = 3       # deliveries after which a note is pinned into recall
 decay_days = 90         # untouched for this long, a note is demoted (never deleted)
 prompt_recall = false   # also re-rank on every prompt (see below)

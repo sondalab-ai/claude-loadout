@@ -10,6 +10,7 @@ _INDEX_NAMES = {"MEMORY.md", "INDEX.md", "README.md"}
 _HEADING = re.compile(r"^#\s+(.+)$", re.MULTILINE)
 _INDEX_LINE = re.compile(r"^- \[[^\]]*\]\(([^)]+)\)")   # `- [Title](file.md) — hook`
 _INDEX_FILE = "MEMORY.md"
+_WIKILINK = re.compile(r"\[\[([^\]]+)\]\]")
 _UNSAFE_NAME = re.compile(r"[^A-Za-z0-9._-]+")
 _CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
 
@@ -37,6 +38,7 @@ class Entry:
     status: str | None = None
     anchors: tuple[str, ...] = ()
     content_sha: str | None = None
+    links: tuple[str, ...] = ()     # names of related notes, for the expansion pass in `recall`
 
 @dataclass(frozen=True)
 class Store:
@@ -77,11 +79,18 @@ def _memory_entry(path: Path, scope: str) -> Entry | None:
     meta = fm.get("metadata") if isinstance(fm.get("metadata"), dict) else {}
     kind = _str(meta.get("loadout_kind")) or "memory"
     anchors = meta.get("anchors")
+    links = meta.get("links") if isinstance(meta.get("links"), list) else []
+    body = raw.split("\n---", 1)[-1] if raw.startswith("---") else raw
+    links = list(dict.fromkeys([str(l) for l in links] + _WIKILINK.findall(body)))
     return Entry(id=f"{kind}:{name}", kind=kind, name=name,
-                 description=_str(fm.get("description")) or "", path=path, scope=scope,
+                 description=_str(fm.get("description")) or "", path=path,
+                 # Scope is a property of the note, never of the folder it sits in: that is what
+                 # lets a cross-project note live in a canonical store instead of one of ours.
+                 scope=_str(meta.get("scope")) or scope,
                  status=_str(meta.get("status")),
                  anchors=tuple(anchors) if isinstance(anchors, list) else (),
-                 content_sha=_str(meta.get("content_sha")))
+                 content_sha=_str(meta.get("content_sha")),
+                 links=tuple(links))
 
 def _decision_entry(path: Path, project: str) -> Entry | None:
     raw = _text(path)
@@ -106,20 +115,35 @@ def _locations(cwd: Path, config_root: Path, home: Path) -> list[tuple[Path, str
     # even when CLAUDE_CONFIG_DIR points elsewhere, or none of an existing corpus is found.
     out = [(cwd / "docs" / "memory", "repo", "memory")]
     out += [(config_root / "projects" / s / "memory", "repo", "memory") for s in _slugs(cwd)]
-    out.append((config_root / "loadout" / "memory", "global", "memory"))
     out += [(root / "debug-decisions" / s, "repo", "decision")
             for root in (config_root, home / ".claude") for s in _slugs(cwd)]
     return out
 
-def read_store(cwd: Path, config_root: Path, home: Path | None = None) -> Store:
+def _global_dirs(config_root: Path) -> list[Path]:
+    # Every project's own memory directory. A note marked `scope: global` in any of them belongs
+    # to every session; the rest of that project's notes stay where they are.
+    try:
+        return sorted(p / "memory" for p in (config_root / "projects").iterdir() if p.is_dir())
+    except OSError:
+        return []
+
+def read_store(cwd: Path, config_root: Path, home: Path | None = None,
+               scopes: tuple[str, ...] = ("repo", "global")) -> Store:
     home = Path.home() if home is None else home
     slug = slug_for(cwd)
     entries: list[Entry] = []
     shadowed: list[tuple[Entry, Entry]] = []
     seen_paths: set[Path] = set()                  # realpath: memory-org symlinks one store onto another
     by_id: dict[str, Entry] = {}
-    for directory, scope, kind in _locations(cwd, config_root, home):
+    # Local stores first (their notes may be either scope), then every other project's store,
+    # from which only notes marked `scope: global` are taken.
+    locations = [(d, s, k, False) for d, s, k in _locations(cwd, config_root, home)]
+    if "global" in scopes:
+        locations += [(d, "repo", "memory", True) for d in _global_dirs(config_root)]
+    for directory, scope, kind, globals_only in locations:
         for entry in _read_dir(directory, scope, kind, slug):
+            if entry.scope not in scopes or (globals_only and entry.scope != "global"):
+                continue
             real = entry.path.resolve()
             if real in seen_paths:                 # memory-org symlinks one store onto another
                 continue
@@ -143,9 +167,11 @@ def store_dir(config_root: Path, repo: Path, git_tracked: bool) -> Path:
 
 def write_entry(config_root: Path, repo: Path, name: str, description: str, kind: str,
                 git_tracked: bool, anchors: list[str] | None = None, body: str = "",
-                today: date | None = None) -> Path:
+                today: date | None = None, scope: str = "repo") -> Path:
     from ccloadout.recall import sha_of                   # local: recall imports memory
-    directory = store_dir(config_root, repo, git_tracked)
+    # A global note still lives in a canonical store — the harness's own project directory — so
+    # uninstalling this tool strands nothing and needs no migration.
+    directory = store_dir(config_root, repo, git_tracked and scope != "global")
     directory.mkdir(parents=True, exist_ok=True)
     name, description = safe_name(name), one_line(description)
     path = directory / f"{name}.md"
@@ -156,7 +182,7 @@ def write_entry(config_root: Path, repo: Path, name: str, description: str, kind
     anchors = anchors or []
     meta = [f"  node_type: memory",
             f"  loadout_kind: {kind}",
-            f"  scope: repo",
+            f"  scope: {scope}",
             f"  created: {(today or date.today()).isoformat()}"]
     anchors = [one_line(a) for a in anchors if one_line(a)]
     if anchors:
@@ -170,9 +196,12 @@ def write_entry(config_root: Path, repo: Path, name: str, description: str, kind
     return path
 
 class NoStatus(Exception):
-    """The file carries no `status:` key in its frontmatter, so there is nothing to set."""
+    """The file carries no such key in its frontmatter, so there is nothing to set."""
 
 def set_status(path: Path, status: str) -> None:
+    set_meta(path, "status", status)
+
+def set_meta(path: Path, key: str, value: str) -> None:
     # Rewrites exactly one line and leaves every other byte alone: keepends preserves CRLF and the
     # unicode separators `splitlines()` would otherwise normalise, and the write is atomic because
     # this touches the user's own notes, which may be git-tracked.
@@ -180,16 +209,29 @@ def set_status(path: Path, status: str) -> None:
     lines = raw.splitlines(keepends=True)
     end = next((i for i, ln in enumerate(lines[1:], 1) if ln.strip() == "---"), len(lines))
     for i, line in enumerate(lines[:end]):          # frontmatter only; a body line is not a key
-        if line.strip().startswith("status:"):
+        if line.strip().startswith(f"{key}:"):
             indent = line[:len(line) - len(line.lstrip())]
             newline = line[len(line.rstrip("\r\n")):]
-            lines[i] = f"{indent}status: {status}{newline or chr(10)}"
+            lines[i] = f"{indent}{key}: {value}{newline or chr(10)}"
             fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".entry-", suffix=".md")
             with os.fdopen(fd, "w", newline="") as fh:
                 fh.write("".join(lines))
             os.replace(tmp, path)
             return
-    raise NoStatus(f"{path} has no status field to set")
+    # The key is absent: notes written by hand, or by the harness, carry no `scope:` or `status:`.
+    # Insert it into the metadata block rather than refusing — refusing would mean a note you did
+    # not create with this tool could never be promoted or resolved.
+    meta_at = next((i for i, ln in enumerate(lines[:end]) if ln.strip() == "metadata:"), None)
+    if meta_at is None:
+        if not lines or lines[0].strip() != "---":
+            raise NoStatus(f"{path} has no frontmatter to add {key} to")
+        lines.insert(1, "metadata:\n")
+        meta_at = 1
+    lines.insert(meta_at + 1, f"  {key}: {value}\n")
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".entry-", suffix=".md")
+    with os.fdopen(fd, "w", newline="") as fh:
+        fh.write("".join(lines))
+    os.replace(tmp, path)
 
 def read_all(config_root: Path, home: Path | None = None) -> dict[str, tuple[Entry, ...]]:
     # Every project's store under this profile, for auditing across repositories — memories
@@ -208,9 +250,6 @@ def read_all(config_root: Path, home: Path | None = None) -> dict[str, tuple[Ent
             entries = _read_dir(directory, "repo", kind, slug_dir.name)
             if entries:
                 out[slug_dir.name] = out.get(slug_dir.name, ()) + entries
-    globals_ = _read_dir(config_root / "loadout" / "memory", "global", "memory", "")
-    if globals_:
-        out["(global)"] = globals_
     return out
 
 def _read_dir(directory: Path, scope: str, kind: str, project: str) -> tuple[Entry, ...]:
