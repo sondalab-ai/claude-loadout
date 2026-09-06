@@ -343,6 +343,7 @@ scopes = ["repo", "global"]   # drop "global" to see only this repository's note
 promote_after = 3       # deliveries after which a note is pinned into recall
 decay_days = 90         # untouched for this long, a note is demoted (never deleted)
 prompt_recall = false   # also re-rank on every prompt (see below)
+stop_prompt = false     # at session end, ask the session to record what it decided
 ```
 
 ### It does not duplicate Claude Code's own memory
@@ -464,6 +465,20 @@ median, 56 ms worst** end to end.
 
 It exits successfully on every path, including its own timeout: on `UserPromptSubmit` a failing hook
 does not merely error, it erases what you were typing.
+
+### End-of-session reminder (optional)
+
+`stop_prompt = true` adds a `Stop` hook that, when a session ends, asks it once to record what it
+decided — naming `cld decision new` and `cld memory add`. It speaks only when the transcript shows
+decision signals: plan mode was used, three or more files were edited, a design skill was invoked,
+or the conversation used deliberation words. It writes nothing itself, and a session that already
+registered something is not asked again.
+
+This is the one thing a hook buys here: everything else about a finished session is captured by the
+launcher after it exits, but once the session is gone there is nobody left to say *why* a choice was
+made. It is read independently of `enabled` — the reminder asks you to write, and an empty store is
+where a first note is worth most — and it parses only the tail of the transcript, since every
+injected hook has five seconds.
 
 > **One caution.** Injected notes sit in the highest-trust position a session has. The block says so
 > — it is labelled untrusted reference data — because with `git_tracked = true` a note can reach you

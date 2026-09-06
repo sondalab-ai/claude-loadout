@@ -27,6 +27,7 @@ class MemoryConfig:
     prompt_recall_max: int = 2   # entries the prompt hook may add per turn
     prompt_timeout_ms: int = 300 # the hook's own wall-clock ceiling; it exits 0 when it fires
     debt_patterns: tuple[str, ...] = ("TODO(loadout)",)   # markers a PostToolUse hook watches for
+    stop_prompt: bool = False    # at session end, ask the session to record what it decided
     scopes: tuple[str, ...] = ("repo", "global")   # which notes a session may see
 
 @dataclass(frozen=True)
