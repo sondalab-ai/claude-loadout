@@ -28,15 +28,19 @@ class Ranker:
     def __init__(self, embed: Callable[[list[str]], np.ndarray]):
         self._embed = embed
 
+    def score(self, goal: str, items: list[Item]) -> list[tuple[Item, float]]:
+        # Item order is preserved; callers that need rank order sort on the score themselves.
+        if not items:
+            return []
+        vecs = self._embed([goal] + [f"{i.name}. {i.description}" for i in items])
+        return [(item, float(s)) for item, s in zip(items, _cosine(vecs[0], vecs[1:]))]
+
     def rank(self, goal: str, items: list[Item], threshold: float,
              always_keep: tuple[str, ...]) -> Selection:
         if not items:
             return Selection(kept=(), dropped=())
-        vecs = self._embed([goal] + [f"{i.name}. {i.description}" for i in items])
-        goal_vec, item_vecs = vecs[0], vecs[1:]
-        scores = _cosine(goal_vec, item_vecs)
         kept, dropped = [], []
-        for item, score in zip(items, scores):
+        for item, score in self.score(goal, items):
             forced = any(fnmatch(item.id, pat) for pat in always_keep)
             if forced or score >= threshold:
                 kept.append(item)

@@ -198,6 +198,13 @@ self-reference it introduces.
    not raise: both spaces are 256-dimensional, so `_cosine` returns plausible noise and the failure
    is invisible in review and in tests. One embedder per index, recorded in the index header and
    checked on read.
+
+   > **Measured during Slice 1, and it gates Slice 3.** `keyword_embed` does not rank memories
+   > usably: on a fixture of 3 on-topic and 6 off-topic entries it puts an off-topic entry above two
+   > on-topic ones, while `potion-base-8M` separates them cleanly (0.32–0.48 against ≤0.17). Both
+   > results are pinned by tests. So T1.5 cannot have both requirement 2 and useful ranking as
+   > written: either it holds a warm process that keeps the real model loaded, or it accepts
+   > keyword-grade recall, or it is dropped. That choice belongs to Slice 3 and is not made here.
 3. A hard wall-clock timeout (default 300 ms), enforced inside the hook.
 4. `exit 0` on **every** path — timeout, missing index, import error, corrupt store. A recall miss
    is invisible; a non-zero exit destroys the user's typed prompt (lever G).
@@ -366,11 +373,11 @@ cld doctor                      # extended: store health, budget use, stale entr
 [memory]
 enabled = false          # opt-in: the existing product is unchanged for users who skip this
 budget_tokens = 800      # cap on the T1 resident index
-threshold = 0.24         # a separate knob, not an override of the capability threshold.
-                         # It starts at the ranker default (config.py:8) but that value was
-                         # calibrated on skill/plugin description text; one-line memory
-                         # descriptions score differently and it is expected to be re-centered
-                         # once Slice 1 has real keep-rate data.
+threshold = 0.24         # a separate knob, not an override of the capability threshold. It starts
+                         # at the ranker default (config.py:8), which was calibrated on
+                         # skill/plugin descriptions. Measured on memory-shaped fixtures it still
+                         # separates: on-topic 0.32-0.48, off-topic <= 0.17, so 0.24 admits the
+                         # former and rejects the latter. Re-centre if real stores disagree.
 scopes = ["repo", "global"]   # "repo" covers BOTH repo-local locations of §5.1 (docs/memory and
                               # <config_root>/projects/<slug>/memory); "global" is
                               # <config_root>/loadout/memory
