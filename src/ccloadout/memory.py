@@ -8,6 +8,8 @@ from ccloadout.inventory import _frontmatter
 # Index files live beside entries in every store the reader walks; they list entries, they aren't one.
 _INDEX_NAMES = {"MEMORY.md", "INDEX.md", "README.md"}
 _HEADING = re.compile(r"^#\s+(.+)$", re.MULTILINE)
+_INDEX_LINE = re.compile(r"^- \[[^\]]*\]\(([^)]+)\)")   # `- [Title](file.md) — hook`
+_INDEX_FILE = "MEMORY.md"
 
 @dataclass(frozen=True)
 class Entry:
@@ -145,6 +147,7 @@ def write_entry(config_root: Path, repo: Path, name: str, description: str, kind
         meta.append("  status: open")               # only an explicit resolve closes it (spec §11)
     front = "\n".join([f"name: {name}", f"description: {description}", "metadata:", *meta])
     path.write_text(f"---\n{front}\n---\n\n{body}\n" if body else f"---\n{front}\n---\n")
+    _index_add(path, name, description)
     return path
 
 def set_status(path: Path, status: str) -> None:
@@ -193,3 +196,50 @@ def _read_dir(directory: Path, scope: str, kind: str, project: str) -> tuple[Ent
         if entry is not None:
             out.append(entry)
     return tuple(out)
+
+
+def indexed_files(config_root: Path, repo: Path) -> set[Path]:
+    """Files the harness itself already puts in every session, via its MEMORY.md index.
+
+    Verified on Claude Code 2.1.263: the harness injects the index lines and nothing else — an
+    unindexed file reaches no session, and an indexed one contributes its title and hook. Whatever
+    is in here is already resident, so recalling it again would spend the budget twice.
+    """
+    found: set[Path] = set()
+    for slug in _slugs(repo):
+        index = config_root / "projects" / slug / "memory" / _INDEX_FILE
+        try:
+            lines = index.read_text(errors="ignore").splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            m = _INDEX_LINE.match(line.strip())
+            if m:
+                target = (index.parent / m.group(1)).resolve()
+                if target.exists():                 # a line pointing nowhere indexes nothing
+                    found.add(target)
+    return found
+
+def _index_add(path: Path, name: str, description: str) -> None:
+    # Only where an index already exists: inventing one would start injecting entries into every
+    # session, which is the opposite of what this tool is for.
+    index = path.parent / _INDEX_FILE
+    if not index.exists():
+        return
+    line = f"- [{name}]({path.name}) — {description}\n"
+    text = index.read_text()
+    index.write_text(text if line in text else text.rstrip("\n") + "\n" + line)
+
+def _index_remove(path: Path) -> None:
+    index = path.parent / _INDEX_FILE
+    if not index.exists():
+        return
+    kept = [ln for ln in index.read_text().splitlines(keepends=True)
+            if not (lambda m: m and (index.parent / m.group(1)).name == path.name)(
+                _INDEX_LINE.match(ln.strip()))]
+    index.write_text("".join(kept))
+
+def forget_entry(path: Path) -> None:
+    """Delete an entry and the index line that pointed at it, so the harness is left consistent."""
+    path.unlink(missing_ok=True)
+    _index_remove(path)

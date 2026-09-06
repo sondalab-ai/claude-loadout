@@ -151,3 +151,52 @@ def test_resolving_a_debt_entry_rewrites_only_its_status(tmp_path: Path):
     assert e.status == "resolved" and e.description == "a shim"
     assert "the body stays" in path.read_text()
     assert before.count("\n") == path.read_text().count("\n")   # no lines added or lost
+
+# --- the harness's own MEMORY.md index ----------------------------------------
+
+def test_indexed_files_are_recognised(tmp_path: Path):
+    from ccloadout.memory import harness_slug, indexed_files
+    repo, root = tmp_path / "repo", tmp_path / "root"
+    mem = root / "projects" / harness_slug(repo) / "memory"; mem.mkdir(parents=True)
+    (mem / "a.md").write_text(_entry("a", "one"))
+    (mem / "b.md").write_text(_entry("b", "two"))
+    (mem / "MEMORY.md").write_text(
+        "# Memory index\n\n- [A note](a.md) — a hook\n- [missing](gone.md) — stale line\n")
+    found = indexed_files(root, repo)
+    assert (mem / "a.md").resolve() in found
+    assert (mem / "b.md").resolve() not in found        # present on disk, absent from the index
+    assert len(found) == 1                              # a line pointing nowhere indexes nothing
+
+def test_no_index_means_nothing_is_resident(tmp_path: Path):
+    from ccloadout.memory import indexed_files
+    assert indexed_files(tmp_path / "root", tmp_path / "repo") == set()
+
+def test_writing_beside_an_index_adds_its_line(tmp_path: Path):
+    from ccloadout.memory import harness_slug, write_entry
+    repo, root = tmp_path / "repo", tmp_path / "root"
+    mem = root / "projects" / harness_slug(repo) / "memory"; mem.mkdir(parents=True)
+    (mem / "MEMORY.md").write_text("# Memory index\n\n- [Old](old.md) — hook\n")
+    write_entry(root, repo, name="fresh", description="a new note", kind="memory",
+                git_tracked=False)
+    text = (mem / "MEMORY.md").read_text()
+    assert "- [fresh](fresh.md) — a new note" in text
+    assert "- [Old](old.md) — hook" in text             # the existing index is preserved
+
+def test_writing_where_there_is_no_index_creates_none(tmp_path: Path):
+    from ccloadout.memory import harness_slug, write_entry
+    repo, root = tmp_path / "repo", tmp_path / "root"
+    write_entry(root, repo, name="fresh", description="d", kind="memory", git_tracked=False)
+    mem = root / "projects" / harness_slug(repo) / "memory"
+    assert not (mem / "MEMORY.md").exists()             # we never invent an index the user lacks
+
+def test_deleting_an_entry_removes_its_index_line(tmp_path: Path):
+    from ccloadout.memory import harness_slug, forget_entry, write_entry
+    repo, root = tmp_path / "repo", tmp_path / "root"
+    mem = root / "projects" / harness_slug(repo) / "memory"; mem.mkdir(parents=True)
+    (mem / "MEMORY.md").write_text("# Memory index\n\n- [Keep](keep.md) — hook\n")
+    path = write_entry(root, repo, name="doomed", description="d", kind="memory",
+                       git_tracked=False)
+    forget_entry(path)
+    assert not path.exists()
+    text = (mem / "MEMORY.md").read_text()
+    assert "doomed" not in text and "- [Keep](keep.md) — hook" in text

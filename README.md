@@ -313,6 +313,21 @@ decay_days = 90         # untouched for this long, a note is demoted (never dele
 prompt_recall = false   # also re-rank on every prompt (see below)
 ```
 
+### It does not duplicate Claude Code's own memory
+
+Claude Code already injects the lines of its `MEMORY.md` index into every session. Notes it lists
+are skipped here rather than sent twice — the budget goes to the ones the session would not
+otherwise have, and the skipped notes stay reachable with `cld recall`. `--explain` says so:
+
+```
+  memory
+    injected:       3 of 7 entries  ≈ 210 tokens (heuristic)
+    already loaded: 3 by Claude Code itself (MEMORY.md index) — not repeated here
+```
+
+When you add or delete a note beside such an index, its line is kept in step, so Claude Code is
+never left pointing at a file that no longer exists.
+
 ### What it costs, and what it saves
 
 `cld --explain` shows both, because recall spends the tokens pruning saves:

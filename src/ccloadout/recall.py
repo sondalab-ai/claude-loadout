@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from math import ceil
 from pathlib import Path
 from datetime import date
-from typing import Callable, Iterable, Mapping, Sequence
+from typing import Callable, Container, Iterable, Mapping, Sequence
 import numpy as np
 from ccloadout.measure import CHARS_PER_TOKEN
 from ccloadout.memory import Entry
@@ -83,6 +83,7 @@ def assess(entries: Iterable[Entry], goal: str,
            root: Path | None = None,
            usage: Mapping[str, Usage] | None = None,
            flags: Mapping[str, Flag] | None = None,
+           resident: Container[str] = (),
            promote_after: int = 3, decay_days: int = 90, decay_factor: float = 0.5,
            today: date | None = None) -> list[Verdict]:
     # One admission rule (spec §5.4): rank order until the budget is spent — no top-K. Entries
@@ -92,7 +93,9 @@ def assess(entries: Iterable[Entry], goal: str,
     all_entries = list(entries)
     usage, flags = usage or {}, flags or {}
     now = today or date.today()
-    live = [e for e in all_entries if e.status != "resolved"]
+    # Entries the harness already injects through its own MEMORY.md index are in context before
+    # we add anything; recalling them again would spend the budget on a duplicate.
+    live = [e for e in all_entries if e.status != "resolved" and e.id not in resident]
     scored = []
     for entry, base in Ranker(embed).score(goal, live):
         score, reasons = _adjust(entry, base, root, usage, flags, decay_days, decay_factor, now)
@@ -118,6 +121,8 @@ def assess(entries: Iterable[Entry], goal: str,
             continue
         chosen = trial
         verdicts.append(Verdict(entry, score, base, reasons, True))
+    verdicts += [Verdict(e, 0.0, 0.0, ("already-in-context",), False)
+                 for e in all_entries if e.status != "resolved" and e.id in resident]
     verdicts += [Verdict(e, 0.0, 0.0, ("resolved",), False)
                  for e in all_entries if e.status == "resolved"]
     return verdicts
@@ -128,10 +133,12 @@ def select(entries: Iterable[Entry], goal: str,
            root: Path | None = None,
            usage: Mapping[str, Usage] | None = None,
            flags: Mapping[str, Flag] | None = None,
+           resident: Container[str] = (),
            promote_after: int = 3, decay_days: int = 90, decay_factor: float = 0.5,
            today: date | None = None) -> list[Entry]:
     return [v.entry for v in assess(entries, goal, embed, threshold, budget_tokens, exe, root,
-                                    usage, flags, promote_after, decay_days, decay_factor, today)
+                                    usage, flags, resident, promote_after, decay_days,
+                                    decay_factor, today)
             if v.admitted]
 
 def _adjust(entry: Entry, score: float, root: Path | None, usage: Mapping[str, Usage],

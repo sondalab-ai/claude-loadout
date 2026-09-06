@@ -9,8 +9,8 @@ from ccloadout.inventory import claude_code_inventory, Item
 from ccloadout.goal import detect_goal, write_goal_cache
 from ccloadout.ranker import Ranker, make_model2vec_embed, keyword_embed, bundled_model_path, resolve_model_source
 from ccloadout.compose import compose
-from ccloadout.memory import (EntryExists, read_all, read_store, set_status,
-                              slug_for, write_entry)
+from ccloadout.memory import (EntryExists, forget_entry, indexed_files, read_all,
+                              read_store, set_status, slug_for, write_entry)
 from ccloadout.flags import clear_flag, load_flags, set_flag
 from ccloadout.usage import load_usage, record_delivery
 from ccloadout.candidates import drop_rows, load_candidates, record_session
@@ -153,6 +153,7 @@ class _Memory(NamedTuple):
     shown: int
     total: int
     injected: int                                   # resident tokens the payload costs (heuristic)
+    resident: int = 0                               # already in context via the harness's index
     delivered: tuple = ()                           # entry ids in the payload, counted only on launch
     config_root: Path | None = None
 
@@ -179,6 +180,11 @@ class _EditGate(NamedTuple):
     cfg: object
     goal: str
 
+def _resident_ids(cfg, cwd: Path, entries) -> set[str]:
+    # What the harness's own MEMORY.md already puts in every session for this repo.
+    files = indexed_files(cfg.config_root, cwd)
+    return {e.id for e in entries if e.path.resolve() in files} if files else set()
+
 def _recall_payload(cfg, cwd: Path, goal: str, embed):
     # Ranked recall rides in as system-prompt text. Off by default; below min_entries it injects
     # nothing at all, since an instruction to query an empty store costs tokens for no answer.
@@ -189,13 +195,15 @@ def _recall_payload(cfg, cwd: Path, goal: str, embed):
     if total < cfg.memory.min_entries:
         return None, _Memory(0, total, 0)
     exe = recall_command()
+    resident = _resident_ids(cfg, cwd, store.entries)
     chosen = select(store.entries, goal, embed, cfg.memory.threshold,
                     cfg.memory.budget_tokens, exe=exe, root=cwd,
                     usage=load_usage(cfg.config_root, cwd),
+                    flags=load_flags(cfg.config_root, cwd), resident=resident,
                     promote_after=cfg.memory.promote_after,
                     decay_days=cfg.memory.decay_days, decay_factor=cfg.memory.decay_factor)
-    payload = build_payload(chosen, exe=exe, total=total, root=cwd)
-    return payload, _Memory(len(chosen), total, estimate_tokens(payload),
+    payload = build_payload(chosen, exe=exe, total=total - len(resident), root=cwd)
+    return payload, _Memory(len(chosen), total, estimate_tokens(payload), len(resident),
                             tuple(e.id for e in chosen), cfg.config_root)
 
 def _git(cwd: Path, *args: str) -> str | None:
@@ -550,7 +558,7 @@ def _audit_interactive(cwd: Path, cfg, rows, usage, flags, shadowed) -> int:
         return 0
     for entry in doomed:
         try:
-            entry.path.unlink()
+            forget_entry(entry.path)               # takes its MEMORY.md line with it
         except OSError as exc:
             _warn(f"could not delete {entry.path} ({exc})")
             continue
@@ -561,7 +569,8 @@ def _audit_interactive(cwd: Path, cfg, rows, usage, flags, shadowed) -> int:
 def _audit_context(cwd: Path, cfg, entries, context: str, usage, flags, as_json: bool) -> int:
     verdicts = assess(entries, context, _build_embed(cfg.model_name), cfg.memory.threshold,
                       cfg.memory.budget_tokens, exe=recall_command(), root=cwd,
-                      usage=usage, flags=flags, promote_after=cfg.memory.promote_after,
+                      usage=usage, flags=flags, resident=_resident_ids(cfg, cwd, entries),
+                      promote_after=cfg.memory.promote_after,
                       decay_days=cfg.memory.decay_days, decay_factor=cfg.memory.decay_factor)
     if as_json:
         print(json.dumps([{"id": v.entry.id, "name": v.entry.name, "score": round(v.score, 4),
@@ -1577,6 +1586,9 @@ def _print_explain(scope: _Scope, plan) -> None:
         else:
             print(f"    injected:       {m.shown} of {m.total} entries  "
                   f"{_paint('≈ ' + _savings.human_tokens(m.injected) + ' tokens (heuristic)', 'yellow')}")
+        if m.resident:
+            print(_paint(f"    already loaded: {m.resident} by Claude Code itself "
+                         "(MEMORY.md index) — not repeated here", "dim"))
         print()
     s = scope.savings
     on_demand = s.deferred + conn_tok

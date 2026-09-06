@@ -1447,3 +1447,37 @@ def test_init_enables_memory_when_accepted(tmp_path, monkeypatch):
     text = (r1 / ".loadout" / "config.toml").read_text()
     assert "[memory]" in text and "enabled = true" in text
     assert "threshold" in text                        # the seeded settings survived the edit
+
+def test_entries_the_harness_already_injects_are_not_repeated(tmp_path, monkeypatch, capsys):
+    from ccloadout.memory import harness_slug
+    root = _memory_repo(tmp_path, n=1)                 # one entry under ./docs/memory
+    mem = root / "projects" / harness_slug(tmp_path) / "memory"; mem.mkdir(parents=True)
+    (mem / "native.md").write_text(
+        "---\nname: native\ndescription: a note Claude Code loads by itself\n"
+        "metadata:\n  node_type: memory\n---\nbody\n")
+    (mem / "MEMORY.md").write_text("# Memory index\n\n- [native](native.md) — already loaded\n")
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "make_model2vec_embed", lambda name: cli.keyword_embed)
+    monkeypatch.setattr(cli.subprocess, "run", lambda *a, **k: _RC(0))
+    cli.main(["--explain"])
+    out = capsys.readouterr().out
+    assert "already loaded: 1 by Claude Code itself" in out
+    assert "injected:       1 of 2" in out              # only the entry it does not already have
+    cli.main(["memory", "audit", "--context", "scoping sessions"])
+    assert "already-in-context" in capsys.readouterr().out
+
+def test_deleting_an_indexed_entry_leaves_no_dangling_index_line(tmp_path, monkeypatch, capsys):
+    from ccloadout.memory import harness_slug
+    root = _memory_repo(tmp_path, n=0)
+    mem = root / "projects" / harness_slug(tmp_path) / "memory"; mem.mkdir(parents=True)
+    (mem / "native.md").write_text("---\nname: native\ndescription: d\n---\nbody\n")
+    (mem / "MEMORY.md").write_text("# Memory index\n\n- [native](native.md) — hook\n")
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "_interactive", lambda passthrough: True)
+    monkeypatch.setattr(cli, "_checkbox_select", lambda *a, **k: [])   # drop everything
+    monkeypatch.setattr(cli, "_ask", lambda prompt: "delete")
+    cli.main(["memory", "audit"])
+    assert not (mem / "native.md").exists()
+    assert "native" not in (mem / "MEMORY.md").read_text()

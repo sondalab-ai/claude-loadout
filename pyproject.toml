@@ -1,6 +1,6 @@
 [project]
 name = "ccloadout"
-version = "0.7.0"
+version = "0.7.1"
 description = "Goal-aware launcher for Claude Code: load only the MCP servers, plugins, and skills each session needs."
 readme = "README.md"
 requires-python = ">=3.11"
