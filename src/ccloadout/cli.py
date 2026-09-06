@@ -1,14 +1,23 @@
 from __future__ import annotations
-import os, subprocess, sys, time
+import json, os, re, subprocess, sys, time
 from fnmatch import fnmatch
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import NamedTuple
-from ccloadout.config import load_config
+from ccloadout.config import load_config, set_memory_enabled
 from ccloadout.inventory import claude_code_inventory, Item
 from ccloadout.goal import detect_goal, write_goal_cache
 from ccloadout.ranker import Ranker, make_model2vec_embed, keyword_embed, bundled_model_path, resolve_model_source
 from ccloadout.compose import compose
+from ccloadout.memory import (EntryExists, NoStatus, forget_entry, indexed_files,
+                              read_all, read_store, set_meta, set_status, slug_for,
+                              write_entry)
+from ccloadout.flags import clear_flag, load_flags, set_flag
+from ccloadout.usage import load_usage, record_delivery
+from ccloadout.candidates import drop_rows, load_candidates, record_session
+from ccloadout.decisions import corpus_dir, new_decision, supersede
+from ccloadout.recall import (anchor_state, assess, build_payload, estimate_tokens,
+                              recall_command, search, select, strip_frontmatter)
 from ccloadout.rules import (load_rules, apply_rules, has_rule, save_rule, write_rules,
                             read_rules, profile_rules_file, rules_for,
                             Rule, Predicate, evaluate)
@@ -52,8 +61,10 @@ def _yn(flag: bool, *, err: bool = False) -> str:
 def _warn(msg: str) -> None:
     print(f"{_paint('claude-loadout:', 'yellow', err=True)} {msg}", file=sys.stderr)
 
+_IRREGULAR = {"entry": "entries"}
+
 def _plural(n: int, noun: str) -> str:
-    return f"{n} {noun}" if n == 1 else f"{n} {noun}s"
+    return f"{n} {noun}" if n == 1 else f"{n} {_IRREGULAR.get(noun, noun + 's')}"
 
 def _cleanup(tmp_paths) -> None:
     for p in tmp_paths:
@@ -141,6 +152,14 @@ def _elicit(item: Item, context: str, compile_fn, save) -> str:
     save(Rule(target=item.id, nl=nl, predicate=pred))
     return evaluate(pred, context)
 
+class _Memory(NamedTuple):
+    shown: int
+    total: int
+    injected: int                                   # resident tokens the payload costs (heuristic)
+    resident: int = 0                               # already in context via the harness's index
+    delivered: tuple = ()                           # entry ids in the payload, counted only on launch
+    config_root: Path | None = None
+
 class _Scope(NamedTuple):
     goal: str
     source: str
@@ -151,6 +170,7 @@ class _Scope(NamedTuple):
     savings: _savings.Savings
     connectors: list                                # (id, tokens) claude.ai connectors strict-mode drops
     measured: bool                                  # whether a costs.json cache was found
+    memory: _Memory | None = None                   # None when [memory] is off
 
 class _EditGate(NamedTuple):
     # Everything the pre-launch review needs to redraw and re-compose a plan.
@@ -162,6 +182,607 @@ class _EditGate(NamedTuple):
     cwd: Path
     cfg: object
     goal: str
+
+def _resident_ids(cfg, cwd: Path, entries) -> set[str]:
+    # What the harness's own MEMORY.md already puts in every session for this repo.
+    files = indexed_files(cfg.config_root, cwd)
+    return {e.id for e in entries if e.path.resolve() in files} if files else set()
+
+def _recall_payload(cfg, cwd: Path, goal: str, embed):
+    # Ranked recall rides in as system-prompt text. Off by default; below min_entries it injects
+    # nothing at all, since an instruction to query an empty store costs tokens for no answer.
+    if not cfg.memory.enabled:
+        return None, None
+    store = read_store(cwd, cfg.config_root, scopes=cfg.memory.scopes)
+    total = len(store.entries)
+    if total < cfg.memory.min_entries:
+        return None, _Memory(0, total, 0)
+    exe = recall_command()
+    resident = _resident_ids(cfg, cwd, store.entries)
+    verdicts = assess(store.entries, goal, embed, cfg.memory.threshold,
+                      cfg.memory.budget_tokens, exe=exe, root=cwd,
+                      usage=load_usage(cfg.config_root, cwd),
+                      flags=load_flags(cfg.config_root, cwd), resident=resident,
+                      promote_after=cfg.memory.promote_after,
+                      decay_days=cfg.memory.decay_days, decay_factor=cfg.memory.decay_factor)
+    chosen = [v.entry for v in verdicts if v.admitted]
+    by_name = {e.name: e for e in store.entries}    # who pulled a linked note in, for the payload
+    linked = {v.entry.id: next((a.entry.name for a in verdicts
+                                if a.admitted and v.entry.name in a.entry.links), "")
+              for v in verdicts if v.admitted and "linked" in v.reasons}
+    payload = build_payload(chosen, exe=exe, total=total, root=cwd,
+                            linked={k: v for k, v in linked.items() if v})
+    return payload, _Memory(len(chosen), total, estimate_tokens(payload), len(resident),
+                            tuple(e.id for e in chosen), cfg.config_root)
+
+def _git(cwd: Path, *args: str) -> str | None:
+    try:
+        proc = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    out = getattr(proc, "stdout", None)
+    return out.strip() if getattr(proc, "returncode", 1) == 0 and isinstance(out, str) else None
+
+def _changed_since(cwd: Path, head_before: str | None) -> list[str]:
+    names = []
+    head_now = _git(cwd, "rev-parse", "HEAD")
+    if head_before and head_now and head_before != head_now:
+        names += (_git(cwd, "diff", "--name-only", head_before, head_now) or "").splitlines()
+    # -z: `git status --porcelain` quotes unusual paths and summarises whole directories;
+    # --untracked-files=all lists the files inside them instead of the directory itself.
+    dirty = (_git(cwd, "status", "--porcelain", "-z", "--untracked-files=all") or "")
+    names += [field[3:] for field in dirty.split("\0") if len(field) > 3]
+    return sorted(dict.fromkeys(n for n in names if n))
+
+def _capture_session(scope, cwd: Path, exit_code: int, head_before: str | None) -> None:
+    # The launcher outlives the session (lever F), so the end-of-session envelope needs no hook.
+    mem = getattr(scope, "memory", None)
+    if mem is None or mem.config_root is None:
+        return
+    try:
+        record_session(mem.config_root, cwd, goal=scope.goal, exit_code=exit_code,
+                       changed=_changed_since(cwd, head_before))
+    except OSError as exc:                          # never fail a session over its own bookkeeping
+        _warn(f"could not record session candidate ({exc})")
+
+def _cmd_consolidate(cwd: Path, override: Path | None = None) -> int:
+    cfg = load_config(cwd=cwd, config_root_override=override)
+    rows = load_candidates(cfg.config_root, cwd)
+    if not rows:
+        print(_paint("no candidates recorded for this repository", "dim"))
+        return 0
+    signals = [r for r in rows if r.get("kind") == "debt-signal"]
+    sessions = [r for r in rows if r.get("kind") != "debt-signal"]
+    groups: dict[str, list[dict]] = {}
+    for row in sessions:                            # near-duplicates collapse by goal
+        groups.setdefault(str(row.get("goal") or ""), []).append(row)
+    interactive = _interactive([])
+    kept_rows: list[dict] = _consolidate_signals(cwd, cfg, signals, interactive)
+    for goal, rows_for_goal in groups.items():
+        files = sorted({f for r in rows_for_goal for f in (r.get("changed") or [])})
+        print(_paint(f"  {_plural(len(rows_for_goal), 'session')} · {goal}", "bold"))
+        if files:
+            print(_paint(f"    touched: {', '.join(files[:6])}"
+                         + (" …" if len(files) > 6 else ""), "dim"))
+        if not interactive:                         # no TTY: report, promote nothing
+            kept_rows += rows_for_goal
+            continue
+        answer = _ask("    [k]eep as a memory / [d]iscard / [s]kip? ").strip().lower()
+        if answer.startswith("d"):
+            continue                                # dropped: the rows go, no entry is written
+        if not answer.startswith("k"):
+            kept_rows += rows_for_goal
+            continue
+        description = _ask("    one line describing what to remember: ").strip() or goal
+        try:
+            path = write_entry(cfg.config_root, cwd, name=_slugify(description),
+                               description=description, kind="memory",
+                               git_tracked=cfg.memory.git_tracked,
+                               body="\n".join(f"- {r.get('at')} · exit {r.get('exit_code')}"
+                                               for r in rows_for_goal))
+        except EntryExists as exc:
+            _warn(f"an entry already exists at {exc}; keeping the candidate")
+            kept_rows += rows_for_goal
+            continue
+        print(f"    {_paint('wrote', 'green')} {path}")
+    if interactive:
+        drop_rows(cfg.config_root, cwd, kept_rows)
+    return 0
+
+def _consolidate_signals(cwd: Path, cfg, signals: list[dict], interactive: bool) -> list[dict]:
+    # A debt marker seen being written is a *signal*, not an entry: the ledger only ever gains
+    # something a person agreed to put there.
+    kept: list[dict] = []
+    seen: dict[tuple, dict] = {}
+    for row in signals:                             # the same marker rewritten is one candidate
+        seen.setdefault((row.get("file"), row.get("excerpt")), row)
+    for row in seen.values():
+        where = row.get("file") or "?"
+        print(_paint(f"  debt marker in {where}", "bold"))
+        print(_paint(f"    {_short_desc(str(row.get('excerpt') or ''), 90)}", "dim"))
+        if not interactive:
+            kept.append(row)
+            continue
+        answer = _ask("    [k]eep as open debt / [d]iscard / [s]kip? ").strip().lower()
+        if answer.startswith("d"):
+            continue
+        if not answer.startswith("k"):
+            kept.append(row)
+            continue
+        description = _ask("    one line describing the debt: ").strip() or str(row.get("excerpt"))
+        anchors = [where] if row.get("file") else []
+        try:
+            path = write_entry(cfg.config_root, cwd, name=_slugify(description),
+                               description=description, kind="debt",
+                               git_tracked=cfg.memory.git_tracked, anchors=anchors)
+        except EntryExists as exc:
+            _warn(f"an entry already exists at {exc}; keeping the candidate")
+            kept.append(row)
+            continue
+        print(f"    {_paint('wrote', 'green')} {path}")
+    return kept
+
+def _record_delivery(scope, cwd: Path) -> None:
+    mem = getattr(scope, "memory", None)
+    if mem and mem.delivered and mem.config_root is not None:
+        try:
+            record_delivery(mem.config_root, cwd, mem.delivered)
+        except OSError as exc:                      # a counter is never worth failing a launch for
+            _warn(f"could not record memory usage ({exc})")
+
+def _slugify(text: str) -> str:
+    words = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-").split("-")
+    return "-".join(w for w in words if w)[:60] or "entry"
+
+def _pop_flag(args: list[str], flag: str) -> tuple[list[str], list[str]]:
+    values = []
+    while flag in args:
+        at = args.index(flag)
+        values.append(args[at + 1]) if at + 1 < len(args) else None
+        args = args[:at] + args[at + 2:]
+    return args, values
+
+def _cmd_write_entry(cwd: Path, args: list[str], kind: str, override: Path | None) -> int:
+    args, names = _pop_flag(list(args), "--name")
+    args, anchors = _pop_flag(args, "--anchor")
+    scope = "global" if "--global" in args else "repo"
+    description = " ".join(a for a in args if a != "--global").strip()
+    if not description:
+        _warn(f"{kind} add needs a description")
+        return 2
+    cfg = load_config(cwd=cwd, config_root_override=override)
+    try:
+        path = write_entry(cfg.config_root, cwd, name=names[0] if names else _slugify(description),
+                           description=description, kind=kind,
+                           git_tracked=cfg.memory.git_tracked, anchors=anchors, scope=scope)
+    except EntryExists as exc:
+        _warn(f"an entry already exists at {exc}; pick another --name")
+        return 1
+    where = " (every project)" if scope == "global" else ""
+    print(f"{_paint('wrote', 'green')} {path}{_paint(where, 'dim')}")
+    return 0
+
+def _cmd_scope(cwd: Path, args: list[str], override: Path | None = None) -> int:
+    if len(args) < 2 or args[1] not in ("repo", "global"):
+        _warn("memory scope needs a name and either 'repo' or 'global'")
+        return 2
+    cfg = load_config(cwd=cwd, config_root_override=override)
+    match = next((e for e in read_store(cwd, cfg.config_root).entries
+                  if e.name == args[0] or e.name.startswith(args[0])), None)
+    if match is None:
+        _warn(f"no entry named {args[0]!r}")
+        return 1
+    try:
+        set_meta(match.path, "scope", args[1])
+    except (NoStatus, OSError) as exc:
+        _warn(f"could not change the scope of {match.name}: {exc}")
+        return 1
+    reach = "every project" if args[1] == "global" else "this repository only"
+    print(f"{_paint(args[1], 'green')} — {match.name} now reaches {reach}")
+    return 0
+
+def _cmd_debt(cwd: Path, args: list[str], override: Path | None = None) -> int:
+    action, rest = (args[0], args[1:]) if args else ("list", [])
+    if action == "add":
+        return _cmd_write_entry(cwd, rest, "debt", override)
+    cfg = load_config(cwd=cwd, config_root_override=override)
+    entries = [e for e in read_store(cwd, cfg.config_root).entries if e.kind == "debt"]
+    if action == "resolve":
+        if not rest:
+            _warn("debt resolve needs the name of an entry")
+            return 2
+        match = next((e for e in entries if e.name == rest[0]), None)
+        if match is None:
+            _warn(f"no debt entry named {rest[0]!r}")
+            return 1
+        try:
+            set_status(match.path, "resolved")
+        except (NoStatus, OSError) as exc:          # hand-written notes carry no status key
+            _warn(f"could not resolve {match.name}: {exc}")
+            return 1
+        print(f"{_paint('resolved', 'green')} {match.name}")
+        return 0
+    if action != "list":
+        _warn(f"unknown debt command {action!r}; try add, list or resolve")
+        return 2
+    show_all = "--all" in rest
+    shown = [e for e in entries if show_all or e.status != "resolved"]
+    if not shown:
+        print(_paint("no open debt recorded for this repository", "dim"))
+        return 0
+    for e in shown:
+        state = _paint("resolved", "dim") if e.status == "resolved" else _paint("open", "yellow")
+        mark = "" if anchor_state(e, cwd) != "missing" else _paint("  ⚠ anchor gone", "yellow")
+        print(f"  {state}  {e.name} — {_short_desc(e.description, 60)}{mark}")
+    return 0
+
+def _session_hooks(cfg, cwd: Path, mem) -> tuple[dict | None, dict | None]:
+    # Two optional hooks, each installed only when it has work to do. Both read env and stdin,
+    # never argv, and both exit 0 on every path.
+    if not cfg.memory.enabled or mem is None:
+        return None, None
+    hooks: dict[str, str] = {}
+    env = {"LOADOUT_CONFIG_ROOT": str(cfg.config_root), "LOADOUT_REPO": str(cwd)}
+    if cfg.memory.prompt_recall:                   # re-rank per prompt; told what is already resident
+        hooks["UserPromptSubmit"] = "ccloadout.prompt_hook"
+        env.update({"LOADOUT_RESIDENT_IDS": _LIST_SEP.join(mem.delivered),
+                    "LOADOUT_PROMPT_MAX": cfg.memory.prompt_recall_max,
+                    "LOADOUT_PROMPT_TIMEOUT_MS": cfg.memory.prompt_timeout_ms})
+    if cfg.memory.debt_patterns:                   # notice configured debt markers being written
+        hooks["PostToolUse"] = "ccloadout.debt_hook"
+        env["LOADOUT_DEBT_PATTERNS"] = _LIST_SEP.join(cfg.memory.debt_patterns)
+    return (hooks or None), (env if hooks else None)
+
+_AUDIT_HINT = "↑/↓ move · space keep/drop · a all/none · enter apply · q cancel"
+_LIST_SEP = "\x1f"                                  # env-passed lists: see debt_hook.LIST_SEP
+_MEMORY_ACTIONS = frozenset({"enable", "disable", "add", "audit", "flag", "consolidate", "scope"})
+_DEBT_ACTIONS = frozenset({"add", "list", "resolve"})
+_DECISION_ACTIONS = frozenset({"new", "list", "show", "supersede"})
+
+def _is_action(argv: list[str], actions: frozenset) -> bool:
+    return len(argv) == 1 or argv[1] in actions
+_INTRO_MARKER = ".memory-intro-seen"                # printed once per profile, then never again
+
+def _memory_state(cwd: Path, cfg) -> dict:
+    store = read_store(cwd, cfg.config_root)
+    usage = load_usage(cfg.config_root, cwd)
+    return {"entries": store.entries,
+            "kinds": {k: sum(1 for e in store.entries if e.kind == k)
+                      for k in sorted({e.kind for e in store.entries})},
+            "usage": usage,
+            "promoted": sum(1 for r in usage.values() if r.uses >= cfg.memory.promote_after),
+            "flags": load_flags(cfg.config_root, cwd),
+            "candidates": load_candidates(cfg.config_root, cwd),
+            "gone": [e for e in store.entries if anchor_state(e, cwd) == "missing"],
+            "debt": [e for e in store.entries if e.kind == "debt" and e.status != "resolved"],
+            "shadowed": store.shadowed}
+
+def _memory_next_steps(state: dict, enabled: bool) -> list[tuple[str, str]]:
+    # At most three, chosen by what the store actually needs right now — an empty list means
+    # there is nothing to do, which is worth saying plainly rather than filling with advice.
+    if not enabled:
+        return [("claude-loadout memory enable", "turn ranked recall on for this repository")]
+    steps = []
+    if state["candidates"]:
+        steps.append(("claude-loadout memory consolidate",
+                      f"{_plural(len(state['candidates']), 'recorded session')} not yet a memory"))
+    if state["flags"] or state["gone"]:
+        why = " and ".join(filter(None, [
+            _plural(len(state["flags"]), "flag") if state["flags"] else "",
+            f"{_plural(len(state['gone']), 'dead anchor')}" if state["gone"] else ""]))
+        steps.append(("claude-loadout memory audit", f"{why} to review"))
+    if not state["entries"]:
+        steps.append(("claude-loadout memory add <note>", "the store is empty; nothing to recall"))
+    if state["debt"]:
+        steps.append(("claude-loadout debt list",
+                      f"{_plural(len(state['debt']), 'open item')} still outstanding"))
+    if not steps and state["entries"]:
+        steps.append(("claude-loadout memory audit --context '<goal>'",
+                      "see what a session on that goal would recall, and why"))
+    return steps[:3]
+
+def _print_memory_status(cwd: Path, cfg) -> int:
+    on = cfg.memory.enabled
+    head = _paint("on", "green") if on else _paint("off", "dim")
+    print(f"{_paint('  memory', 'bold')} — {head} for this repository")
+    if not on:
+        print(_paint("    Ranked recall puts only the notes relevant to a session into its "
+                     "context,", "dim"))
+        print(_paint("    inside a token budget you set. Nothing is loaded until you turn it on.",
+                     "dim"))
+    state = _memory_state(cwd, cfg)
+    if on or state["entries"]:
+        kinds = ", ".join(f"{n} {k}" for k, n in state["kinds"].items())
+        print(f"    entries:      {len(state['entries'])}" + (f"  ({kinds})" if kinds else ""))
+        if state["usage"]:
+            print(f"    delivered:    {len(state['usage'])}, "
+                  f"{state['promoted']} promoted")
+        if state["candidates"]:
+            print(f"    candidates:   {len(state['candidates'])} "
+                  + _paint("sessions waiting to be reviewed", "dim"))
+        for label, rows in (("flags", state["flags"]), ("dead anchors", state["gone"]),
+                            ("open debt", state["debt"])):
+            if rows:
+                print(f"    {label + ':':<14}{_paint(str(len(rows)), 'yellow')}")
+    steps = _memory_next_steps(state, on)
+    if steps:
+        print()
+        print(_paint("  next", "bold"))
+        width = max(len(cmd) for cmd, _ in steps)
+        for command, why in steps:
+            print(f"    {_paint(command.ljust(width), 'cyan')}  {_paint(why, 'dim')}")
+    return 0
+
+def _cmd_memory_toggle(cwd: Path, enabled: bool, override: Path | None) -> int:
+    path = set_memory_enabled(cwd, enabled)
+    word = "enabled" if enabled else "disabled"
+    print(f"{_paint(word, 'green' if enabled else 'dim')} memory recall for this repository "
+          + _paint(f"({path})", "dim"))
+    if enabled:
+        cfg = load_config(cwd=cwd, config_root_override=override)
+        state = _memory_state(cwd, cfg)
+        if not state["entries"]:
+            print(_paint("  the store is empty — notes arrive with `claude-loadout memory add`, "
+                         "or from sessions you consolidate", "dim"))
+        else:
+            print(_paint(f"  {_plural(len(state['entries']), 'entry')} ready; "
+                         "`claude-loadout memory audit --context \'<goal>\'` shows what a "
+                         "session would get", "dim"))
+    return 0
+
+def _memory_intro_once(mem) -> None:
+    # The first injection is otherwise invisible: the user sees no difference and does not know
+    # anything can be reviewed or undone. Said once per profile, never again.
+    if mem is None or not mem.shown or mem.config_root is None:
+        return
+    marker = mem.config_root / "loadout" / _INTRO_MARKER
+    if marker.exists():
+        return
+    p = lambda s: print(s, file=sys.stderr)
+    dim = lambda s: _paint(s, "dim", err=True)
+    p("")
+    p(f"{_paint('claude-loadout:', 'yellow', err=True)} "
+      f"{_plural(mem.shown, 'note')} from earlier sessions went into this one "
+      f"(~{_savings.human_tokens(mem.injected)} tokens).")
+    p(dim("    the session can search the rest itself with `claude-loadout recall`"))
+    p(dim("    review or delete them:  claude-loadout memory audit"))
+    p(dim("    turn it off here:       claude-loadout memory disable"))
+    p("")
+    try:
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text("")
+    except OSError:                                 # unwritable profile: say it once per run, not never
+        pass
+
+def _entry_signals(entry, cwd: Path | None, usage, flags, shadowed_ids: set) -> str:
+    # cwd is None for rows read from another project: its anchors, counters and flags are relative
+    # to a root we do not have, and reporting them against this one produces confident nonsense.
+    bits = []
+    if entry.scope == "global":                     # a session can write these; they reach everywhere
+        bits.append(_paint("global", "cyan", err=True))
+    if cwd is None:
+        return _paint("another project — signals not evaluated here", "dim", err=True)
+    state = anchor_state(entry, cwd)
+    if state == "missing":
+        bits.append(_paint("anchor gone", "red", err=True))
+    elif state == "changed":
+        bits.append(_paint("code changed", "yellow", err=True))
+    if entry.id in flags:
+        bits.append(_paint(f"flagged: {_short_desc(flags[entry.id].reason, 40)}", "yellow", err=True))
+    if entry.id in shadowed_ids:
+        bits.append(_paint("shadowed", "dim", err=True))
+    if entry.status == "resolved":
+        bits.append(_paint("resolved", "dim", err=True))
+    rec = usage.get(entry.id)
+    if rec:
+        bits.append(_paint(f"{_plural(rec.uses, 'use')} · last {rec.last_used}", "dim", err=True))
+    else:
+        bits.append(_paint("never delivered", "dim", err=True))
+    return "  ".join(bits)
+
+def _audit_rows(cwd: Path, cfg, all_repos: bool):
+    usage, flags = load_usage(cfg.config_root, cwd), load_flags(cfg.config_root, cwd)
+    if not all_repos:
+        store = read_store(cwd, cfg.config_root)
+        shadowed = {dropped.id for _, dropped in store.shadowed}
+        return ([("this repository", e) for e in store.entries], usage, flags, shadowed,
+                {e.path.resolve() for e in store.entries})
+    here = {e.path.resolve() for e in read_store(cwd, cfg.config_root).entries}
+    rows = [(project, e) for project, entries in sorted(read_all(cfg.config_root).items())
+            for e in entries]
+    return rows, usage, flags, set(), here
+
+def _cmd_audit(cwd: Path, args: list[str], override: Path | None = None) -> int:
+    args, contexts = _pop_flag(list(args), "--context")
+    all_repos, as_json = "--all-repos" in args, "--json" in args
+    cfg = load_config(cwd=cwd, config_root_override=override)
+    rows, usage, flags, shadowed, local = _audit_rows(cwd, cfg, all_repos)
+    root_of = lambda e: cwd if e.path.resolve() in local else None
+    if not rows:
+        print(_paint("no memory entries to audit", "dim"))
+        return 0
+    if contexts:
+        return _audit_context(cwd, cfg, [e for _, e in rows], contexts[0], usage, flags, as_json)
+    if as_json:
+        print(json.dumps([{"project": project, "id": e.id, "kind": e.kind, "scope": e.scope,
+                           "name": e.name, "description": e.description, "path": str(e.path),
+                           "status": e.status, "anchors": list(e.anchors),
+                           "anchor_state": anchor_state(e, cwd) if root_of(e) else None,
+                           "uses": usage[e.id].uses if e.id in usage else 0,
+                           "last_used": usage[e.id].last_used if e.id in usage else None,
+                           "flagged": flags[e.id].reason if e.id in flags else None,
+                           "shadowed": e.id in shadowed}
+                          for project, e in rows], indent=1))
+        return 0
+    if not _interactive([]):
+        for project, e in rows:
+            print(f"  {_paint(f'[{e.kind} · {project}]', 'dim')} {e.name} — "
+                  f"{_short_desc(e.description, 50)}")
+            signals = _entry_signals(e, root_of(e), usage, flags, shadowed)
+            if signals:
+                print(f"      {signals}")
+        return 0
+    return _audit_interactive(cwd, cfg, rows, usage, flags, shadowed, root_of)
+
+def _audit_interactive(cwd: Path, cfg, rows, usage, flags, shadowed, root_of) -> int:
+    labels, headers, seen = [], {}, None
+    for i, (project, entry) in enumerate(rows):
+        if project != seen:
+            headers[i] = project
+            seen = project
+        signals = _entry_signals(entry, root_of(entry), usage, flags, shadowed)
+        labels.append(f"{_short_desc(entry.name, 34):<34} {_short_desc(entry.description, 44)}"
+                      + (f"   {signals}" if signals else ""))
+    title = (_paint("claude-loadout — memory audit", "bold", err=True) + "\n"
+             + _paint("  unchecked entries are proposed for deletion", "dim", err=True))
+    keep = _checkbox_select(title, labels, hint=_AUDIT_HINT, headers=headers, allow_empty=True)
+    if keep is None:
+        _warn("audit cancelled; nothing was changed")
+        return 0
+    doomed = [rows[i][1] for i in range(len(rows)) if i not in set(keep)]
+    if not doomed:
+        print(_paint("nothing to delete", "dim"))
+        return 0
+    print(_paint(f"  about to delete {_plural(len(doomed), 'entry')}:", "bold"))
+    for entry in doomed:
+        print(f"    {_paint('✗', 'red')} {entry.path}")
+    if not _ask("  type 'delete' to confirm: ").strip().lower().startswith("delete"):
+        _warn("nothing was deleted")
+        return 0
+    for entry in doomed:
+        try:
+            forget_entry(entry.path)               # takes its MEMORY.md line with it
+        except OSError as exc:
+            _warn(f"could not delete {entry.path} ({exc})")
+            continue
+        clear_flag(cfg.config_root, cwd, entry.id)
+    print(f"  {_paint('deleted', 'green')} {_plural(len(doomed), 'entry')}")
+    return 0
+
+def _audit_context(cwd: Path, cfg, entries, context: str, usage, flags, as_json: bool) -> int:
+    verdicts = sorted(assess(entries, context, _build_embed(cfg.model_name), cfg.memory.threshold,
+                      cfg.memory.budget_tokens, exe=recall_command(), root=cwd,
+                      usage=usage, flags=flags, resident=_resident_ids(cfg, cwd, entries),
+                      promote_after=cfg.memory.promote_after,
+                      decay_days=cfg.memory.decay_days, decay_factor=cfg.memory.decay_factor),
+                      key=lambda v: (not v.admitted, -v.score))   # the cut line must mean something
+    if as_json:
+        print(json.dumps([{"id": v.entry.id, "name": v.entry.name, "score": round(v.score, 4),
+                           "base": round(v.base, 4), "reasons": list(v.reasons),
+                           "admitted": v.admitted} for v in verdicts], indent=1))
+        return 0
+    print(_paint(f"  what a session on {context!r} would recall", "bold"))
+    print(_paint(f"  threshold {cfg.memory.threshold} · budget {cfg.memory.budget_tokens} tokens",
+                 "dim"))
+    print()
+    cut_drawn = False
+    for v in verdicts:
+        if not v.admitted and not cut_drawn:
+            print(_paint("    ── below the line ──", "dim"))
+            cut_drawn = True
+        mark = _paint("✓", "green") if v.admitted else _paint("·", "dim")
+        why = _paint("  " + ", ".join(v.reasons), "dim") if v.reasons else ""
+        moved = "" if abs(v.score - v.base) < 1e-9 else _paint(f" (from {v.base:.3f})", "dim")
+        print(f"    {mark} {v.score:.3f}{moved}  "
+              f"{_paint(v.entry.kind[:4], 'dim')} {_short_desc(v.entry.name, 38):<38} "
+              f"{_short_desc(v.entry.description, 38)}{why}")
+    return 0
+
+def _cmd_flag(cwd: Path, args: list[str], override: Path | None = None) -> int:
+    args, reasons = _pop_flag(list(args), "--reason")
+    clearing = "--clear" in args
+    names = [a for a in args if not a.startswith("--")]
+    if not names:
+        _warn("memory flag needs the name of an entry")
+        return 2
+    cfg = load_config(cwd=cwd, config_root_override=override)
+    match = next((e for e in read_store(cwd, cfg.config_root).entries
+                  if e.name == names[0] or e.name.startswith(names[0])), None)
+    if match is None:
+        _warn(f"no entry named {names[0]!r}")
+        return 1
+    if clearing:
+        clear_flag(cfg.config_root, cwd, match.id)
+        print(f"{_paint('cleared', 'green')} {match.name}")
+        return 0
+    if not reasons:
+        _warn("flagging needs --reason; a flag without one cannot be judged later")
+        return 2
+    set_flag(cfg.config_root, cwd, match.id, reasons[0])
+    print(f"{_paint('flagged', 'yellow')} {match.name} — {reasons[0]}")
+    return 0
+
+def _cmd_decision(cwd: Path, args: list[str], override: Path | None = None) -> int:
+    action, rest = (args[0], args[1:]) if args else ("list", [])
+    cfg = load_config(cwd=cwd, config_root_override=override)
+    decisions = [e for e in read_store(cwd, cfg.config_root).entries if e.kind == "decision"]
+    if action == "new":
+        rest, tag_args = _pop_flag(list(rest), "--tags")
+        title = " ".join(rest).strip()
+        if not title:
+            _warn("decision new needs a title")
+            return 2
+        tags = [t for arg in tag_args for t in arg.split(",") if t]
+        path = new_decision(corpus_dir(cfg.config_root, cwd), slug_for(cwd), title, tags)
+        print(f"{_paint('wrote', 'green')} {path}")
+        return 0
+    if action == "show":
+        match = next((e for e in decisions if rest and e.name.startswith(rest[0])), None)
+        if match is None:
+            _warn("decision show needs the id of an existing decision")
+            return 1
+        print(strip_frontmatter(match.path.read_text(errors="ignore")).strip())
+        return 0
+    if action == "supersede":
+        if len(rest) < 2:
+            _warn("decision supersede needs an id and the title of the new decision")
+            return 2
+        old = next((e for e in decisions if e.name.startswith(rest[0])), None)
+        if old is None:
+            _warn(f"no decision matching {rest[0]!r}")
+            return 1
+        path = new_decision(corpus_dir(cfg.config_root, cwd), slug_for(cwd), " ".join(rest[1:]), [])
+        supersede(old.path, path.stem)
+        print(f"{_paint('wrote', 'green')} {path}\n{_paint('superseded', 'dim')} {old.name}")
+        return 0
+    if action != "list":
+        _warn(f"unknown decision command {action!r}; try new, list, show or supersede")
+        return 2
+    if not decisions:
+        print(_paint("no decisions recorded for this repository", "dim"))
+        return 0
+    for e in decisions:
+        state = _paint("active", "green") if e.status == "active" else _paint(e.status or "?", "dim")
+        print(f"  {state}  {e.name} — {_short_desc(e.description, 60)}")
+    return 0
+
+def _cmd_recall(cwd: Path, args: list[str], config_root_override: Path | None = None) -> int:
+    args, limits = _pop_flag(list(args), "--limit")
+    try:
+        limit = max(1, int(limits[0])) if limits else 3
+    except ValueError:
+        _warn(f"--limit needs a number, not {limits[0]!r}")
+        return 2
+    query = " ".join(args).strip()
+    cfg = load_config(cwd=cwd, config_root_override=config_root_override)
+    store = read_store(cwd, cfg.config_root)
+    if not store.entries:
+        print(_paint("no memory entries found for this repository", "dim"))
+        return 0
+    if not query:                                   # no query: name what is there, cheaply
+        for e in store.entries:
+            print(f"  {_paint(f'[{e.kind} · {e.scope}]', 'dim')} {e.name} — {_short_desc(e.description, 60)}")
+        return 0
+    for entry, score in search(store.entries, query, _build_embed(cfg.model_name), limit):
+        state = anchor_state(entry, cwd)
+        mark = {"missing": "  ⚠ anchored code is gone",
+                "changed": "  ⚠ anchored code changed since this was written"}.get(state, "")
+        print(_paint(f"{entry.name}  ({entry.kind} · {entry.scope} · {score:.3f})", "bold")
+              + _paint(mark, "yellow"))
+        print(_paint(f"{entry.path}", "dim"))
+        body = strip_frontmatter(entry.path.read_text(errors="ignore")).strip()
+        print(body + "\n")
+    return 0
 
 def _scoped_plan(passthrough: list[str], cwd: Path, config_root_override: Path | None = None,
                  scope_skills: bool = True):
@@ -189,16 +810,20 @@ def _scoped_plan(passthrough: list[str], cwd: Path, config_root_override: Path |
     # Launch-time keep/drop review is the pre-launch gate (a single checkbox over every prunable
     # tool), not a per-item prompt — see _launch_gate. `claude-loadout rules` remains the per-item /
     # natural-language authoring path.
+    payload, mem = _recall_payload(cfg, cwd, context, embed)
+    hooks, hook_env = _session_hooks(cfg, cwd, mem)
     def _finish(kept, dropped):                    # compose + cost accounting for a keep/drop decision
         plan = compose(kept, items, cfg.config_root, passthrough, cwd=cwd,
                        global_config_path=cfg.global_config_path,
-                       launch_config_dir=_explicit_profile(config_root_override))
+                       launch_config_dir=_explicit_profile(config_root_override),
+                       memory_payload=payload, hooks=hooks, hook_env=hook_env)
         measured = _measure.load_costs(cfg.config_root)
-        saved = _savings.estimate_savings(kept, [i for i, _ in dropped], cfg.token_costs, measured)
+        saved = _savings.estimate_savings(kept, [i for i, _ in dropped], cfg.token_costs, measured,
+                                          injected=mem.injected if mem else 0)
         mcp_ids = {i.id for i in items if i.kind == "mcp"}
         connectors = sorted(_measure.connector_costs(measured, mcp_ids).items(), key=lambda kv: -kv[1])
         scope = _Scope(context, gsource, gconf, cfg.threshold, kept, dropped,
-                       saved, connectors, bool(measured))
+                       saved, connectors, bool(measured), mem)
         return scope, plan
     _is_prunable = lambda i: i.kind in _savings.PRUNABLE and (scope_skills or i.kind != "skill")
     prunable = [i for i in items if _is_prunable(i)]
@@ -628,6 +1253,7 @@ def _cmd_init(cwd: Path, args: list[str], environ) -> int:
     seeded = 0
     chosen = set(selected)                          # eligible projects the user left out of the run
     skipped: list[tuple[Path, str]] = [(r, "not selected") for r in eligible if r not in chosen]
+    seeded_repos: list[Path] = []
     for repo in selected:
         profile = sticky
         if not yes and len(profiles) > 1:
@@ -652,9 +1278,30 @@ def _cmd_init(cwd: Path, args: list[str], environ) -> int:
             kept_ids = set(picked) | locked         # pinned tools always survive
         kept, dropped = _seed_repo(repo, cfg, items, kept_ids, goal)
         seeded += 1
+        seeded_repos.append(repo)
         _report_repo(repo, kept, dropped)
+    _offer_memory(seeded_repos, yes)
     _print_init_summary(seeded, skipped, already_list)
     return 0
+
+def _offer_memory(repos: list[Path], yes: bool) -> None:
+    # Asked once for the whole run, not per repo, and only where something was actually seeded.
+    # Default is no: recall spends context, and a user who has not asked for it should not pay.
+    if not repos or yes or not _interactive([]):
+        return
+    print()
+    print(_paint("  memory recall", "bold"))
+    print(_paint("    Puts the notes relevant to a session into its context, inside a token "
+                 "budget.", "dim"))
+    print(_paint("    Off unless you say otherwise; reversible with "
+                 "`claude-loadout memory disable`.", "dim"))
+    if not _ask(f"    enable it for {_plural(len(repos), 'repo')}? [y/N] ").strip().lower()\
+            .startswith("y"):
+        print(_paint("    left off — turn it on later with `claude-loadout memory enable`", "dim"))
+        return
+    for repo in repos:
+        set_memory_enabled(repo, True)
+    print(f"    {_paint('enabled', 'green')} for {_plural(len(repos), 'repo')}")
 
 def _report_repo(repo: Path, kept: list[Item], dropped: list[Item]) -> None:
     # Verbose per-repo receipt: the count line, then the full kept/dropped id lists.
@@ -789,6 +1436,7 @@ def _cmd_update(cwd: Path, args: list[str], environ) -> int:
     updated = 0
     chosen = set(selected)
     skipped: list[tuple[Path, str]] = [(r, "not selected") for r in eligible if r not in chosen]
+    seeded_repos: list[Path] = []
     for repo in selected:
         profile = sticky
         if not yes and len(profiles) > 1:
@@ -836,6 +1484,39 @@ def _profile_report(root: Path, cwd: Path, active: bool,
         print(f"    on-demand:    ~{_savings.human_tokens(on_demand)} tokens, {detail} "
               f"{_paint('(load lazily; avoided only if used)', 'dim')}")
 
+def _memory_report(cfg, cwd: Path) -> None:
+    print(_paint("  memory", "bold"))
+    if not cfg.memory.enabled:
+        print(_paint("    off — enable with [memory] enabled = true in loadout/config.toml", "dim"))
+        print()
+        return
+    store = read_store(cwd, cfg.config_root)
+    kinds = {k: sum(1 for e in store.entries if e.kind == k)
+             for k in sorted({e.kind for e in store.entries})}
+    print(f"    entries:          {len(store.entries)}"
+          + (f" ({', '.join(f'{n} {k}' for k, n in kinds.items())})" if kinds else ""))
+    open_debt = [e for e in store.entries if e.kind == "debt" and e.status != "resolved"]
+    if open_debt:
+        print(f"    open debt:        {_paint(str(len(open_debt)), 'yellow')} "
+              + _paint("— claude-loadout debt list", "dim"))
+    states = [anchor_state(e, cwd) for e in store.entries]
+    if states.count("missing") or states.count("changed"):
+        print(f"    stale anchors:    {_paint(str(states.count('missing')), 'yellow')} gone, "
+              f"{states.count('changed')} changed")
+    for kept, dropped in store.shadowed:            # same slug in two stores: one is invisible
+        print(f"    {_paint('shadowed', 'yellow')}  {dropped.path} "
+              + _paint(f"(hidden by {kept.path})", "dim"))
+    usage = load_usage(cfg.config_root, cwd)
+    if usage:
+        earning = sum(1 for rec in usage.values() if rec.uses >= cfg.memory.promote_after)
+        print(f"    delivered:        {len(usage)} entries, {earning} promoted "
+              + _paint(f"(>= {cfg.memory.promote_after} deliveries)", "dim"))
+    pending = load_candidates(cfg.config_root, cwd)
+    if pending:
+        print(f"    candidates:       {len(pending)} "
+              + _paint("— claude-loadout memory consolidate", "dim"))
+    print()
+
 def _cmd_doctor(cwd: Path) -> int:
     cfg = load_config(cwd=cwd)
     print(_paint("claude-loadout doctor", "bold"))
@@ -848,6 +1529,7 @@ def _cmd_doctor(cwd: Path) -> int:
         _profile_report(root, cwd, active,
                         cfg.global_config_path if active else None, cfg.token_costs)
         print()
+    _memory_report(cfg, cwd)
     repo_cfg = cwd / ".loadout" / "config.toml"
     print(_paint("  environment", "bold"))
     print(f"    repo config:      {_paint(str(repo_cfg), 'cyan')} ({_yn(repo_cfg.is_file())})")
@@ -872,6 +1554,11 @@ def _cmd_doctor(cwd: Path) -> int:
     print(f"         {_paint('claude-loadout --explain', 'cyan')}")
     print("    3. Scope tools with plain-language rules:")
     print(f"         {_paint('claude-loadout rules', 'cyan')}")
+    steps = _memory_next_steps(_memory_state(cwd, cfg), cfg.memory.enabled)
+    if steps:
+        command, why = steps[0]
+        print(f"    4. {why[0].upper()}{why[1:]}:")
+        print(f"         {_paint(command, 'cyan')}")
     return 0
 
 def _cmd_measure(cwd: Path) -> int:
@@ -931,6 +1618,16 @@ def _print_help() -> None:
         f"{_paint('Usage:', 'bold')}\n"
         f"  {cmd('cld [claude-args...]')}   Launch claude with a goal-scoped tool set\n"
         f"  {cmd('cld --explain')}          Print the scoping plan, then exit (no launch)\n"
+        f"  {cmd('cld recall <query>')}    Search the memory store and print matching entries in full\n"
+        f"  {cmd('cld memory add <text>')} Record a note (--global for every repo, --anchor path)\n"
+        f"  {cmd('cld memory scope <name> repo|global')}  Change how far an existing note reaches\n"
+        f"  {cmd('cld memory consolidate')}  Review recorded sessions and promote them to memories\n"
+        f"  {cmd('cld memory audit')}     Review the store and delete what no longer earns its place\n"
+        f"                                (--context '<goal>' to see what it would recall and why,\n"
+        f"                                 --all-repos for every project, --json for a session to read)\n"
+        f"  {cmd('cld memory flag <name>')}  Mark an entry as wrong (--reason ..., --clear to undo)\n"
+        f"  {cmd('cld debt add|list|resolve')}  Track shims, stubs and skipped tests you left behind\n"
+        f"  {cmd('cld decision new|list|show|supersede')}  Architectural decisions, versioned per repo\n"
         f"  {cmd('cld rules')}              Author profile-wide keep/drop rules (all repos; launch prompts are repo-local)\n"
         f"  {cmd('cld init [ROOT]')}        Seed local config — this repo, or bulk-seed every project under ROOT\n"
         f"  {cmd('cld update [ROOT]')}      Refresh existing seeds — this repo, or all seeded under ROOT\n"
@@ -975,6 +1672,21 @@ def _print_explain(scope: _Scope, plan) -> None:
         for cid, tok in scope.connectors:
             print(f"    {_paint('✗', 'red')} {cid:<{w}}  {_paint('~' + _savings.human_tokens(tok), 'dim')}")
         print()
+    if scope.memory is not None:
+        m = scope.memory
+        print(_paint("  memory", "bold"))
+        if m.total == 0:
+            print(_paint("    store is empty — nothing injected", "dim"))
+        elif m.shown == 0:
+            print(_paint(f"    {_plural(m.total, 'entry')} in store, none injected "
+                         "(below min_entries or threshold)", "dim"))
+        else:
+            print(f"    injected:       {m.shown} of {m.total} entries  "
+                  f"{_paint('≈ ' + _savings.human_tokens(m.injected) + ' tokens (heuristic)', 'yellow')}")
+        if m.resident:
+            print(_paint(f"    already loaded: {m.resident} by Claude Code itself "
+                         "(MEMORY.md index) — not repeated here", "dim"))
+        print()
     s = scope.savings
     on_demand = s.deferred + conn_tok
     print(_paint("  savings", "bold"))
@@ -982,6 +1694,12 @@ def _print_explain(scope: _Scope, plan) -> None:
     print(f"    up front:       "
           f"{_paint('≈ ' + _savings.human_tokens(s.eager) + ' tokens', 'green', 'bold')} "
           f"{_paint('— skill + plugin context, gone from turn one', 'dim')}")
+    if s.injected:
+        net = _savings.human_tokens(abs(s.net))
+        sign = "gain" if s.net >= 0 else "cost"
+        print(f"    net up front:   "
+              f"{_paint(('≈ ' if s.net >= 0 else '≈ -') + net + ' tokens', 'bold')} "
+              f"{_paint(f'— after the memory payload ({sign})', 'dim')}")
     if on_demand:
         note = "measured" if scope.connectors else "estimate"
         print(f"    on-demand:      {_paint('≈ ' + _savings.human_tokens(on_demand) + ' tokens', 'dim')} "
@@ -1069,6 +1787,34 @@ def _run(argv: list[str] | None = None) -> int:
         return 0
     if argv and argv[0] == "doctor":                # doctor enumerates every profile itself
         return _cmd_doctor(cwd)
+    # `cld <words…>` used to pass a bare prompt through to claude, and these verbs are ordinary
+    # English. Only claim argv when the second word names a real action; otherwise fall through
+    # and let the session have the prompt.
+    if argv and argv[0] == "decision" and _is_action(argv, _DECISION_ACTIONS):
+        return _cmd_decision(cwd, argv[1:], _resolve_config_root(os.environ, []))
+    if argv and argv[0] == "debt" and _is_action(argv, _DEBT_ACTIONS):
+        return _cmd_debt(cwd, argv[1:], _resolve_config_root(os.environ, []))
+    if argv and argv[0] == "memory" and _is_action(argv, _MEMORY_ACTIONS):
+        sub = argv[1] if len(argv) > 1 else ""
+        if sub == "add":
+            return _cmd_write_entry(cwd, argv[2:], "memory", _resolve_config_root(os.environ, []))
+        if sub == "consolidate":
+            return _cmd_consolidate(cwd, _resolve_config_root(os.environ, []))
+        if not sub:                                 # a bare `memory` is the entry point, not an error
+            return _print_memory_status(cwd, load_config(
+                cwd=cwd, config_root_override=_resolve_config_root(os.environ, [])))
+        if sub == "scope":
+            return _cmd_scope(cwd, argv[2:], _resolve_config_root(os.environ, []))
+        if sub in ("enable", "disable"):
+            return _cmd_memory_toggle(cwd, sub == "enable", _resolve_config_root(os.environ, []))
+        if sub == "audit":
+            return _cmd_audit(cwd, argv[2:], _resolve_config_root(os.environ, []))
+        if sub == "flag":
+            return _cmd_flag(cwd, argv[2:], _resolve_config_root(os.environ, []))
+        _warn(f"unknown memory command {sub!r}; try enable, add, audit, flag or consolidate")
+        return 2                                    # unreachable: _is_action already filtered
+    if argv and argv[0] == "recall":                # T2 retrieval: no scoping, no launch
+        return _cmd_recall(cwd, argv[1:], _resolve_config_root(os.environ, []))
     if argv and argv[0] == "measure":               # opt-in, connects to servers; no scoping
         return _cmd_measure(cwd)
     if argv and argv[0] == "init":                  # bulk-seed repo config; resolves profiles itself
@@ -1102,7 +1848,13 @@ def _run(argv: list[str] | None = None) -> int:
         _cleanup(plan.tmp_paths)
         return 0
     scope, plan = _launch_gate(scope, plan, gate, passthrough, no_gate)   # read/adjust before claude takes the screen
+    _memory_intro_once(scope.memory)                # the first injection explains itself, once
+    _record_delivery(scope, cwd)                    # only a real launch counts as a delivery
+    # Only when recall is on: a launcher that captures nothing should not shell out to git.
+    head_before = _git(cwd, "rev-parse", "HEAD") if getattr(scope, "memory", None) else None
     try:
-        return subprocess.run(plan.argv, env=plan.env).returncode
+        code = subprocess.run(plan.argv, env=plan.env).returncode
     finally:
         _cleanup(plan.tmp_paths)
+    _capture_session(scope, cwd, code, head_before)
+    return code

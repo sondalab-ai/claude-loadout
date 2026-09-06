@@ -1,5 +1,5 @@
 from pathlib import Path
-from ccloadout.inventory import claude_code_inventory, Item
+from ccloadout.inventory import claude_code_inventory, Item, _frontmatter
 
 def _root(tmp_path: Path) -> Path:
     root = tmp_path / "root"; root.mkdir()
@@ -87,3 +87,56 @@ def test_inventory_default_profile_reads_home_claude_json(tmp_path: Path, monkey
         '{"mcpServers": {"HomeSrv": {"command": "h"}}}')
     by_id = {(i.kind, i.id) for i in claude_code_inventory(root)}
     assert ("mcp", "HomeSrv") in by_id
+
+# --- frontmatter: nested blocks and lists (memory/decision files) -------------
+
+def test_frontmatter_parses_nested_mapping_one_level():
+    text = ("---\nname: skill-scoping\ndescription: how it works\n"
+            "metadata:\n  node_type: memory\n  type: project\n  uses: 3\n---\nbody")
+    fm = _frontmatter(text)
+    assert fm["name"] == "skill-scoping"
+    assert fm["metadata"] == {"node_type": "memory", "type": "project", "uses": "3"}
+
+def test_frontmatter_parses_inline_list():
+    text = "---\nid: 2026-06-08-routing\ntags: [agents, routing, multi-user]\n---\nbody"
+    fm = _frontmatter(text)
+    assert fm["tags"] == ["agents", "routing", "multi-user"]
+
+def test_frontmatter_parses_quoted_and_empty_inline_list():
+    fm = _frontmatter('---\ntags: ["a", \'b\']\nanchors: []\n---\nbody')
+    assert fm["tags"] == ["a", "b"]
+    assert fm["anchors"] == []
+
+def test_frontmatter_parses_block_sequence():
+    text = "---\nanchors:\n  - src/cli.py\n  - src/goal.py\n---\nbody"
+    assert _frontmatter(text)["anchors"] == ["src/cli.py", "src/goal.py"]
+
+def test_frontmatter_nested_block_ignores_deeper_levels():
+    text = "---\nmetadata:\n  type: project\n  extra:\n    deep: 1\n---\nbody"
+    assert _frontmatter(text)["metadata"] == {"type": "project", "extra": ""}
+
+def test_frontmatter_scalar_and_block_scalar_behaviour_unchanged():
+    assert _frontmatter("---\nmetadata: 1\n---\n")["metadata"] == "1"
+    assert _frontmatter("---\nd: >\n  a\n  b\n---\n")["d"] == "a b"
+    assert _frontmatter("---\nd: |\n  a\n  b\n---\n")["d"] == "a\nb"
+
+def test_frontmatter_keeps_a_plain_multiline_scalar_as_text():
+    # Legal YAML that is not a mapping: an indented block of prose. Treating it as one produced a
+    # dict, which then reached Item.description and was embedded by the ranker.
+    text = ("---\nname: astro\ndescription:\n"
+            "  Use when the user asks for X. Triggers on: \"do X\", \"make X\".\n"
+            "  Also handles Y.\n---\nbody")
+    d = _frontmatter(text)["description"]
+    assert isinstance(d, str)
+    assert d == 'Use when the user asks for X. Triggers on: "do X", "make X". Also handles Y.'
+
+def test_frontmatter_still_reads_a_real_nested_mapping():
+    text = "---\nname: n\nmetadata:\n  node_type: memory\n  uses: 2\n---\nbody"
+    assert _frontmatter(text)["metadata"] == {"node_type": "memory", "uses": "2"}
+
+def test_inventory_never_hands_the_ranker_a_non_string_description(tmp_path: Path):
+    root = tmp_path / "root"; skill = root / "skills" / "s"; skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text(
+        "---\nname: s\ndescription:\n  plain prose with no colon at all\n  over two lines\n---\nx")
+    item = next(i for i in claude_code_inventory(root) if i.kind == "skill")
+    assert isinstance(item.description, str) and "plain prose" in item.description

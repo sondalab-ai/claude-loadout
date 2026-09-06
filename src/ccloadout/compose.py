@@ -1,5 +1,5 @@
 from __future__ import annotations
-import json, os, tempfile
+import json, os, shlex, sys, tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping
@@ -12,6 +12,12 @@ class LaunchPlan:
     env: dict[str, str]
     tmp_paths: list[Path]
 
+def _write_tmp_text(prefix: str, text: str, suffix: str = ".txt") -> Path:
+    fd, name = tempfile.mkstemp(prefix=f"loadout-{prefix}-", suffix=suffix)
+    with os.fdopen(fd, "w") as fh:
+        fh.write(text)
+    return Path(name)
+
 def _write_tmp(prefix: str, data: dict) -> Path:
     fd, name = tempfile.mkstemp(prefix=f"loadout-{prefix}-", suffix=".json")
     with os.fdopen(fd, "w") as fh:
@@ -22,7 +28,10 @@ def compose(kept, all_items, config_root: Path, passthrough: list[str],
             environ: Mapping[str, str] | None = None,
             cwd: Path | None = None,
             global_config_path: Path | None = None,
-            launch_config_dir: Path | None = None) -> LaunchPlan:
+            launch_config_dir: Path | None = None,
+            memory_payload: str | None = None,
+            hooks: dict[str, str] | None = None,
+            hook_env: dict | None = None) -> LaunchPlan:
     environ = os.environ if environ is None else environ
     kept_ids = {i.id for i in kept}
     if global_config_path is None:
@@ -39,14 +48,33 @@ def compose(kept, all_items, config_root: Path, passthrough: list[str],
     dropped_skills = {i.id: "off" for i in all_items
                       if i.kind == "skill" and i.id not in kept_ids}
     settings: dict = {"enabledPlugins": dropped_plugins}
+    if hooks:
+        # Hooks in this overlay merge with the user's own rather than replacing them (verified),
+        # so adding one cannot silence an installed plugin's capture. Each is a module run by the
+        # interpreter that is running us, addressed absolutely — never a bare name on PATH.
+        # The command string is shell-parsed by the harness, so an interpreter path containing a
+        # space has to survive quoting; the timeout is explicit because the default is 60 s and
+        # these hooks are meant to be imperceptible.
+        settings["hooks"] = {event: [{"hooks": [
+            {"type": "command", "command": f"{shlex.quote(sys.executable)} -m {module}",
+             "timeout": 5}]}]
+            for event, module in hooks.items()}
     if dropped_skills:
         settings["skillOverrides"] = dropped_skills
 
     mcp_path = _write_tmp("mcp", {"mcpServers": curated})
     settings_path = _write_tmp("settings", settings)
+    tmp_paths = [mcp_path, settings_path]
     argv = ["claude", "--strict-mcp-config", "--mcp-config", str(mcp_path),
-            "--settings", str(settings_path), *passthrough]
+            "--settings", str(settings_path)]
+    if memory_payload:                             # ranked recall rides in as system-prompt text
+        memory_path = _write_tmp_text("memory", memory_payload, suffix=".md")
+        tmp_paths.append(memory_path)
+        argv += ["--append-system-prompt-file", str(memory_path)]
+    argv += passthrough
     env = dict(environ)
+    if hook_env:                                   # hooks read env + stdin, never argv
+        env.update({k: str(v) for k, v in hook_env.items()})
     if launch_config_dir is not None:              # propagate a prompted profile to claude itself
         env["CLAUDE_CONFIG_DIR"] = str(launch_config_dir)
-    return LaunchPlan(argv=argv, env=env, tmp_paths=[mcp_path, settings_path])
+    return LaunchPlan(argv=argv, env=env, tmp_paths=tmp_paths)

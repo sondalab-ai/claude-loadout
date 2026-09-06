@@ -1,6 +1,6 @@
 from __future__ import annotations
 import os, sys, tomllib
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Mapping
 from ccloadout.savings import DEFAULT_TOKEN_COSTS
@@ -14,6 +14,22 @@ def _warn(msg: str) -> None:                       # local, avoids importing cli
     print(f"claude-loadout: {msg}", file=sys.stderr)
 
 @dataclass(frozen=True)
+class MemoryConfig:
+    enabled: bool = False        # opt-in: without it the launcher behaves exactly as before
+    budget_tokens: int = 800     # ceiling on the resident recall payload
+    threshold: float = DEFAULT_THRESHOLD
+    min_entries: int = 1         # below this, inject nothing at all — not even the usage contract
+    promote_after: int = 3       # deliveries in a repo after which an entry is pinned into recall
+    decay_days: int = 90         # no delivery for this long demotes an entry (never deletes it)
+    decay_factor: float = 0.5
+    git_tracked: bool = True     # new entries land in <repo>/docs/memory and travel in git
+    prompt_recall: bool = False  # re-rank the store against each prompt (adds a hook to the session)
+    prompt_recall_max: int = 2   # entries the prompt hook may add per turn
+    prompt_timeout_ms: int = 300 # the hook's own wall-clock ceiling; it exits 0 when it fires
+    debt_patterns: tuple[str, ...] = ("TODO(loadout)",)   # markers a PostToolUse hook watches for
+    scopes: tuple[str, ...] = ("repo", "global")   # which notes a session may see
+
+@dataclass(frozen=True)
 class Config:
     config_root: Path
     global_config_path: Path            # .claude.json: mcpServers + project scopes
@@ -22,6 +38,7 @@ class Config:
     model_name: str
     rule_model_path: str | None
     token_costs: dict[str, int] = field(default_factory=lambda: dict(DEFAULT_TOKEN_COSTS))
+    memory: MemoryConfig = field(default_factory=MemoryConfig)
 
 def _read_toml(path: Path) -> dict:
     try:
@@ -82,6 +99,11 @@ def load_config(cwd: Path, environ: Mapping[str, str] | None = None,
         rule_model = environ["LOADOUT_RULE_MODEL"]
     if rule_model:
         rule_model = str(Path(rule_model).expanduser())
+    memory = MemoryConfig()
+    for layer in layers:
+        table = layer.get("memory")
+        if isinstance(table, dict):
+            memory = replace(memory, **_memory_fields(table))
     if "LOADOUT_ALWAYS_KEEP" in environ:
         always = tuple(x for x in environ["LOADOUT_ALWAYS_KEEP"].split(",") if x)
     if "LOADOUT_THRESHOLD" in environ:
@@ -89,4 +111,55 @@ def load_config(cwd: Path, environ: Mapping[str, str] | None = None,
     return Config(config_root=root, global_config_path=global_config_path,
                   always_keep=always, threshold=threshold,
                   model_name=model, rule_model_path=rule_model,
-                  token_costs=token_costs)
+                  token_costs=token_costs, memory=memory)
+
+
+def _memory_fields(table: dict) -> dict:
+    # Coerce to the declared type and warn instead of trusting the file: a `prompt_timeout_ms`
+    # written as 0.3 used to reach the hook's env verbatim and kill recall for the whole session.
+    out: dict = {}
+    for key, value in table.items():
+        field = MemoryConfig.__dataclass_fields__.get(key)
+        if field is None:
+            continue
+        try:
+            if key in ("debt_patterns", "scopes"):
+                out[key] = tuple(str(x) for x in value)
+            elif field.type == "bool":
+                out[key] = bool(value)
+            elif field.type == "int":
+                out[key] = int(value)
+            elif field.type == "float":
+                out[key] = float(value)
+            else:
+                out[key] = value
+        except (TypeError, ValueError):
+            _warn(f"[memory] {key} = {value!r} is not a {field.type}; using the default")
+    return out
+
+def set_memory_enabled(repo: Path, enabled: bool) -> Path:
+    """Flip `[memory] enabled` in a repository's own config, leaving everything else alone.
+
+    Surgical on purpose: the file may already carry a seeded threshold, model and other
+    sections, and a rewrite would silently drop them. The key is placed inside the [memory]
+    table and nowhere else — an `enabled` key belonging to another section is not ours to touch.
+    """
+    path = repo / ".loadout" / "config.toml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    value = "true" if enabled else "false"
+    lines = path.read_text().splitlines() if path.exists() else []
+    start = next((i for i, ln in enumerate(lines) if ln.strip() == "[memory]"), None)
+    if start is None:
+        block = ["", "[memory]", f"enabled = {value}"]
+        path.write_text("\n".join([*lines, *block]).lstrip("\n") + "\n")
+        return path
+    end = next((i for i in range(start + 1, len(lines)) if lines[i].lstrip().startswith("[")),
+               len(lines))
+    at = next((i for i in range(start + 1, end) if lines[i].split("=")[0].strip() == "enabled"),
+              None)
+    if at is None:
+        lines.insert(start + 1, f"enabled = {value}")
+    else:
+        lines[at] = f"enabled = {value}"
+    path.write_text("\n".join(lines) + "\n")
+    return path

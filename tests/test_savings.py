@@ -35,3 +35,25 @@ def test_human_tokens_formatting():
     assert savings.human_tokens(1800) == "1.8k"
     assert savings.human_tokens(5000) == "5k"
     assert savings.human_tokens(12300) == "12.3k"
+
+# --- injected memory tokens: recall spends what pruning saves -----------------
+
+def test_injected_tokens_are_reported_and_netted():
+    from ccloadout.savings import estimate_savings
+    kept = [_it("skill", "a"), _it("mcp", "b")]
+    dropped = [_it("skill", "c"), _it("skill", "d")]
+    s = estimate_savings(kept, dropped, injected=30)
+    assert s.eager == 100 and s.injected == 30
+    assert s.net == 70                                  # eager saved minus resident memory
+
+def test_net_ignores_deferred_savings():
+    from ccloadout.savings import estimate_savings
+    s = estimate_savings([], [_it("mcp", "m")], injected=40)
+    assert s.deferred == 1200 and s.eager == 0
+    assert s.net == -40          # an mcp drop frees ~nothing up front; memory still costs
+
+def test_memory_is_not_a_prunable_kind():
+    from ccloadout.savings import PRUNABLE, estimate_savings
+    assert "memory" not in PRUNABLE
+    s = estimate_savings([], [_it("memory", "x")], injected=0)
+    assert s.dropped == 0 and s.tokens == 0             # un-injected memories are not savings

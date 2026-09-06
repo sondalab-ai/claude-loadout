@@ -22,6 +22,9 @@ is not loaded for that run.
 - **Scoped once, then reused:** the first time you scope a repo, the decision is saved to
   `.loadout/`. Every later launch reuses it; you refresh it deliberately with `claude-loadout update`. An
   unseeded repo is scoped on the fly at launch.
+- **Also your notes, optionally:** the same ranking can put the memories relevant to *this* session
+  into it — and only those, inside a token budget you set. Off until you run `cld memory enable`.
+  See [Memory recall](#memory-recall).
 - **Safe:** nothing about your global setup changes, and if anything fails claude-loadout falls back to a
   normal full session.
 - **Install:** `pipx install ccloadout`, then type `claude-loadout` (or its short alias `cld`) in place of `claude` (`cld -p "..."`). It forwards every argument to Claude Code. Aliases are optional.
@@ -233,8 +236,9 @@ each key** (layers don't merge; a list value is overwritten wholesale):
 | Key | Meaning | Default |
 |---|---|---|
 | `always_keep` | Item ids or glob patterns to never prune. Unknown ids are ignored. | *(empty)* |
-| `threshold` | Cosine cutoff; an item is kept when its relevance score is `>= threshold`. Higher prunes more; lower keeps more. Calibrate with `--explain`. | `0.20` |
+| `threshold` | Cosine cutoff; an item is kept when its relevance score is `>= threshold`. Higher prunes more; lower keeps more. Calibrate with `--explain`. | `0.24` |
 | `model_name` | The embedding model used for ranking. | `minishlab/potion-base-8M` |
+| `[memory]` | Opt-in session memory recall. See [Memory recall](#memory-recall). | *(off)* |
 | `rule_model_path` | Absolute path to a local GGUF instruct model for compiling natural-language rules. **Not bundled, you supply it.** Unset means natural-language rule authoring is off (you still get the *keep / drop / skip* prompt). See [Exclusion rules](#exclusion-rules). | *(unset)* |
 
 ```toml
@@ -242,7 +246,7 @@ each key** (layers don't merge; a list value is overwritten wholesale):
 # always_keep below is an EXAMPLE, the shipped default is empty.
 always_keep = ["superpowers", "remember", "caveman*"]
 
-threshold = 0.20
+threshold = 0.24
 
 # Optional: only needed for natural-language rule authoring (see "Exclusion rules").
 # This model is NOT shipped with claude-loadout, download a GGUF yourself and point here.
@@ -255,6 +259,216 @@ MIT-licensed), a fresh install ranks offline out of the box, with no first-run d
 `model_name` at another model2vec model (a Hub id or a local directory) only if you want to
 override the default; a Hub id is fetched on demand, and if a model can't be loaded at all
 claude-loadout falls back to a keyword-matching heuristic and warns, it still runs.
+
+## Memory recall
+
+Your notes from past sessions, ranked against what this session is about, and only the ones that fit
+a token budget. **Off until you turn it on.**
+
+```sh
+cld memory enable      # this repository
+cld memory             # status, and what to do next
+```
+
+`cld init` asks once per run whether to enable it for the repositories it seeds. Everything is
+reversible with `cld memory disable`.
+
+### How the pieces fit
+
+```
+   you write a note ──┐
+                      ├─→  store  ──rank──→  session context  ──→  cld recall (session asks for more)
+   a session ends ────┘      ↑                     │
+   (candidate)               │                     └──→  cld memory flag  (session says "this is wrong")
+                             └── cld memory audit  ←──────────────┘
+```
+
+Four verbs, in the order you meet them:
+
+| | |
+|---|---|
+| `cld memory add "<note>"` | write something down now |
+| `cld memory consolidate` | turn finished sessions into notes, one confirmation each |
+| `cld recall "<query>"` | search the store and print entries in full |
+| `cld memory audit` | review what you have, delete what has gone stale |
+
+### Where notes live
+
+It reads stores that already exist rather than inventing another one:
+
+- `./docs/memory/` in the repository (git-tracked — this is where new notes go by default)
+- `$CLAUDE_CONFIG_DIR/projects/<slug>/memory/` — Claude Code's own memory directory
+- your `debug-decisions` corpus, if you keep one
+
+**No note is ever written to a folder of ours.** Uninstall `claude-loadout` and every note stays
+exactly where it is, in a directory Claude Code already reads. There is nothing to migrate.
+
+### Notes that follow you between projects
+
+A note about a tool, a harness quirk or the way you like to work is not about the repository you
+happened to discover it in. Mark it global and every session sees it:
+
+```sh
+cld memory add --global "the settings overlay merges hooks, it does not replace them"
+cld memory scope some-old-note global        # promote one you already have
+```
+
+Global is a property of the note — `scope: global` in its frontmatter — not a special location, so
+the file still lives in a canonical store. `[memory] scopes = ["repo"]` turns the cross-project half
+off entirely.
+
+### Notes that point at each other
+
+Two notes often only make sense together: a decision and the constraint behind it, a bug and the
+lever that caused it. Link them, in the frontmatter or with `[[wikilinks]]` in the body, and a note
+that gets recalled brings what it points at:
+
+```
+- [memory · repo] skill-scoping-mechanism — how loadout prunes user skills…
+- [memory · repo] overlay-merge-quirk — hooks merge, they do not replace (linked to skill-scoping-mechanism)
+```
+
+One step out, never two: past that, relevance evaporates and the budget fills with cousins. Links
+are followed only from notes that were admitted on their own merit, so a rejected note cannot
+smuggle its neighbours in.
+
+```toml
+# .loadout/config.toml
+[memory]
+enabled = true
+budget_tokens = 800     # ceiling on what recall may inject
+threshold = 0.24        # relevance cutoff, same scale as tool ranking
+git_tracked = true      # new notes land in ./docs/memory and travel with the repo
+scopes = ["repo", "global"]   # drop "global" to see only this repository's notes
+promote_after = 3       # deliveries after which a note is pinned into recall
+decay_days = 90         # untouched for this long, a note is demoted (never deleted)
+prompt_recall = false   # also re-rank on every prompt (see below)
+```
+
+### It does not duplicate Claude Code's own memory
+
+Claude Code already injects the lines of its `MEMORY.md` index into every session. Notes it lists
+are skipped here rather than sent twice — the budget goes to the ones the session would not
+otherwise have, and the skipped notes stay reachable with `cld recall`. `--explain` says so:
+
+```
+  memory
+    injected:       3 of 7 entries  ≈ 210 tokens (heuristic)
+    already loaded: 3 by Claude Code itself (MEMORY.md index) — not repeated here
+```
+
+When you add or delete a note beside such an index, its line is kept in step, so Claude Code is
+never left pointing at a file that no longer exists.
+
+### What it costs, and what it saves
+
+`cld --explain` shows both, because recall spends the tokens pruning saves:
+
+```
+  memory
+    injected:       6 of 7 entries  ≈ 366 tokens (heuristic)
+
+  savings
+    up front:       ≈ 3.5k tokens — skill + plugin context, gone from turn one
+    net up front:   ≈ 3.1k tokens — after the memory payload (gain)
+```
+
+### Who writes the notes
+
+Both of you, with the line drawn at review.
+
+You write with `cld memory add`, and the session is invited to: the injected block teaches it
+`memory add` alongside `recall`, for the things a later session would otherwise have to rediscover —
+a root cause, a dead end, a decision you made together. Not routine progress. Whatever it writes is
+an ordinary note: ranked, budgeted, and deletable in the audit like any other.
+
+It is also told how to choose the reach, with a test it can actually apply: a fact about **this
+repository** stays here, a fact about a tool, the harness or how you work — still true in a
+different repository — goes in with `--global`. Global notes are marked as such in the audit,
+because a wrong one costs you in every session rather than one; `cld memory scope <name> repo`
+demotes it.
+
+Finished sessions and debt markers are captured automatically, but as *candidates* — never notes:
+
+```toml
+[memory]
+debt_patterns = ["TODO(loadout)"]   # markers to watch for; set to [] to capture nothing
+```
+
+Write `# TODO(loadout) drop this stub` into a file during a session and `cld memory consolidate`
+will offer to turn it into open debt, anchored to that file. It watches shell writes too, since
+that is how files usually get written — but only commands that actually write. Searching for a
+marker with `grep` records nothing.
+
+### Auditing
+
+Notes rot. `cld memory audit` lists them with the signals that decide whether they still earn their
+place — how often used, an anchor that disappeared, a flag someone raised. Unchecking marks a note
+for deletion; nothing is removed until you type `delete`. Add `--all-repos` for every project at
+once, which is where the forgotten ones live.
+
+To see why a session recalled what it did:
+
+```
+$ cld memory audit --context "how does skill scoping work"
+  what a session on 'how does skill scoping work' would recall
+  threshold 0.24 · budget 800 tokens
+
+    ✓ 0.632  deci 2026-08-21-1326-per-session-skill-sco… Per-session skill scoping: settings-f…
+    ✓ 0.536  memo skill-scoping-mechanism                How loadout prunes user-level skills…
+    ── below the line ──
+    · 0.157  memo strict-mcp-config-connectors           How --strict-mcp-config affects clau…  below-threshold
+```
+
+Every note gets a score and a reason: `below-threshold`, `over-budget`, `stale-anchor`, `decayed`,
+`promoted`, `flagged`, `resolved`.
+
+### When a session finds a bad note
+
+It can say so, but not act on it:
+
+```sh
+cld memory flag skill-scoping-mechanism --reason "names a lever renamed in 2.1.261"
+```
+
+The flag is stored beside your notes, never inside them. It demotes the note straight away and
+hides it from per-prompt recall; you resolve it in the audit, or clear it with `--clear`.
+`cld memory audit --json` gives a session the whole store to read. Deleting stays yours.
+
+### Debt you left behind
+
+The thing neither a session log nor a decision record captures is the shim you meant to remove:
+
+```sh
+cld debt add --anchor src/ccloadout/rules.py "fail-fast stub until the compiler lands"
+cld debt list
+cld debt resolve fail-fast-stub-until-the-compiler-lands
+```
+
+A file changing under an anchor never closes an entry by itself — an unrelated edit would silently
+close real debt. It flags it and leaves the call to you. Resolved entries stop being injected but
+stay findable with `cld recall`.
+
+### Decisions
+
+`cld decision new|list|show|supersede` writes the same files as the `debug-decisions` skill, in the
+same directory, so both tools see one corpus. `cld decision revert` is deliberately absent:
+executing destructive git operations does not belong in a launcher.
+
+### Recall on every prompt (optional)
+
+`prompt_recall = true` adds a hook that re-ranks the store against what you actually typed and adds
+at most two notes the session did not already have. It scores lexically rather than with the
+embedding model — loading that costs ~520 ms, and this runs on every prompt — and measures **38 ms
+median, 56 ms worst** end to end.
+
+It exits successfully on every path, including its own timeout: on `UserPromptSubmit` a failing hook
+does not merely error, it erases what you were typing.
+
+> **One caution.** Injected notes sit in the highest-trust position a session has. The block says so
+> — it is labelled untrusted reference data — because with `git_tracked = true` a note can reach you
+> through a merged pull request. Set it to `false`, or leave `[memory]` off, in repositories whose
+> notes you would not accept as reference material.
 
 ## Exclusion rules
 

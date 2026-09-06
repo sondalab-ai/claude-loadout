@@ -54,3 +54,63 @@ def test_compose_no_skilloverrides_when_no_skill_dropped(tmp_path: Path):
     settings = _settings_of(plan)
     assert "skillOverrides" not in settings                    # nothing to override
     assert settings["enabledPlugins"] == {"figma@x": False}
+
+# --- memory payload injection -------------------------------------------------
+
+def test_memory_payload_is_passed_as_a_system_prompt_file(tmp_path: Path):
+    plan = compose([], [], tmp_path, [], environ={}, cwd=tmp_path,
+                   global_config_path=tmp_path / ".claude.json",
+                   memory_payload="<claude-loadout-memory>\nnotes\n</claude-loadout-memory>")
+    assert "--append-system-prompt-file" in plan.argv
+    path = Path(plan.argv[plan.argv.index("--append-system-prompt-file") + 1])
+    assert path.read_text().startswith("<claude-loadout-memory>")
+    assert path in plan.tmp_paths                       # cleaned up with the rest of the launch
+
+def test_no_memory_payload_leaves_the_argv_untouched(tmp_path: Path):
+    plan = compose([], [], tmp_path, [], environ={}, cwd=tmp_path,
+                   global_config_path=tmp_path / ".claude.json")
+    assert "--append-system-prompt-file" not in plan.argv
+
+def test_empty_memory_payload_injects_nothing(tmp_path: Path):
+    plan = compose([], [], tmp_path, [], environ={}, cwd=tmp_path,
+                   global_config_path=tmp_path / ".claude.json", memory_payload="")
+    assert "--append-system-prompt-file" not in plan.argv
+
+def test_passthrough_still_comes_last(tmp_path: Path):
+    plan = compose([], [], tmp_path, ["--model", "opus"], environ={}, cwd=tmp_path,
+                   global_config_path=tmp_path / ".claude.json", memory_payload="notes")
+    assert plan.argv[-2:] == ["--model", "opus"]
+
+def test_prompt_recall_adds_a_hook_and_its_environment(tmp_path: Path):
+    plan = compose([], [], tmp_path, [], environ={}, cwd=tmp_path,
+                   global_config_path=tmp_path / ".claude.json",
+                   hooks={"UserPromptSubmit": "ccloadout.prompt_hook"},
+                   hook_env={"LOADOUT_CONFIG_ROOT": "/x", "LOADOUT_PROMPT_MAX": 2})
+    hook = _settings_of(plan)["hooks"]["UserPromptSubmit"][0]["hooks"][0]
+    assert hook["type"] == "command" and "ccloadout.prompt_hook" in hook["command"]
+    assert plan.env["LOADOUT_CONFIG_ROOT"] == "/x" and plan.env["LOADOUT_PROMPT_MAX"] == "2"
+
+def test_two_hooks_are_installed_side_by_side(tmp_path: Path):
+    plan = compose([], [], tmp_path, [], environ={}, cwd=tmp_path,
+                   global_config_path=tmp_path / ".claude.json",
+                   hooks={"UserPromptSubmit": "ccloadout.prompt_hook",
+                          "PostToolUse": "ccloadout.debt_hook"},
+                   hook_env={"LOADOUT_DEBT_PATTERNS": "TODO(loadout)"})
+    events = _settings_of(plan)["hooks"]
+    assert set(events) == {"UserPromptSubmit", "PostToolUse"}
+    assert "debt_hook" in events["PostToolUse"][0]["hooks"][0]["command"]
+    assert plan.env["LOADOUT_DEBT_PATTERNS"] == "TODO(loadout)"
+
+def test_no_prompt_recall_means_no_hooks_key(tmp_path: Path):
+    plan = compose([], [], tmp_path, [], environ={}, cwd=tmp_path,
+                   global_config_path=tmp_path / ".claude.json")
+    assert "hooks" not in _settings_of(plan)
+
+def test_hook_command_is_quoted_and_time_limited(tmp_path: Path):
+    plan = compose([], [], tmp_path, [], environ={}, cwd=tmp_path,
+                   global_config_path=tmp_path / ".claude.json",
+                   hooks={"PostToolUse": "ccloadout.debt_hook"}, hook_env={})
+    hook = _settings_of(plan)["hooks"]["PostToolUse"][0]["hooks"][0]
+    assert hook["timeout"] == 5
+    import shlex, sys
+    assert shlex.split(hook["command"])[0] == sys.executable   # survives a path with spaces

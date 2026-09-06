@@ -24,6 +24,8 @@ PRUNABLE = frozenset(DEFAULT_TOKEN_COSTS)
 # context up front. DEFERRED kinds (MCP tool schemas) load on demand — Claude Code lists them as
 # "loaded on-demand", so their cost materializes only if a tool is actually used. Dropping them
 # avoids that potential cost and blocks the invocation, but frees ~nothing up front.
+# `memory` is deliberately absent from PRUNABLE and from the cost table: recalled memory is a
+# cost the session pays, tracked as Savings.injected, not an item that pruning can remove.
 EAGER_KINDS = frozenset({"skill", "plugin"})
 DEFERRED_KINDS = frozenset({"mcp"})
 
@@ -33,6 +35,14 @@ class Savings(NamedTuple):
     tokens: int         # estimated tokens (eager + deferred)
     eager: int = 0      # trimmed from context up front (skill + plugin)
     deferred: int = 0   # on-demand cost avoided only if the tool is used (mcp)
+    injected: int = 0   # resident tokens this session *spends* on recalled memory
+
+    @property
+    def net(self) -> int:
+        # What the session actually gains up front. Deferred savings are excluded on purpose:
+        # they free ~nothing until a tool is used, so folding them in would let a hypothetical
+        # saving mask a real cost. Negative means recall spent more than pruning saved.
+        return self.eager - self.injected
 
 def _prunable(items: Iterable[_Kinded]) -> list[_Kinded]:
     return [i for i in items if i.kind in PRUNABLE]
@@ -59,12 +69,13 @@ def token_estimate(items: Iterable[_Kinded], costs: Mapping[str, int] | None = N
 
 def estimate_savings(kept: Iterable[_Kinded], dropped: Iterable[_Kinded],
                      costs: Mapping[str, int] | None = None,
-                     measured: Mapping[str, int] | None = None) -> Savings:
+                     measured: Mapping[str, int] | None = None,
+                     injected: int = 0) -> Savings:
     # kept/dropped are the plain Item lists (callers strip any score tuples first).
     kept_p, dropped_p = _prunable(kept), _prunable(dropped)
     eager, deferred = _split_by_load(dropped_p, costs or DEFAULT_TOKEN_COSTS, measured)
     return Savings(dropped=len(dropped_p), total=len(kept_p) + len(dropped_p),
-                   tokens=eager + deferred, eager=eager, deferred=deferred)
+                   tokens=eager + deferred, eager=eager, deferred=deferred, injected=injected)
 
 def budget(items: Iterable[_Kinded], costs: Mapping[str, int] | None = None,
            measured: Mapping[str, int] | None = None) -> Savings:
