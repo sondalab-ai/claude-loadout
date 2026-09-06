@@ -1,4 +1,4 @@
-import json, os, subprocess, sys, time
+import json, os, subprocess, sys, time, unicodedata
 from pathlib import Path
 
 from ccloadout.stop_hook import build_reminder, parse_transcript, signals
@@ -202,3 +202,13 @@ def test_ordinary_english_prose_does_not_trip_the_foreign_stems():
         [_said(f"turn {i}") for i in range(6)]
         + [_said("an elegant fix, eligible for backport, and the flaky test now passes")]))
     assert signals(parsed, "-Users-x-repo") == []
+
+def test_a_stem_with_a_diacritic_matches_either_unicode_form():
+    # macOS normalises to NFD, where "wählen" is `a` + U+0308 and does not contain the
+    # composed "wähl" the stem list is written in.
+    for form in ("NFC", "NFD"):
+        said = unicodedata.normalize(form, "welchen Weg wählen wir")
+        parsed = parse_transcript("\n".join([_said(f"turn {i}") for i in range(6)]
+                                            + [_said(said)]))
+        assert signals(parsed, "-Users-x-repo", keywords=("wähl",)) == ["keyword"], form
+        assert signals(parsed, "-Users-x-repo") == ["keyword"], form   # and via the default

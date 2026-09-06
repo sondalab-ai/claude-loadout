@@ -9,7 +9,7 @@ so only the tail is parsed. A file long enough to be truncated is a long session
 which is the only thing the turn count is used to decide.
 """
 from __future__ import annotations
-import json, os, re, sys, time
+import json, os, re, sys, time, unicodedata
 from pathlib import Path
 
 MIN_TURNS = 5                                       # a short session decided nothing worth filing
@@ -107,6 +107,9 @@ def parse_transcript(text: str) -> dict:
     return {"turns": turns, "messages": messages, "files": sorted(files),
             "plan_mode": plan_mode, "skills": skills}
 
+def _nfc(text: str) -> str:
+    return unicodedata.normalize("NFC", text)
+
 def signals(parsed: dict, slug: str, truncated: bool = False,
             keywords: tuple[str, ...] = ()) -> list[str]:
     """Names the reasons this session looks like it made a decision; empty means stay quiet."""
@@ -123,8 +126,10 @@ def signals(parsed: dict, slug: str, truncated: bool = False,
         found.append("files-edited")
     if any(_DESIGN_SKILL.match(s) for s in parsed["skills"]):
         found.append("design-skill")
-    haystack = "\n".join(parsed["messages"]).lower()
-    if any(word in haystack for word in (keywords or KEYWORDS)):
+    # NFC on both sides: macOS hands back decomposed text, where "wählen" is `a` + U+0308 and
+    # would not contain the composed "wähl" the stem list is written in.
+    haystack = _nfc("\n".join(parsed["messages"]).lower())
+    if any(_nfc(word) in haystack for word in (keywords or KEYWORDS)):
         found.append("keyword")
     return found
 

@@ -30,6 +30,9 @@ class MemoryConfig:
     stop_prompt: bool = False    # at session end, ask the session to record what it decided
     # Deliberation stems the Stop hook looks for, matched lowercased as substrings. The default
     # (stop_hook.KEYWORDS) covers en/it/es/de; set this to replace it for another language.
+    # Note the asymmetry with debt_patterns above: there `[]` means capture nothing, here it means
+    # keep the built-in list. The keyword signal has no off switch — `stop_prompt = false` is the
+    # switch, and the other three signals do not read the conversation at all.
     decision_keywords: tuple[str, ...] = ()
     scopes: tuple[str, ...] = ("repo", "global")   # which notes a session may see
 
