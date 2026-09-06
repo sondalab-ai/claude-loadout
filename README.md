@@ -277,6 +277,9 @@ enabled = true
 budget_tokens = 800     # ceiling on the injected block
 threshold = 0.24        # relevance cutoff, same scale as tool ranking
 min_entries = 1         # below this, inject nothing at all
+git_tracked = true      # new entries land in ./docs/memory and travel with the repo
+promote_after = 3       # deliveries after which an entry is pinned into recall
+decay_days = 90         # no delivery for this long demotes an entry (never deletes it)
 ```
 
 Selected entries ride in as system-prompt text — one line each, labelled with their kind and
@@ -301,10 +304,50 @@ $ cld recall "how are skills pruned"
 Recall costs tokens; the point is that it costs fewer than it saves, and the number is printed
 rather than assumed.
 
+### What the store learns
+
+Delivery counters live in `$CLAUDE_CONFIG_DIR/loadout/usage.json`, never in the entries themselves,
+so a launch never dirties a git-tracked file. An entry delivered `promote_after` times is admitted
+before better-ranked ones — but promotion can never take more than half the budget, or it would
+starve the ranking it rides on. An entry not delivered for `decay_days` is demoted, and only ever
+demoted: nothing is deleted without you asking.
+
+Finished sessions are recorded as *candidates* — goal, exit code, files touched — and stay
+candidates until you promote them:
+
+```
+$ cld memory consolidate
+  2 sessions · goal-aware launcher that scopes claude code sessions
+    touched: src/ccloadout/recall.py, tests/test_recall.py
+    [k]eep as a memory / [d]iscard / [s]kip?
+```
+
+### Debt you left behind
+
+The one thing neither a session log nor a decision record captures is the shim you meant to remove:
+
+```
+$ cld debt add --anchor src/ccloadout/rules.py "fail-fast stub until the compiler lands"
+$ cld debt list
+  open  fail-fast-stub-until-the-compiler-lands — …  ⚠ anchor gone
+$ cld debt resolve fail-fast-stub-until-the-compiler-lands
+```
+
+A file changing under an anchor never closes an entry by itself — an unrelated edit would silently
+close real debt. It flags it as possibly stale and leaves the decision to you. Resolved entries stop
+being injected but stay findable with `cld recall`.
+
+### Decisions
+
+`cld decision new|list|show|supersede` writes the same file shape as the `debug-decisions` skill,
+in the same directory, so both tools see one corpus and neither migrates the other's files.
+`cld decision revert` is deliberately absent: executing destructive git operations does not belong
+in a launcher.
+
 > **One caution.** Injected entries sit in the highest-trust position a session has. The block is
-> labelled as untrusted reference data for exactly that reason: with a store under `./docs/memory/`,
-> a note can reach you through a merged pull request. Leave `[memory]` off in repositories whose
-> notes you would not accept as reference material.
+> labelled as untrusted reference data for exactly that reason: with `git_tracked = true`, a note
+> can reach you through a merged pull request. Set it to `false`, or leave `[memory]` off entirely,
+> in repositories whose notes you would not accept as reference material.
 
 ## Exclusion rules
 

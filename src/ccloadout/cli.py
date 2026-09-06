@@ -9,9 +9,10 @@ from ccloadout.inventory import claude_code_inventory, Item
 from ccloadout.goal import detect_goal, write_goal_cache
 from ccloadout.ranker import Ranker, make_model2vec_embed, keyword_embed, bundled_model_path, resolve_model_source
 from ccloadout.compose import compose
-from ccloadout.memory import EntryExists, read_store, set_status, write_entry
+from ccloadout.memory import EntryExists, read_store, set_status, slug_for, write_entry
 from ccloadout.usage import load_usage, record_delivery
 from ccloadout.candidates import drop_rows, load_candidates, record_session
+from ccloadout.decisions import corpus_dir, new_decision, supersede
 from ccloadout.recall import (anchor_state, build_payload, estimate_tokens,
                               recall_command, search, select, strip_frontmatter)
 from ccloadout.rules import (load_rules, apply_rules, has_rule, save_rule, write_rules,
@@ -332,6 +333,50 @@ def _cmd_debt(cwd: Path, args: list[str], override: Path | None = None) -> int:
         state = _paint("resolved", "dim") if e.status == "resolved" else _paint("open", "yellow")
         mark = "" if anchor_state(e, cwd) != "missing" else _paint("  ⚠ anchor gone", "yellow")
         print(f"  {state}  {e.name} — {_short_desc(e.description, 60)}{mark}")
+    return 0
+
+def _cmd_decision(cwd: Path, args: list[str], override: Path | None = None) -> int:
+    action, rest = (args[0], args[1:]) if args else ("list", [])
+    cfg = load_config(cwd=cwd, config_root_override=override)
+    decisions = [e for e in read_store(cwd, cfg.config_root).entries if e.kind == "decision"]
+    if action == "new":
+        rest, tag_args = _pop_flag(list(rest), "--tags")
+        title = " ".join(rest).strip()
+        if not title:
+            _warn("decision new needs a title")
+            return 2
+        tags = [t for arg in tag_args for t in arg.split(",") if t]
+        path = new_decision(corpus_dir(cfg.config_root, cwd), slug_for(cwd), title, tags)
+        print(f"{_paint('wrote', 'green')} {path}")
+        return 0
+    if action == "show":
+        match = next((e for e in decisions if rest and e.name.startswith(rest[0])), None)
+        if match is None:
+            _warn("decision show needs the id of an existing decision")
+            return 1
+        print(strip_frontmatter(match.path.read_text(errors="ignore")).strip())
+        return 0
+    if action == "supersede":
+        if len(rest) < 2:
+            _warn("decision supersede needs an id and the title of the new decision")
+            return 2
+        old = next((e for e in decisions if e.name.startswith(rest[0])), None)
+        if old is None:
+            _warn(f"no decision matching {rest[0]!r}")
+            return 1
+        path = new_decision(corpus_dir(cfg.config_root, cwd), slug_for(cwd), " ".join(rest[1:]), [])
+        supersede(old.path, path.stem)
+        print(f"{_paint('wrote', 'green')} {path}\n{_paint('superseded', 'dim')} {old.name}")
+        return 0
+    if action != "list":
+        _warn(f"unknown decision command {action!r}; try new, list, show or supersede")
+        return 2
+    if not decisions:
+        print(_paint("no decisions recorded for this repository", "dim"))
+        return 0
+    for e in decisions:
+        state = _paint("active", "green") if e.status == "active" else _paint(e.status or "?", "dim")
+        print(f"  {state}  {e.name} — {_short_desc(e.description, 60)}")
     return 0
 
 def _cmd_recall(cwd: Path, args: list[str], config_root_override: Path | None = None) -> int:
@@ -1036,6 +1081,39 @@ def _profile_report(root: Path, cwd: Path, active: bool,
         print(f"    on-demand:    ~{_savings.human_tokens(on_demand)} tokens, {detail} "
               f"{_paint('(load lazily; avoided only if used)', 'dim')}")
 
+def _memory_report(cfg, cwd: Path) -> None:
+    print(_paint("  memory", "bold"))
+    if not cfg.memory.enabled:
+        print(_paint("    off — enable with [memory] enabled = true in loadout/config.toml", "dim"))
+        print()
+        return
+    store = read_store(cwd, cfg.config_root)
+    kinds = {k: sum(1 for e in store.entries if e.kind == k)
+             for k in sorted({e.kind for e in store.entries})}
+    print(f"    entries:          {len(store.entries)}"
+          + (f" ({', '.join(f'{n} {k}' for k, n in kinds.items())})" if kinds else ""))
+    open_debt = [e for e in store.entries if e.kind == "debt" and e.status != "resolved"]
+    if open_debt:
+        print(f"    open debt:        {_paint(str(len(open_debt)), 'yellow')} "
+              + _paint("— claude-loadout debt list", "dim"))
+    states = [anchor_state(e, cwd) for e in store.entries]
+    if states.count("missing") or states.count("changed"):
+        print(f"    stale anchors:    {_paint(str(states.count('missing')), 'yellow')} gone, "
+              f"{states.count('changed')} changed")
+    for kept, dropped in store.shadowed:            # same slug in two stores: one is invisible
+        print(f"    {_paint('shadowed', 'yellow')}  {dropped.path} "
+              + _paint(f"(hidden by {kept.path})", "dim"))
+    usage = load_usage(cfg.config_root, cwd)
+    if usage:
+        earning = sum(1 for rec in usage.values() if rec.uses >= cfg.memory.promote_after)
+        print(f"    delivered:        {len(usage)} entries, {earning} promoted "
+              + _paint(f"(>= {cfg.memory.promote_after} deliveries)", "dim"))
+    pending = load_candidates(cfg.config_root, cwd)
+    if pending:
+        print(f"    candidates:       {len(pending)} "
+              + _paint("— claude-loadout memory consolidate", "dim"))
+    print()
+
 def _cmd_doctor(cwd: Path) -> int:
     cfg = load_config(cwd=cwd)
     print(_paint("claude-loadout doctor", "bold"))
@@ -1048,6 +1126,7 @@ def _cmd_doctor(cwd: Path) -> int:
         _profile_report(root, cwd, active,
                         cfg.global_config_path if active else None, cfg.token_costs)
         print()
+    _memory_report(cfg, cwd)
     repo_cfg = cwd / ".loadout" / "config.toml"
     print(_paint("  environment", "bold"))
     print(f"    repo config:      {_paint(str(repo_cfg), 'cyan')} ({_yn(repo_cfg.is_file())})")
@@ -1135,6 +1214,7 @@ def _print_help() -> None:
         f"  {cmd('cld memory add <text>')} Record a note for this repo (--name slug, --anchor path)\n"
         f"  {cmd('cld memory consolidate')}  Review recorded sessions and promote them to memories\n"
         f"  {cmd('cld debt add|list|resolve')}  Track shims, stubs and skipped tests you left behind\n"
+        f"  {cmd('cld decision new|list|show|supersede')}  Architectural decisions, versioned per repo\n"
         f"  {cmd('cld rules')}              Author profile-wide keep/drop rules (all repos; launch prompts are repo-local)\n"
         f"  {cmd('cld init [ROOT]')}        Seed local config — this repo, or bulk-seed every project under ROOT\n"
         f"  {cmd('cld update [ROOT]')}      Refresh existing seeds — this repo, or all seeded under ROOT\n"
@@ -1291,6 +1371,8 @@ def _run(argv: list[str] | None = None) -> int:
         return 0
     if argv and argv[0] == "doctor":                # doctor enumerates every profile itself
         return _cmd_doctor(cwd)
+    if argv and argv[0] == "decision":              # absorbed from the debug-decisions skill
+        return _cmd_decision(cwd, argv[1:], _resolve_config_root(os.environ, []))
     if argv and argv[0] == "debt":                  # the debt ledger: explicit lifecycle only
         return _cmd_debt(cwd, argv[1:], _resolve_config_root(os.environ, []))
     if argv and argv[0] == "memory":

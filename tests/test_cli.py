@@ -1256,3 +1256,42 @@ def test_consolidate_discards_without_writing_anything(tmp_path, monkeypatch, ca
     cli.main(["memory", "consolidate"])
     assert load_candidates(root, tmp_path) == []
     assert not list((tmp_path / "docs" / "memory").glob("a-dead-end*"))
+
+def test_decision_new_list_show_and_supersede(tmp_path, monkeypatch, capsys):
+    _memory_repo(tmp_path, n=1)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "root"))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.chdir(tmp_path)
+    assert cli.main(["decision", "new", "--tags", "storage,git", "Keep counters in a sidecar"]) == 0
+    cli.main(["decision", "list"])
+    out = capsys.readouterr().out
+    assert "active" in out and "keep-counters-in-a-sidecar" in out
+    did = [w for w in out.split() if w.endswith("keep-counters-in-a-sidecar")][0]
+    cli.main(["decision", "show", did])
+    assert "## Context" in capsys.readouterr().out
+    assert cli.main(["decision", "supersede", did, "Keep counters in the entry files"]) == 0
+    capsys.readouterr()
+    cli.main(["decision", "list"])
+    assert "superseded" in capsys.readouterr().out
+
+def test_doctor_reports_store_health(tmp_path, monkeypatch, capsys):
+    root = _memory_repo(tmp_path, n=2)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "make_model2vec_embed", lambda name: cli.keyword_embed)
+    cli.main(["debt", "add", "--anchor", "src/gone.py", "a shim"])
+    capsys.readouterr()
+    cli.main(["doctor"])
+    out = capsys.readouterr().out
+    assert "entries:" in out and "3" in out
+    assert "open debt" in out and "stale anchors" in out
+
+def test_doctor_says_memory_is_off_when_it_is(tmp_path, monkeypatch, capsys):
+    _root(tmp_path)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "root"))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "make_model2vec_embed", lambda name: cli.keyword_embed)
+    cli.main(["doctor"])
+    assert "off — enable with" in capsys.readouterr().out
