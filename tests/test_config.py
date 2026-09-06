@@ -38,3 +38,20 @@ def test_config_root_override_default_profile_uses_home_json(tmp_path: Path, mon
     cfg = load_config(cwd=tmp_path, environ={}, config_root_override=default_root)
     assert cfg.config_root == default_root
     assert cfg.global_config_path == tmp_path / ".claude.json"   # HOME-root, not <dir>/.claude.json
+
+def test_memory_section_is_read_and_defaults_to_off(tmp_path: Path):
+    root = tmp_path / "root"; (root / "loadout").mkdir(parents=True)
+    assert load_config(tmp_path, environ={"CLAUDE_CONFIG_DIR": str(root)}).memory.enabled is False
+    (root / "loadout" / "config.toml").write_text(
+        "[memory]\nenabled = true\nbudget_tokens = 400\nmin_entries = 3\n")
+    mem = load_config(tmp_path, environ={"CLAUDE_CONFIG_DIR": str(root)}).memory
+    assert mem.enabled is True and mem.budget_tokens == 400 and mem.min_entries == 3
+    assert mem.threshold == 0.24                     # untouched keys keep their default
+
+def test_repo_layer_overrides_profile_memory_settings(tmp_path: Path):
+    root, cwd = tmp_path / "root", tmp_path / "cwd"
+    (root / "loadout").mkdir(parents=True); (cwd / ".loadout").mkdir(parents=True)
+    (root / "loadout" / "config.toml").write_text("[memory]\nenabled = true\nbudget_tokens = 400\n")
+    (cwd / ".loadout" / "config.toml").write_text("[memory]\nbudget_tokens = 100\n")
+    mem = load_config(cwd, environ={"CLAUDE_CONFIG_DIR": str(root)}).memory
+    assert mem.budget_tokens == 100 and mem.enabled is True

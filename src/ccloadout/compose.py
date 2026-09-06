@@ -12,6 +12,12 @@ class LaunchPlan:
     env: dict[str, str]
     tmp_paths: list[Path]
 
+def _write_tmp_text(prefix: str, text: str, suffix: str = ".txt") -> Path:
+    fd, name = tempfile.mkstemp(prefix=f"loadout-{prefix}-", suffix=suffix)
+    with os.fdopen(fd, "w") as fh:
+        fh.write(text)
+    return Path(name)
+
 def _write_tmp(prefix: str, data: dict) -> Path:
     fd, name = tempfile.mkstemp(prefix=f"loadout-{prefix}-", suffix=".json")
     with os.fdopen(fd, "w") as fh:
@@ -22,7 +28,8 @@ def compose(kept, all_items, config_root: Path, passthrough: list[str],
             environ: Mapping[str, str] | None = None,
             cwd: Path | None = None,
             global_config_path: Path | None = None,
-            launch_config_dir: Path | None = None) -> LaunchPlan:
+            launch_config_dir: Path | None = None,
+            memory_payload: str | None = None) -> LaunchPlan:
     environ = os.environ if environ is None else environ
     kept_ids = {i.id for i in kept}
     if global_config_path is None:
@@ -44,9 +51,15 @@ def compose(kept, all_items, config_root: Path, passthrough: list[str],
 
     mcp_path = _write_tmp("mcp", {"mcpServers": curated})
     settings_path = _write_tmp("settings", settings)
+    tmp_paths = [mcp_path, settings_path]
     argv = ["claude", "--strict-mcp-config", "--mcp-config", str(mcp_path),
-            "--settings", str(settings_path), *passthrough]
+            "--settings", str(settings_path)]
+    if memory_payload:                             # ranked recall rides in as system-prompt text
+        memory_path = _write_tmp_text("memory", memory_payload, suffix=".md")
+        tmp_paths.append(memory_path)
+        argv += ["--append-system-prompt-file", str(memory_path)]
+    argv += passthrough
     env = dict(environ)
     if launch_config_dir is not None:              # propagate a prompted profile to claude itself
         env["CLAUDE_CONFIG_DIR"] = str(launch_config_dir)
-    return LaunchPlan(argv=argv, env=env, tmp_paths=[mcp_path, settings_path])
+    return LaunchPlan(argv=argv, env=env, tmp_paths=tmp_paths)

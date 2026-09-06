@@ -1,6 +1,6 @@
 from __future__ import annotations
 import os, sys, tomllib
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Mapping
 from ccloadout.savings import DEFAULT_TOKEN_COSTS
@@ -14,6 +14,13 @@ def _warn(msg: str) -> None:                       # local, avoids importing cli
     print(f"claude-loadout: {msg}", file=sys.stderr)
 
 @dataclass(frozen=True)
+class MemoryConfig:
+    enabled: bool = False        # opt-in: without it the launcher behaves exactly as before
+    budget_tokens: int = 800     # ceiling on the resident recall payload
+    threshold: float = DEFAULT_THRESHOLD
+    min_entries: int = 1         # below this, inject nothing at all — not even the usage contract
+
+@dataclass(frozen=True)
 class Config:
     config_root: Path
     global_config_path: Path            # .claude.json: mcpServers + project scopes
@@ -22,6 +29,7 @@ class Config:
     model_name: str
     rule_model_path: str | None
     token_costs: dict[str, int] = field(default_factory=lambda: dict(DEFAULT_TOKEN_COSTS))
+    memory: MemoryConfig = field(default_factory=MemoryConfig)
 
 def _read_toml(path: Path) -> dict:
     try:
@@ -82,6 +90,12 @@ def load_config(cwd: Path, environ: Mapping[str, str] | None = None,
         rule_model = environ["LOADOUT_RULE_MODEL"]
     if rule_model:
         rule_model = str(Path(rule_model).expanduser())
+    memory = MemoryConfig()
+    for layer in layers:
+        table = layer.get("memory")
+        if isinstance(table, dict):
+            memory = replace(memory, **{k: v for k, v in table.items()
+                                        if k in MemoryConfig.__dataclass_fields__})
     if "LOADOUT_ALWAYS_KEEP" in environ:
         always = tuple(x for x in environ["LOADOUT_ALWAYS_KEEP"].split(",") if x)
     if "LOADOUT_THRESHOLD" in environ:
@@ -89,4 +103,4 @@ def load_config(cwd: Path, environ: Mapping[str, str] | None = None,
     return Config(config_root=root, global_config_path=global_config_path,
                   always_keep=always, threshold=threshold,
                   model_name=model, rule_model_path=rule_model,
-                  token_costs=token_costs)
+                  token_costs=token_costs, memory=memory)

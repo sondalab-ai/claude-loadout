@@ -54,3 +54,29 @@ def test_compose_no_skilloverrides_when_no_skill_dropped(tmp_path: Path):
     settings = _settings_of(plan)
     assert "skillOverrides" not in settings                    # nothing to override
     assert settings["enabledPlugins"] == {"figma@x": False}
+
+# --- memory payload injection -------------------------------------------------
+
+def test_memory_payload_is_passed_as_a_system_prompt_file(tmp_path: Path):
+    plan = compose([], [], tmp_path, [], environ={}, cwd=tmp_path,
+                   global_config_path=tmp_path / ".claude.json",
+                   memory_payload="<claude-loadout-memory>\nnotes\n</claude-loadout-memory>")
+    assert "--append-system-prompt-file" in plan.argv
+    path = Path(plan.argv[plan.argv.index("--append-system-prompt-file") + 1])
+    assert path.read_text().startswith("<claude-loadout-memory>")
+    assert path in plan.tmp_paths                       # cleaned up with the rest of the launch
+
+def test_no_memory_payload_leaves_the_argv_untouched(tmp_path: Path):
+    plan = compose([], [], tmp_path, [], environ={}, cwd=tmp_path,
+                   global_config_path=tmp_path / ".claude.json")
+    assert "--append-system-prompt-file" not in plan.argv
+
+def test_empty_memory_payload_injects_nothing(tmp_path: Path):
+    plan = compose([], [], tmp_path, [], environ={}, cwd=tmp_path,
+                   global_config_path=tmp_path / ".claude.json", memory_payload="")
+    assert "--append-system-prompt-file" not in plan.argv
+
+def test_passthrough_still_comes_last(tmp_path: Path):
+    plan = compose([], [], tmp_path, ["--model", "opus"], environ={}, cwd=tmp_path,
+                   global_config_path=tmp_path / ".claude.json", memory_payload="notes")
+    assert plan.argv[-2:] == ["--model", "opus"]
