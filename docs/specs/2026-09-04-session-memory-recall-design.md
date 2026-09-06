@@ -185,6 +185,12 @@ installed into `$CLAUDE_CONFIG_DIR/skills/` and a fresh `pip install ccloadout` 
 Instead the T1 payload — already resident, already budgeted — carries a short usage contract naming
 the store and the command. Two requirements:
 
+0. The payload teaches **two** commands, not one: `recall` to read, and `memory add` to write.
+   Without the second, the only party that knows what a session learned — the session — has no way
+   to say so, and every note has to come from the user by hand. The invitation is deliberately
+   narrow (a root cause, a dead end, a decision made with the user; not routine progress), and what
+   it produces is an ordinary entry: rankable, budgeted, flaggable and deletable in `cld memory
+   audit`. Nothing an agent writes reaches a later session unranked.
 1. The injected text names the **absolute resolved path** of the running entry point (available to
    `compose` at launch), not the bare name `cld`. A bare name that is not on the launched session's
    `PATH` fails silently, and the agent cannot tell that from an empty store.
@@ -233,9 +239,20 @@ control when it exits (lever F). That splits capture in two, and only one half n
   hook-merge assumption, no cost inside the session. An earlier draft put this in a `Stop` hook on
   the strength of a false premise; the hook is removed.
 - **Mid-session — `PostToolUse` hook (lever A).** Only **debt signals** matched by explicit patterns
-  the user configures (e.g. a `TODO(loadout)` marker written into a file, a skipped test). These are
-  invisible from outside the session, so this is the one thing a hook buys. No inference, no model
-  call. The hook command is written as an absolute resolved path, for the reason given in §5.2.1.
+  the user configures (`[memory] debt_patterns`, default `TODO(loadout)`). These are invisible from
+  outside the session, so this is the one thing a hook buys. No inference, no model call: a pattern
+  matched or it did not. The hook command is written as an absolute resolved path, for the reason
+  given in §5.2.1.
+
+  > **A tool-name filter is not enough (measured live).** Restricting to `Write`/`Edit` misses the
+  > common case: asked to create a file, Claude Code reached for `Bash` and a `printf … > file`
+  > redirect, and the hook saw nothing. `Bash` is therefore included, but only when the command
+  > actually writes — it carries a redirect, a heredoc, `tee`, `sed -i` or `patch`. `grep
+  > "TODO(loadout)"` records nothing, because searching for a marker is not creating one. This is
+  > mechanical, not inferential: the rule is "the command writes **and** contains the pattern".
+
+  A signal becomes a *candidate*, never a ledger entry. `cld memory consolidate` shows it and the
+  user turns it into open debt, anchored to the file, or discards it.
 
 `debug-decisions` registers a `Stop` hook of its own (a retrospective nudge). Hooks merge rather
 than shadow (lever A), so it is unaffected either way; absorption removes the duplication by making
@@ -347,6 +364,8 @@ than given a goal it does not serve.
 | Token budget + net savings accounting | (the "no pollution" constraint) | 1 |
 | Staleness / anchor verification | G2 | 2 |
 | Debt ledger with explicit lifecycle | G3 | 2 |
+| `PostToolUse` capture of configured debt markers | G3 | 2 |
+| The payload invites the session to record what it learned | G1, G2 | 1 |
 | Usage counters, promotion, decay | ("reshapes itself", made measurable) | 2 |
 | `decision` kind absorbed from `debug-decisions` | G1 | 2 |
 | Prompt-aware re-rank hook (default off) | G2 | 3 |

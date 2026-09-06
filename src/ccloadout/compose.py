@@ -30,7 +30,8 @@ def compose(kept, all_items, config_root: Path, passthrough: list[str],
             global_config_path: Path | None = None,
             launch_config_dir: Path | None = None,
             memory_payload: str | None = None,
-            prompt_recall: dict | None = None) -> LaunchPlan:
+            hooks: dict[str, str] | None = None,
+            hook_env: dict | None = None) -> LaunchPlan:
     environ = os.environ if environ is None else environ
     kept_ids = {i.id for i in kept}
     if global_config_path is None:
@@ -47,12 +48,13 @@ def compose(kept, all_items, config_root: Path, passthrough: list[str],
     dropped_skills = {i.id: "off" for i in all_items
                       if i.kind == "skill" and i.id not in kept_ids}
     settings: dict = {"enabledPlugins": dropped_plugins}
-    if prompt_recall:
+    if hooks:
         # Hooks in this overlay merge with the user's own rather than replacing them (verified),
-        # so adding one cannot silence an installed plugin's capture.
-        settings["hooks"] = {"UserPromptSubmit": [{"hooks": [
-            {"type": "command",
-             "command": f"{sys.executable} -m ccloadout.prompt_hook"}]}]}
+        # so adding one cannot silence an installed plugin's capture. Each is a module run by the
+        # interpreter that is running us, addressed absolutely — never a bare name on PATH.
+        settings["hooks"] = {event: [{"hooks": [
+            {"type": "command", "command": f"{sys.executable} -m {module}"}]}]
+            for event, module in hooks.items()}
     if dropped_skills:
         settings["skillOverrides"] = dropped_skills
 
@@ -67,8 +69,8 @@ def compose(kept, all_items, config_root: Path, passthrough: list[str],
         argv += ["--append-system-prompt-file", str(memory_path)]
     argv += passthrough
     env = dict(environ)
-    if prompt_recall:                              # the hook reads only env + stdin, never argv
-        env.update({k: str(v) for k, v in prompt_recall.items()})
+    if hook_env:                                   # hooks read env + stdin, never argv
+        env.update({k: str(v) for k, v in hook_env.items()})
     if launch_config_dir is not None:              # propagate a prompted profile to claude itself
         env["CLAUDE_CONFIG_DIR"] = str(launch_config_dir)
     return LaunchPlan(argv=argv, env=env, tmp_paths=tmp_paths)

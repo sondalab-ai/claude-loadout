@@ -1481,3 +1481,42 @@ def test_deleting_an_indexed_entry_leaves_no_dangling_index_line(tmp_path, monke
     cli.main(["memory", "audit"])
     assert not (mem / "native.md").exists()
     assert "native" not in (mem / "MEMORY.md").read_text()
+
+def test_consolidate_turns_a_debt_signal_into_an_open_entry(tmp_path, monkeypatch, capsys):
+    from ccloadout.candidates import load_candidates, record_signal
+    root = _memory_repo(tmp_path, n=1)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
+    monkeypatch.chdir(tmp_path)
+    record_signal(root, tmp_path, pattern="TODO(loadout)", file="src/x.py",
+                  excerpt="pass  # TODO(loadout) drop the shim")
+    monkeypatch.setattr(cli, "_interactive", lambda passthrough: True)
+    answers = iter(["k", "shim in the rules compiler"])
+    monkeypatch.setattr(cli, "_ask", lambda prompt: next(answers, ""))
+    assert cli.main(["memory", "consolidate"]) == 0
+    entry = tmp_path / "docs" / "memory" / "shim-in-the-rules-compiler.md"
+    assert entry.exists() and "status: open" in entry.read_text()
+    assert "anchors: [src/x.py]" in entry.read_text()
+    assert load_candidates(root, tmp_path, kind="debt-signal") == []
+
+def test_consolidate_discards_a_signal_without_writing(tmp_path, monkeypatch, capsys):
+    from ccloadout.candidates import load_candidates, record_signal
+    root = _memory_repo(tmp_path, n=1)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
+    monkeypatch.chdir(tmp_path)
+    record_signal(root, tmp_path, pattern="TODO(loadout)", file="a.py", excerpt="# TODO(loadout) x")
+    monkeypatch.setattr(cli, "_interactive", lambda passthrough: True)
+    monkeypatch.setattr(cli, "_ask", lambda prompt: "d")
+    cli.main(["memory", "consolidate"])
+    assert load_candidates(root, tmp_path) == []
+    assert not list((tmp_path / "docs" / "memory").glob("*todo*"))
+
+def test_repeated_writes_of_one_marker_are_a_single_candidate(tmp_path, monkeypatch, capsys):
+    from ccloadout.candidates import record_signal
+    root = _memory_repo(tmp_path, n=1)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
+    monkeypatch.chdir(tmp_path)
+    for _ in range(3):
+        record_signal(root, tmp_path, pattern="TODO(loadout)", file="a.py", excerpt="# TODO x")
+    monkeypatch.setattr(cli, "_interactive", lambda passthrough: False)
+    cli.main(["memory", "consolidate"])
+    assert capsys.readouterr().out.count("debt marker in a.py") == 1

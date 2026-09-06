@@ -33,13 +33,27 @@ def record_session(config_root: Path, repo: Path, goal: str, exit_code: int,
     path = candidates_path(config_root)
     path.parent.mkdir(parents=True, exist_ok=True)
     _rotate(path, max_bytes)
-    row = {"at": datetime.now().astimezone().isoformat(timespec="seconds"),
-           "repo": str(repo), "goal": goal, "exit_code": exit_code,
-           "changed": changed[:_MAX_CHANGED], "changed_total": len(changed)}
+    _append(path, {"kind": "session", "repo": str(repo), "goal": goal, "exit_code": exit_code,
+                   "changed": changed[:_MAX_CHANGED], "changed_total": len(changed)})
+
+def record_signal(config_root: Path, repo: Path, pattern: str, file: str, excerpt: str,
+                  max_bytes: int = DEFAULT_MAX_BYTES) -> None:
+    # A debt marker the user configured, seen being written into a file. Deterministic: a pattern
+    # matched or it did not. It becomes a candidate, never a debt entry — only `consolidate` (and
+    # the user in it) turns a signal into something the store carries.
+    path = candidates_path(config_root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _rotate(path, max_bytes)
+    _append(path, {"kind": "debt-signal", "repo": str(repo), "pattern": pattern,
+                   "file": file, "excerpt": excerpt[:200]})
+
+def _append(path: Path, row: dict) -> None:
+    row = {"at": datetime.now().astimezone().isoformat(timespec="seconds"), **row}
     with path.open("a") as fh:
         fh.write(json.dumps(row) + "\n")
 
-def load_candidates(config_root: Path, repo: Path | None = None) -> list[dict]:
+def load_candidates(config_root: Path, repo: Path | None = None,
+                    kind: str | None = None) -> list[dict]:
     try:
         lines = candidates_path(config_root).read_text().splitlines()
     except OSError:
@@ -50,8 +64,11 @@ def load_candidates(config_root: Path, repo: Path | None = None) -> list[dict]:
             row = json.loads(line)
         except json.JSONDecodeError:                # a half-written line is skipped, never fatal
             continue
-        if isinstance(row, dict) and (repo is None or row.get("repo") == str(repo)):
-            rows.append(row)
+        if not isinstance(row, dict) or (repo is not None and row.get("repo") != str(repo)):
+            continue
+        if kind is not None and (row.get("kind") or "session") != kind:
+            continue                                # rows written before `kind` existed are sessions
+        rows.append(row)
     return rows
 
 def drop_rows(config_root: Path, repo: Path, keep: list[dict]) -> None:

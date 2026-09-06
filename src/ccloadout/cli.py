@@ -238,13 +238,15 @@ def _cmd_consolidate(cwd: Path, override: Path | None = None) -> int:
     cfg = load_config(cwd=cwd, config_root_override=override)
     rows = load_candidates(cfg.config_root, cwd)
     if not rows:
-        print(_paint("no session candidates recorded for this repository", "dim"))
+        print(_paint("no candidates recorded for this repository", "dim"))
         return 0
+    signals = [r for r in rows if r.get("kind") == "debt-signal"]
+    sessions = [r for r in rows if r.get("kind") != "debt-signal"]
     groups: dict[str, list[dict]] = {}
-    for row in rows:                                # near-duplicates collapse by goal
+    for row in sessions:                            # near-duplicates collapse by goal
         groups.setdefault(str(row.get("goal") or ""), []).append(row)
     interactive = _interactive([])
-    kept_rows: list[dict] = []
+    kept_rows: list[dict] = _consolidate_signals(cwd, cfg, signals, interactive)
     for goal, rows_for_goal in groups.items():
         files = sorted({f for r in rows_for_goal for f in (r.get("changed") or [])})
         print(_paint(f"  {_plural(len(rows_for_goal), 'session')} · {goal}", "bold"))
@@ -275,6 +277,39 @@ def _cmd_consolidate(cwd: Path, override: Path | None = None) -> int:
     if interactive:
         drop_rows(cfg.config_root, cwd, kept_rows)
     return 0
+
+def _consolidate_signals(cwd: Path, cfg, signals: list[dict], interactive: bool) -> list[dict]:
+    # A debt marker seen being written is a *signal*, not an entry: the ledger only ever gains
+    # something a person agreed to put there.
+    kept: list[dict] = []
+    seen: dict[tuple, dict] = {}
+    for row in signals:                             # the same marker rewritten is one candidate
+        seen.setdefault((row.get("file"), row.get("excerpt")), row)
+    for row in seen.values():
+        where = row.get("file") or "?"
+        print(_paint(f"  debt marker in {where}", "bold"))
+        print(_paint(f"    {_short_desc(str(row.get('excerpt') or ''), 90)}", "dim"))
+        if not interactive:
+            kept.append(row)
+            continue
+        answer = _ask("    [k]eep as open debt / [d]iscard / [s]kip? ").strip().lower()
+        if answer.startswith("d"):
+            continue
+        if not answer.startswith("k"):
+            kept.append(row)
+            continue
+        description = _ask("    one line describing the debt: ").strip() or str(row.get("excerpt"))
+        anchors = [where] if row.get("file") else []
+        try:
+            path = write_entry(cfg.config_root, cwd, name=_slugify(description),
+                               description=description, kind="debt",
+                               git_tracked=cfg.memory.git_tracked, anchors=anchors)
+        except EntryExists as exc:
+            _warn(f"an entry already exists at {exc}; keeping the candidate")
+            kept.append(row)
+            continue
+        print(f"    {_paint('wrote', 'green')} {path}")
+    return kept
 
 def _record_delivery(scope, cwd: Path) -> None:
     mem = getattr(scope, "memory", None)
@@ -345,16 +380,22 @@ def _cmd_debt(cwd: Path, args: list[str], override: Path | None = None) -> int:
         print(f"  {state}  {e.name} — {_short_desc(e.description, 60)}{mark}")
     return 0
 
-def _prompt_recall_env(cfg, cwd: Path, mem) -> dict | None:
-    # Slice 3: a per-prompt hook, off unless asked for. It re-ranks lexically (no model, ~40 ms
-    # measured) and is told what is already resident so it never repeats the launch payload.
-    if not (cfg.memory.enabled and cfg.memory.prompt_recall) or mem is None:
-        return None
-    return {"LOADOUT_CONFIG_ROOT": str(cfg.config_root),
-            "LOADOUT_REPO": str(cwd),
-            "LOADOUT_RESIDENT_IDS": ",".join(mem.delivered),
-            "LOADOUT_PROMPT_MAX": cfg.memory.prompt_recall_max,
-            "LOADOUT_PROMPT_TIMEOUT_MS": cfg.memory.prompt_timeout_ms}
+def _session_hooks(cfg, cwd: Path, mem) -> tuple[dict | None, dict | None]:
+    # Two optional hooks, each installed only when it has work to do. Both read env and stdin,
+    # never argv, and both exit 0 on every path.
+    if not cfg.memory.enabled or mem is None:
+        return None, None
+    hooks: dict[str, str] = {}
+    env = {"LOADOUT_CONFIG_ROOT": str(cfg.config_root), "LOADOUT_REPO": str(cwd)}
+    if cfg.memory.prompt_recall:                   # re-rank per prompt; told what is already resident
+        hooks["UserPromptSubmit"] = "ccloadout.prompt_hook"
+        env.update({"LOADOUT_RESIDENT_IDS": ",".join(mem.delivered),
+                    "LOADOUT_PROMPT_MAX": cfg.memory.prompt_recall_max,
+                    "LOADOUT_PROMPT_TIMEOUT_MS": cfg.memory.prompt_timeout_ms})
+    if cfg.memory.debt_patterns:                   # notice configured debt markers being written
+        hooks["PostToolUse"] = "ccloadout.debt_hook"
+        env["LOADOUT_DEBT_PATTERNS"] = ",".join(cfg.memory.debt_patterns)
+    return (hooks or None), (env if hooks else None)
 
 _AUDIT_HINT = "↑/↓ move · space keep/drop · a all/none · enter apply · q cancel"
 _INTRO_MARKER = ".memory-intro-seen"                # printed once per profile, then never again
@@ -715,12 +756,12 @@ def _scoped_plan(passthrough: list[str], cwd: Path, config_root_override: Path |
     # tool), not a per-item prompt — see _launch_gate. `claude-loadout rules` remains the per-item /
     # natural-language authoring path.
     payload, mem = _recall_payload(cfg, cwd, context, embed)
-    prompt_recall = _prompt_recall_env(cfg, cwd, mem)
+    hooks, hook_env = _session_hooks(cfg, cwd, mem)
     def _finish(kept, dropped):                    # compose + cost accounting for a keep/drop decision
         plan = compose(kept, items, cfg.config_root, passthrough, cwd=cwd,
                        global_config_path=cfg.global_config_path,
                        launch_config_dir=_explicit_profile(config_root_override),
-                       memory_payload=payload, prompt_recall=prompt_recall)
+                       memory_payload=payload, hooks=hooks, hook_env=hook_env)
         measured = _measure.load_costs(cfg.config_root)
         saved = _savings.estimate_savings(kept, [i for i, _ in dropped], cfg.token_costs, measured,
                                           injected=mem.injected if mem else 0)

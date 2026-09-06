@@ -26,6 +26,7 @@ class MemoryConfig:
     prompt_recall: bool = False  # re-rank the store against each prompt (adds a hook to the session)
     prompt_recall_max: int = 2   # entries the prompt hook may add per turn
     prompt_timeout_ms: int = 300 # the hook's own wall-clock ceiling; it exits 0 when it fires
+    debt_patterns: tuple[str, ...] = ("TODO(loadout)",)   # markers a PostToolUse hook watches for
 
 @dataclass(frozen=True)
 class Config:
@@ -101,8 +102,10 @@ def load_config(cwd: Path, environ: Mapping[str, str] | None = None,
     for layer in layers:
         table = layer.get("memory")
         if isinstance(table, dict):
-            memory = replace(memory, **{k: v for k, v in table.items()
-                                        if k in MemoryConfig.__dataclass_fields__})
+            fields = {k: v for k, v in table.items() if k in MemoryConfig.__dataclass_fields__}
+            if isinstance(fields.get("debt_patterns"), list):
+                fields["debt_patterns"] = tuple(str(x) for x in fields["debt_patterns"])
+            memory = replace(memory, **fields)
     if "LOADOUT_ALWAYS_KEEP" in environ:
         always = tuple(x for x in environ["LOADOUT_ALWAYS_KEEP"].split(",") if x)
     if "LOADOUT_THRESHOLD" in environ:

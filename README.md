@@ -341,6 +341,27 @@ never left pointing at a file that no longer exists.
     net up front:   ≈ 3.1k tokens — after the memory payload (gain)
 ```
 
+### Who writes the notes
+
+Both of you, with the line drawn at review.
+
+You write with `cld memory add`, and the session is invited to: the injected block teaches it
+`memory add` alongside `recall`, for the things a later session would otherwise have to rediscover —
+a root cause, a dead end, a decision you made together. Not routine progress. Whatever it writes is
+an ordinary note: ranked, budgeted, and deletable in the audit like any other.
+
+Finished sessions and debt markers are captured automatically, but as *candidates* — never notes:
+
+```toml
+[memory]
+debt_patterns = ["TODO(loadout)"]   # markers to watch for; set to [] to capture nothing
+```
+
+Write `# TODO(loadout) drop this stub` into a file during a session and `cld memory consolidate`
+will offer to turn it into open debt, anchored to that file. It watches shell writes too, since
+that is how files usually get written — but only commands that actually write. Searching for a
+marker with `grep` records nothing.
+
 ### Auditing
 
 Notes rot. `cld memory audit` lists them with the signals that decide whether they still earn their
