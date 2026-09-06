@@ -20,15 +20,44 @@ def _load_json(path: Path) -> dict:
 _FRONTMATTER = re.compile(r"^---\n(.*?)\n---", re.DOTALL)
 _BLOCK_SCALARS = {">", "|", ">-", "|-", ">+", "|+"}
 
-def _frontmatter(text: str) -> dict[str, str]:
-    # Minimal YAML: top-level `key: value` pairs, plus block scalars (`>` folded / `|` literal)
-    # whose body is the following more-indented lines. Enough for SKILL.md name/description —
-    # notably descriptions written as a folded `>` block, which the ranker embeds and the UI shows.
+def _unquote(raw: str) -> str:
+    return raw.strip().strip("\"'")
+
+def _inline_list(val: str) -> list[str]:
+    inner = val[1:-1].strip()
+    return [_unquote(part) for part in inner.split(",") if part.strip()] if inner else []
+
+def _scalar(val: str) -> str | list[str]:
+    return _inline_list(val) if val.startswith("[") and val.endswith("]") else _unquote(val)
+
+def _nested(body: list[str]) -> dict[str, str | list[str]] | list[str]:
+    # One level of a nested block: either a `- item` sequence or `key: value` pairs.
+    # Deeper indentation is consumed but not parsed — the store schema is one level deep.
+    filled = [ln for ln in body if ln.strip()]
+    if not filled:
+        return {}
+    base = min(len(ln) - len(ln.lstrip()) for ln in filled)
+    if filled[0].strip().startswith("- "):
+        return [_unquote(ln.strip()[2:]) for ln in filled
+                if len(ln) - len(ln.lstrip()) == base and ln.strip().startswith("- ")]
+    out: dict[str, str | list[str]] = {}
+    for ln in filled:
+        if len(ln) - len(ln.lstrip()) != base or ":" not in ln:
+            continue
+        k, _, v = ln.partition(":")
+        out[k.strip()] = _scalar(v.strip())
+    return out
+
+def _frontmatter(text: str) -> dict[str, str | list[str] | dict[str, str | list[str]]]:
+    # Minimal YAML: top-level `key: value` pairs, block scalars (`>` folded / `|` literal),
+    # inline lists (`[a, b]`), and one level of nested mapping or sequence. Enough for SKILL.md
+    # name/description — including folded descriptions — and for the memory/decision stores,
+    # whose lifecycle keys live under a nested `metadata:` block.
     m = _FRONTMATTER.match(text)
     if not m:
         return {}
     lines = m.group(1).splitlines()
-    out: dict[str, str] = {}
+    out: dict[str, str | list[str] | dict[str, str | list[str]]] = {}
     i, n = 0, len(lines)
     while i < n:
         line = lines[i]; i += 1
@@ -36,16 +65,18 @@ def _frontmatter(text: str) -> dict[str, str]:
             continue
         k, _, v = line.partition(":")
         key, val = k.strip(), v.strip()
-        if val in _BLOCK_SCALARS:                             # gather the indented/blank block body
+        if val in _BLOCK_SCALARS or not val:                  # gather the indented/blank block body
             body = []
             while i < n and (not lines[i].strip() or lines[i][0] in " \t"):
-                body.append(lines[i].strip()); i += 1
-            if val[0] == ">":                                 # folded: newlines become spaces
-                out[key] = " ".join(" ".join(body).split())
+                body.append(lines[i]); i += 1
+            if not val:                                       # nested mapping or sequence
+                out[key] = _nested(body)
+            elif val[0] == ">":                               # folded: newlines become spaces
+                out[key] = " ".join(" ".join(ln.strip() for ln in body).split())
             else:                                             # literal: keep line breaks
-                out[key] = "\n".join(body).strip("\n")
+                out[key] = "\n".join(ln.strip() for ln in body).strip("\n")
         else:
-            out[key] = val.strip("\"'")
+            out[key] = _scalar(val)
     return out
 
 def _installed_plugin_paths(config_root: Path) -> dict[str, Path]:
