@@ -28,6 +28,9 @@ class MemoryConfig:
     prompt_timeout_ms: int = 300 # the hook's own wall-clock ceiling; it exits 0 when it fires
     debt_patterns: tuple[str, ...] = ("TODO(loadout)",)   # markers a PostToolUse hook watches for
     stop_prompt: bool = False    # at session end, ask the session to record what it decided
+    # Deliberation stems the Stop hook looks for, matched lowercased as substrings. The default
+    # (stop_hook.KEYWORDS) covers en/it/es/de; set this to replace it for another language.
+    decision_keywords: tuple[str, ...] = ()
     scopes: tuple[str, ...] = ("repo", "global")   # which notes a session may see
 
 @dataclass(frozen=True)
@@ -124,7 +127,7 @@ def _memory_fields(table: dict) -> dict:
         if field is None:
             continue
         try:
-            if key in ("debt_patterns", "scopes"):
+            if key in ("debt_patterns", "scopes", "decision_keywords"):
                 out[key] = tuple(str(x) for x in value)
             elif field.type == "bool":
                 out[key] = bool(value)

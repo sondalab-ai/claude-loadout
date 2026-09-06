@@ -276,7 +276,9 @@ control when it exits (lever F). That splits capture in two, and only one half n
   returns there is nobody left to answer. That is the one thing this hook buys, and the reason it is
   not covered by the bullet above. It emits a single line of `additionalContext` naming
   `cld decision new` and `cld memory add`, and only when the transcript shows decision signals
-  (plan mode, three or more files edited, a design skill invoked, or a deliberation keyword). It is
+  (plan mode, three or more files edited, a design skill invoked, or a deliberation keyword —
+  stems for en/it/es/de by default, replaceable per profile with `[memory] decision_keywords`;
+  the other three signals are language-independent). It is
   ported from the `debug-decisions` skill, whose surface this tool absorbed. No inference beyond
   counting those signals, no model call, one reminder per `session_id`, and only the **tail** of the
   transcript is parsed — `compose` caps every injected hook at 5 s.
@@ -455,6 +457,7 @@ git_tracked = true       # false for shared monorepos where Claude artifacts mus
 prompt_recall = false    # T1.5, Slice 3
 stop_prompt = false      # end-of-session reminder to record decisions (§5.3);
                          # read independently of `enabled`
+decision_keywords = []   # empty keeps the built-in en/it/es/de deliberation stems
 min_entries = 1          # below this, T1 injects nothing at all (§5.4)
 decay_days = 90
 decay_factor = 0.5       # rank multiplier applied to an entry past decay_days (§5.5)

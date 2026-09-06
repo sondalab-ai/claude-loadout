@@ -344,6 +344,7 @@ promote_after = 3       # deliveries after which a note is pinned into recall
 decay_days = 90         # untouched for this long, a note is demoted (never deleted)
 prompt_recall = false   # also re-rank on every prompt (see below)
 stop_prompt = false     # at session end, ask the session to record what it decided
+decision_keywords = []  # deliberation stems; empty keeps the built-in en/it/es/de list
 ```
 
 ### It does not duplicate Claude Code's own memory
@@ -471,7 +472,10 @@ does not merely error, it erases what you were typing.
 `stop_prompt = true` adds a `Stop` hook that, when a session ends, asks it once to record what it
 decided — naming `cld decision new` and `cld memory add`. It speaks only when the transcript shows
 decision signals: plan mode was used, three or more files were edited, a design skill was invoked,
-or the conversation used deliberation words. It writes nothing itself, and a session that already
+or the conversation used deliberation words — recognised in English, Italian, Spanish and German by
+default, since the test is a substring against a stem and a stem costs nothing. For any other
+language, `decision_keywords = ["retenon", "piste"]` replaces the list; the other three signals do
+not depend on language at all. It writes nothing itself, and a session that already
 registered something is not asked again.
 
 This is the one thing a hook buys here: everything else about a finished session is captured by the

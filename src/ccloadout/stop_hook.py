@@ -14,7 +14,15 @@ from pathlib import Path
 
 MIN_TURNS = 5                                       # a short session decided nothing worth filing
 MIN_FILES_EDITED = 3
-KEYWORDS = ("choose", "decid", "approach", "alternativ", "trade-off")
+# Stems, not words: matched as substrings against lowercased text, so one entry covers a verb's
+# inflections. English, Italian, Spanish and German are covered by default because the cost of a
+# stem is a substring test; `[memory] decision_keywords` replaces the list for any other language.
+# The other three signals are structural, so an unlisted language is still noticed — it only loses
+# the most conversational signal.
+KEYWORDS = ("choose", "decid", "approach", "alternativ", "trade-off",   # en
+            "scegl", "scelt", "approcc", "decis",                       # it
+            "elegi", "escog", "enfoque",                                # es
+            "entscheid", "wähl", "wahl", "ansatz", "abwäg")             # de
 # Invoking one of these is a statement that the session was designing, not typing.
 _DESIGN_SKILL = re.compile(r"^(superpowers:(brainstorming|writing-plans)|feature-dev:)")
 _TMP_SLUG = re.compile(r"(-T$|-tmp-|-private-var-folders-)")
@@ -99,7 +107,8 @@ def parse_transcript(text: str) -> dict:
     return {"turns": turns, "messages": messages, "files": sorted(files),
             "plan_mode": plan_mode, "skills": skills}
 
-def signals(parsed: dict, slug: str, truncated: bool = False) -> list[str]:
+def signals(parsed: dict, slug: str, truncated: bool = False,
+            keywords: tuple[str, ...] = ()) -> list[str]:
     """Names the reasons this session looks like it made a decision; empty means stay quiet."""
     if not slug or _TMP_SLUG.search(slug):          # a scratch directory files nothing
         return []
@@ -115,7 +124,7 @@ def signals(parsed: dict, slug: str, truncated: bool = False) -> list[str]:
     if any(_DESIGN_SKILL.match(s) for s in parsed["skills"]):
         found.append("design-skill")
     haystack = "\n".join(parsed["messages"]).lower()
-    if any(word in haystack for word in KEYWORDS):
+    if any(word in haystack for word in (keywords or KEYWORDS)):
         found.append("keyword")
     return found
 
@@ -138,7 +147,10 @@ def main() -> int:
         cwd = str(payload.get("cwd") or os.environ.get("LOADOUT_REPO") or "")
         transcript = payload.get("transcript_path")
         text, truncated = _read_tail(Path(transcript)) if transcript else ("", False)
-        if not signals(parse_transcript(text), cwd.replace("/", "-"), truncated):
+        from ccloadout.debt_hook import LIST_SEP     # one separator for every env-passed list
+        keywords = tuple(w for w in (os.environ.get("LOADOUT_DECISION_KEYWORDS") or "")
+                         .lower().split(LIST_SEP) if w)
+        if not signals(parse_transcript(text), cwd.replace("/", "-"), truncated, keywords):
             return 0
         exe = os.environ.get("LOADOUT_EXE") or "claude-loadout"
         print(json.dumps({"hookSpecificOutput": {

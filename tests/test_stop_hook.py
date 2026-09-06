@@ -159,3 +159,46 @@ def test_the_reminder_is_installed_even_with_recall_off(tmp_path):
 
 def test_no_hooks_without_the_opt_in(tmp_path):
     assert _hooks_for(tmp_path, "[memory]\nenabled = false\n") == (None, None)
+
+def test_the_default_stems_cover_more_than_english():
+    for said in ("which approach do we take",
+                 "quale approccio scegliamo, o meglio quale scelta",
+                 "\u00bfqu\u00e9 enfoque elegimos?",
+                 "welchen Ansatz w\u00e4hlen wir, das muss ich entscheiden"):
+        parsed = parse_transcript("\n".join([_said(f"turn {i}") for i in range(6)] + [_said(said)]))
+        assert signals(parsed, "-Users-x-repo") == ["keyword"], said
+
+def test_an_unlisted_language_can_be_configured(tmp_path):
+    # French is not in the default list; the setting is what covers it.
+    lines = [_said(f"turn {i}") for i in range(6)] + [_said("quelle piste retenons-nous ?")]
+    transcript = _transcript(tmp_path, lines)
+    env = {"LOADOUT_CONFIG_ROOT": str(tmp_path / "root")}
+    payload = {"cwd": _REPO, "transcript_path": str(transcript)}
+    assert _run({**payload, "session_id": "s1"}, env).stdout == ""
+    out = _run({**payload, "session_id": "s2"},
+               {**env, "LOADOUT_DECISION_KEYWORDS": "retenon\x1fpiste"})
+    assert "hookSpecificOutput" in out.stdout
+
+def test_configured_keywords_replace_the_default_rather_than_extend_it():
+    parsed = parse_transcript("\n".join([_said(f"turn {i}") for i in range(6)]
+                                        + [_said("which approach do we take")]))
+    assert signals(parsed, "-Users-x-repo") == ["keyword"]
+    assert signals(parsed, "-Users-x-repo", keywords=("retenon",)) == []
+
+def test_keyword_matching_ignores_case_on_both_sides():
+    parsed = parse_transcript("\n".join([_said(f"turn {i}") for i in range(6)]
+                                        + [_said("Quale APPROCCIO scegliamo")]))
+    assert signals(parsed, "-Users-x-repo", keywords=("approccio",)) == ["keyword"]
+    assert signals(parsed, "-Users-x-repo") == ["keyword"]      # and via the default stem
+
+def test_the_configured_keywords_reach_the_hook(tmp_path):
+    _, env = _hooks_for(tmp_path, "[memory]\nstop_prompt = true\n"
+                                  "decision_keywords = [\"retenon\", \"piste\"]\n")
+    assert env["LOADOUT_DECISION_KEYWORDS"] == "retenon\x1fpiste"
+
+def test_ordinary_english_prose_does_not_trip_the_foreign_stems():
+    # "elegi"/"wahl"/"ansatz" were picked to not collide with words an English session uses.
+    parsed = parse_transcript("\n".join(
+        [_said(f"turn {i}") for i in range(6)]
+        + [_said("an elegant fix, eligible for backport, and the flaky test now passes")]))
+    assert signals(parsed, "-Users-x-repo") == []
