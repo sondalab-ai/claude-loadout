@@ -1205,3 +1205,54 @@ def test_memory_add_writes_outside_the_repo_when_not_tracked(tmp_path, monkeypat
     assert cli.main(["memory", "add", "the ranker threshold was recentred"]) == 0
     assert not (tmp_path / "docs").exists()
     assert "wrote" in capsys.readouterr().out
+
+def test_a_launched_session_is_recorded_as_a_candidate(tmp_path, monkeypatch, capsys):
+    from ccloadout.candidates import load_candidates
+    root = _memory_repo(tmp_path)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "make_model2vec_embed", lambda name: cli.keyword_embed)
+    monkeypatch.setattr(cli.subprocess, "run", lambda *a, **k: _RC(0))
+    cli.main(["--explain"])
+    assert load_candidates(root, tmp_path) == []          # no session, no candidate
+    cli.main(["--no-gate"])
+    row, = load_candidates(root, tmp_path)
+    assert row["exit_code"] == 0 and row["goal"]
+
+def test_consolidate_reports_without_promoting_when_not_interactive(tmp_path, monkeypatch, capsys):
+    from ccloadout.candidates import load_candidates, record_session
+    root = _memory_repo(tmp_path)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
+    monkeypatch.chdir(tmp_path)
+    record_session(root, tmp_path, goal="scoping sessions", exit_code=0, changed=["src/cli.py"])
+    monkeypatch.setattr(cli, "_interactive", lambda passthrough: False)
+    assert cli.main(["memory", "consolidate"]) == 0
+    out = capsys.readouterr().out
+    assert "scoping sessions" in out and "src/cli.py" in out
+    assert len(load_candidates(root, tmp_path)) == 1      # nothing consumed, nothing written
+
+def test_consolidate_promotes_a_candidate_on_confirmation(tmp_path, monkeypatch, capsys):
+    from ccloadout.candidates import load_candidates, record_session
+    root = _memory_repo(tmp_path)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
+    monkeypatch.chdir(tmp_path)
+    record_session(root, tmp_path, goal="scoping sessions", exit_code=0, changed=[])
+    monkeypatch.setattr(cli, "_interactive", lambda passthrough: True)
+    answers = iter(["k", "threshold recentred after the plugin descriptions grew"])
+    monkeypatch.setattr(cli, "_ask", lambda prompt: next(answers))
+    assert cli.main(["memory", "consolidate"]) == 0
+    assert (tmp_path / "docs" / "memory" /
+            "threshold-recentred-after-the-plugin-descriptions-grew.md").exists()
+    assert load_candidates(root, tmp_path) == []          # promoted rows are consumed
+
+def test_consolidate_discards_without_writing_anything(tmp_path, monkeypatch, capsys):
+    from ccloadout.candidates import load_candidates, record_session
+    root = _memory_repo(tmp_path)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
+    monkeypatch.chdir(tmp_path)
+    record_session(root, tmp_path, goal="a dead end", exit_code=1, changed=[])
+    monkeypatch.setattr(cli, "_interactive", lambda passthrough: True)
+    monkeypatch.setattr(cli, "_ask", lambda prompt: "d")
+    cli.main(["memory", "consolidate"])
+    assert load_candidates(root, tmp_path) == []
+    assert not list((tmp_path / "docs" / "memory").glob("a-dead-end*"))

@@ -11,6 +11,7 @@ from ccloadout.ranker import Ranker, make_model2vec_embed, keyword_embed, bundle
 from ccloadout.compose import compose
 from ccloadout.memory import EntryExists, read_store, set_status, write_entry
 from ccloadout.usage import load_usage, record_delivery
+from ccloadout.candidates import drop_rows, load_candidates, record_session
 from ccloadout.recall import (anchor_state, build_payload, estimate_tokens,
                               recall_command, search, select, strip_frontmatter)
 from ccloadout.rules import (load_rules, apply_rules, has_rule, save_rule, write_rules,
@@ -193,6 +194,76 @@ def _recall_payload(cfg, cwd: Path, goal: str, embed):
     payload = build_payload(chosen, exe=exe, total=total, root=cwd)
     return payload, _Memory(len(chosen), total, estimate_tokens(payload),
                             tuple(e.id for e in chosen), cfg.config_root)
+
+def _git(cwd: Path, *args: str) -> str | None:
+    try:
+        proc = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    out = getattr(proc, "stdout", None)
+    return out.strip() if getattr(proc, "returncode", 1) == 0 and isinstance(out, str) else None
+
+def _changed_since(cwd: Path, head_before: str | None) -> list[str]:
+    names = []
+    head_now = _git(cwd, "rev-parse", "HEAD")
+    if head_before and head_now and head_before != head_now:
+        names += (_git(cwd, "diff", "--name-only", head_before, head_now) or "").splitlines()
+    dirty = (_git(cwd, "status", "--porcelain") or "").splitlines()
+    names += [line[3:] for line in dirty if len(line) > 3]
+    return sorted(dict.fromkeys(n for n in names if n))
+
+def _capture_session(scope, cwd: Path, exit_code: int, head_before: str | None) -> None:
+    # The launcher outlives the session (lever F), so the end-of-session envelope needs no hook.
+    mem = getattr(scope, "memory", None)
+    if mem is None or mem.config_root is None:
+        return
+    try:
+        record_session(mem.config_root, cwd, goal=scope.goal, exit_code=exit_code,
+                       changed=_changed_since(cwd, head_before))
+    except OSError as exc:                          # never fail a session over its own bookkeeping
+        _warn(f"could not record session candidate ({exc})")
+
+def _cmd_consolidate(cwd: Path, override: Path | None = None) -> int:
+    cfg = load_config(cwd=cwd, config_root_override=override)
+    rows = load_candidates(cfg.config_root, cwd)
+    if not rows:
+        print(_paint("no session candidates recorded for this repository", "dim"))
+        return 0
+    groups: dict[str, list[dict]] = {}
+    for row in rows:                                # near-duplicates collapse by goal
+        groups.setdefault(str(row.get("goal") or ""), []).append(row)
+    interactive = _interactive([])
+    kept_rows: list[dict] = []
+    for goal, rows_for_goal in groups.items():
+        files = sorted({f for r in rows_for_goal for f in (r.get("changed") or [])})
+        print(_paint(f"  {_plural(len(rows_for_goal), 'session')} · {goal}", "bold"))
+        if files:
+            print(_paint(f"    touched: {', '.join(files[:6])}"
+                         + (" …" if len(files) > 6 else ""), "dim"))
+        if not interactive:                         # no TTY: report, promote nothing
+            kept_rows += rows_for_goal
+            continue
+        answer = _ask("    [k]eep as a memory / [d]iscard / [s]kip? ").strip().lower()
+        if answer.startswith("d"):
+            continue                                # dropped: the rows go, no entry is written
+        if not answer.startswith("k"):
+            kept_rows += rows_for_goal
+            continue
+        description = _ask("    one line describing what to remember: ").strip() or goal
+        try:
+            path = write_entry(cfg.config_root, cwd, name=_slugify(description),
+                               description=description, kind="memory",
+                               git_tracked=cfg.memory.git_tracked,
+                               body="\n".join(f"- {r.get('at')} · exit {r.get('exit_code')}"
+                                               for r in rows_for_goal))
+        except EntryExists as exc:
+            _warn(f"an entry already exists at {exc}; keeping the candidate")
+            kept_rows += rows_for_goal
+            continue
+        print(f"    {_paint('wrote', 'green')} {path}")
+    if interactive:
+        drop_rows(cfg.config_root, cwd, kept_rows)
+    return 0
 
 def _record_delivery(scope, cwd: Path) -> None:
     mem = getattr(scope, "memory", None)
@@ -1062,6 +1133,7 @@ def _print_help() -> None:
         f"  {cmd('cld --explain')}          Print the scoping plan, then exit (no launch)\n"
         f"  {cmd('cld recall <query>')}    Search the memory store and print matching entries in full\n"
         f"  {cmd('cld memory add <text>')} Record a note for this repo (--name slug, --anchor path)\n"
+        f"  {cmd('cld memory consolidate')}  Review recorded sessions and promote them to memories\n"
         f"  {cmd('cld debt add|list|resolve')}  Track shims, stubs and skipped tests you left behind\n"
         f"  {cmd('cld rules')}              Author profile-wide keep/drop rules (all repos; launch prompts are repo-local)\n"
         f"  {cmd('cld init [ROOT]')}        Seed local config — this repo, or bulk-seed every project under ROOT\n"
@@ -1225,7 +1297,9 @@ def _run(argv: list[str] | None = None) -> int:
         sub = argv[1] if len(argv) > 1 else ""
         if sub == "add":
             return _cmd_write_entry(cwd, argv[2:], "memory", _resolve_config_root(os.environ, []))
-        _warn("memory takes: add <description> [--name slug] [--anchor path]")
+        if sub == "consolidate":
+            return _cmd_consolidate(cwd, _resolve_config_root(os.environ, []))
+        _warn("memory takes: add <description> [--name slug] [--anchor path], or consolidate")
         return 2
     if argv and argv[0] == "recall":                # T2 retrieval: no scoping, no launch
         return _cmd_recall(cwd, argv[1:], _resolve_config_root(os.environ, []))
@@ -1263,7 +1337,11 @@ def _run(argv: list[str] | None = None) -> int:
         return 0
     scope, plan = _launch_gate(scope, plan, gate, passthrough, no_gate)   # read/adjust before claude takes the screen
     _record_delivery(scope, cwd)                    # only a real launch counts as a delivery
+    # Only when recall is on: a launcher that captures nothing should not shell out to git.
+    head_before = _git(cwd, "rev-parse", "HEAD") if getattr(scope, "memory", None) else None
     try:
-        return subprocess.run(plan.argv, env=plan.env).returncode
+        code = subprocess.run(plan.argv, env=plan.env).returncode
     finally:
         _cleanup(plan.tmp_paths)
+    _capture_session(scope, cwd, code, head_before)
+    return code
