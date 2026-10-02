@@ -118,17 +118,24 @@ def _servers_in(data: dict) -> dict:
     inner = data.get("mcpServers") if isinstance(data.get("mcpServers"), dict) else data
     return {k: v for k, v in inner.items() if isinstance(v, dict)}
 
-def _rooted(value, root: Path):
-    # Claude Code runs plugin servers with ${CLAUDE_PLUGIN_ROOT} expanded and from the plugin's
-    # directory; under --mcp-config neither happens, so both are made explicit here.
+def _expand_root(value, root: Path):
     if isinstance(value, dict):
-        return {k: _rooted(v, root) for k, v in value.items()}
+        return {k: _expand_root(v, root) for k, v in value.items()}
     if isinstance(value, list):
-        return [_rooted(v, root) for v in value]
-    if isinstance(value, str):
-        value = value.replace("${CLAUDE_PLUGIN_ROOT}", str(root))
-        return str(root / value[2:]) if value.startswith("./") else value
-    return value
+        return [_expand_root(v, root) for v in value]
+    return value.replace("${CLAUDE_PLUGIN_ROOT}", str(root)) if isinstance(value, str) else value
+
+def _rooted(spec: dict, root: Path) -> dict:
+    # Claude Code expands ${CLAUDE_PLUGIN_ROOT} and runs a plugin's server from the plugin's
+    # directory; under --mcp-config neither happens. The variable is expanded everywhere, but only
+    # the command and its arguments are rebased: an env value or URL starting with ./ isn't a path.
+    rebase = lambda v: str(root / v[2:]) if isinstance(v, str) and v.startswith("./") else v
+    spec = _expand_root(spec, root)
+    if "command" in spec:
+        spec["command"] = rebase(spec["command"])
+    if isinstance(spec.get("args"), list):
+        spec["args"] = [rebase(a) for a in spec["args"]]
+    return spec
 
 def plugin_mcp_servers(config_root: Path, pid: str) -> dict[str, dict]:
     """MCP servers an installed plugin provides, keyed as Claude Code names them in tool names.
@@ -144,7 +151,8 @@ def plugin_mcp_servers(config_root: Path, pid: str) -> dict[str, dict]:
     servers = _servers_in(_load_json(install / ".mcp.json"))
     declared = _load_json(install / ".claude-plugin" / "plugin.json").get("mcpServers")
     if isinstance(declared, str):                   # a path to a server file, relative to the plugin
-        declared = _load_json(install / declared)
+        target = (install / declared).resolve()
+        declared = _load_json(target) if target.is_relative_to(install.resolve()) else None
     if isinstance(declared, dict):
         servers.update(_servers_in(declared))
     plugin = pid.split("@", 1)[0]

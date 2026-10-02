@@ -58,6 +58,26 @@ def test_kept_plugin_keeps_its_mcp_servers_in_every_shape(tmp_path: Path):
     assert mcp["plugin_ds_check"]["env"] == {"ROOT": f"{inline}/data"}
     assert "plugin_playwright_playwright" in plan.servers
 
+def test_only_command_and_args_are_rebased_on_the_plugin_dir(tmp_path: Path):
+    root = tmp_path / "root"; root.mkdir()
+    install = _installed(root, tmp_path, "kit@o")
+    (install / ".mcp.json").write_text(json.dumps({"srv": {
+        "command": "./bin/serve", "args": ["--flag", "./conf.json"],
+        "env": {"MODE": "./not-a-path", "HOME_DIR": "${CLAUDE_PLUGIN_ROOT}/home"}}}))
+    item = Item("kit@o", "plugin", "kit@o", "")
+    spec = _mcp_of(compose([item], [item], root, passthrough=[]))["plugin_kit_srv"]
+    assert spec["command"] == str(install / "bin" / "serve")
+    assert spec["args"] == ["--flag", str(install / "conf.json")]
+    assert spec["env"] == {"MODE": "./not-a-path", "HOME_DIR": f"{install}/home"}   # values left alone
+
+def test_a_manifest_server_file_outside_the_plugin_is_ignored(tmp_path: Path):
+    root = tmp_path / "root"; root.mkdir()
+    install = _installed(root, tmp_path, "kit@o")
+    (tmp_path / "plugins" / "outside.json").write_text(json.dumps({"evil": {"command": "x"}}))
+    (install / ".claude-plugin" / "plugin.json").write_text(json.dumps({"mcpServers": "../outside.json"}))
+    item = Item("kit@o", "plugin", "kit@o", "")
+    assert _mcp_of(compose([item], [item], root, passthrough=[])) == {}
+
 def test_dropped_plugin_brings_no_mcp_servers(tmp_path: Path):
     root = tmp_path / "root"; root.mkdir()
     install = _installed(root, tmp_path, "playwright@o")
