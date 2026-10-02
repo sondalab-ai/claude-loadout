@@ -1114,9 +1114,10 @@ def _decide_keep(items, cfg, context: str, rules: list[Rule]) -> set[str]:
 # Machine-materialized rules carry this nl prefix so `update` can tell them from rules a human
 # authored (via `claude-loadout rules` or by hand) and regenerate only the machine ones.
 _SEED_NL_PREFIX = "seeded by loadout"   # on-disk marker in rules.toml (read back by is_seed_rule); keep stable for compat
+_LEGACY_SEED_NL_PREFIX = "seeded by smartctx"   # seeds written before the rename are machine-owned too
 
 def _is_seeded_rule(rule: Rule) -> bool:
-    return rule.nl.startswith(_SEED_NL_PREFIX)
+    return rule.nl.startswith((_SEED_NL_PREFIX, _LEGACY_SEED_NL_PREFIX))
 
 def _materialize_rules(items, kept_ids: set[str], goal: str, verb: str = "init") -> list[Rule]:
     # Freeze keep/drop for every kind compose can prune (mcp, plugin, and skills via skillOverrides).
@@ -1203,8 +1204,32 @@ def _write_seed_scaffold(repo: Path, cfg, goal: str) -> None:
     (d / ".gitignore").write_text(_LOCAL_GITIGNORE)   # before write_goal_cache, which only writes if absent
     write_goal_cache(repo, goal)
     model = cfg.model_name.replace("\\", "\\\\").replace('"', '\\"')   # TOML basic string
-    (d / "config.toml").write_text(
-        f'{_CONFIG_HEADER}threshold = {cfg.threshold}\nmodel_name = "{model}"\n')
+    seeded = {"threshold": str(cfg.threshold), "model_name": f'"{model}"'}
+    path = d / "config.toml"
+    if path.exists():
+        path.write_text(_set_top_level_keys(path.read_text(), seeded))
+    else:
+        path.write_text(_CONFIG_HEADER + "".join(f"{k} = {v}\n" for k, v in seeded.items()))
+
+def _set_top_level_keys(text: str, values: dict[str, str]) -> str:
+    """Replace or add top-level `key = value` lines in a TOML file's text, touching nothing else.
+
+    A re-seed must not wipe what the user or `memory enable` wrote in [memory], [token_costs] or
+    any other table, so only lines above the first table header are candidates, and missing keys
+    are inserted just before that header (after the preamble's last non-blank line).
+    """
+    lines = text.splitlines()
+    end = next((i for i, ln in enumerate(lines) if ln.lstrip().startswith("[")), len(lines))
+    missing = dict(values)
+    for i in range(end):
+        key = lines[i].split("=", 1)[0].strip()
+        if "=" in lines[i] and key in missing:
+            lines[i] = f"{key} = {missing.pop(key)}"
+    at = end
+    while at > 0 and not lines[at - 1].strip():
+        at -= 1
+    lines[at:at] = [f"{k} = {v}" for k, v in missing.items()]
+    return "\n".join(lines) + "\n"
 
 def _write_seed(repo: Path, cfg, goal: str, rules: list[Rule]) -> None:
     # Persist the local seed: scaffold + a fresh rules.toml holding `rules`.

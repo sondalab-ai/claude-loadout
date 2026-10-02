@@ -1045,6 +1045,33 @@ def test_update_single_refuses_unseeded(tmp_path, monkeypatch, capsys):
     assert "isn't claude-loadout-seeded" in capsys.readouterr().err
     assert not (bare / ".loadout").exists()
 
+def test_update_keeps_repo_memory_config(tmp_path, monkeypatch):
+    import tomllib
+    _root_, _repos, r1 = _seeded_repo(tmp_path, monkeypatch)
+    cfg = r1 / ".loadout" / "config.toml"
+    cfg.write_text(cfg.read_text() + "\n[memory]\nstop_prompt = true\nenabled = true\n"
+                   "\n[token_costs]\nskill = 70\n")
+    monkeypatch.chdir(r1)
+    rc = cli.main(["update", "--yes"])
+    assert rc == 0
+    data = tomllib.loads(cfg.read_text())
+    assert data["memory"] == {"stop_prompt": True, "enabled": True}   # a re-seed used to wipe these
+    assert data["token_costs"] == {"skill": 70}
+    assert "threshold" in data and "model_name" in data              # seeded keys still written
+    assert cfg.read_text().count("threshold =") == 1                  # updated in place, not appended
+
+def test_update_regenerates_rules_seeded_under_the_old_name(tmp_path, monkeypatch):
+    import tomllib
+    _root_, _repos, r1 = _seeded_repo(tmp_path, monkeypatch)
+    legacy = ('[[rule]]\ntarget = "Gmail"\nnl = "seeded by smartctx update (goal: old)"\n'
+              '[rule.predicate]\naction = "always_drop"\nmatch = []\nmatch_mode = "any"\n')
+    (r1 / ".loadout" / "rules.toml").write_text(legacy)   # written before the smartctx → loadout rename
+    monkeypatch.chdir(r1)
+    rc = cli.main(["update", "--yes"])
+    assert rc == 0
+    rules = {x["target"]: x for x in tomllib.loads((r1 / ".loadout" / "rules.toml").read_text())["rule"]}
+    assert "seeded by loadout update" in rules["Gmail"]["nl"]   # treated as machine-owned, regenerated
+
 def test_update_redetects_goal_fresh(tmp_path, monkeypatch):
     _root_, _repos, r1 = _seeded_repo(tmp_path, monkeypatch)
     (r1 / ".loadout" / "goal").write_text("stale cached goal\n")   # what a launch would reuse
