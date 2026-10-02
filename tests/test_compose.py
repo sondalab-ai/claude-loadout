@@ -25,6 +25,47 @@ def test_compose_writes_overlays_and_argv(tmp_path: Path):
     assert plan.env["CLAUDE_CONFIG_DIR"] == str(root)
     assert set(plan.tmp_paths) == {mcp_path, settings_path}
 
+def _installed(root: Path, tmp_path: Path, pid: str) -> Path:
+    install = tmp_path / "plugins" / pid.split("@")[0]
+    (install / ".claude-plugin").mkdir(parents=True)
+    reg = root / "plugins"; reg.mkdir(parents=True, exist_ok=True)
+    path = reg / "installed_plugins.json"
+    data = json.loads(path.read_text()) if path.exists() else {"plugins": {}}
+    data["plugins"][pid] = [{"installPath": str(install)}]
+    path.write_text(json.dumps(data))
+    return install
+
+def _mcp_of(plan):
+    return json.loads(Path(plan.argv[plan.argv.index("--mcp-config") + 1]).read_text())["mcpServers"]
+
+def test_kept_plugin_keeps_its_mcp_servers_in_every_shape(tmp_path: Path):
+    root = tmp_path / "root"; root.mkdir()
+    bare = _installed(root, tmp_path, "playwright@o")
+    (bare / ".mcp.json").write_text(json.dumps({"playwright": {"command": "npx", "args": ["@pw/mcp"]}}))
+    wrapped = _installed(root, tmp_path, "ctx@o")
+    (wrapped / ".mcp.json").write_text(json.dumps({"mcpServers": {"ctx": {"type": "http", "url": "u"}}}))
+    inline = _installed(root, tmp_path, "ds@o")
+    (inline / ".claude-plugin" / "plugin.json").write_text(json.dumps(
+        {"mcpServers": {"playwright": {"command": "npx"},
+                        "check": {"command": "node", "args": ["./scripts/check.mjs"],
+                                  "env": {"ROOT": "${CLAUDE_PLUGIN_ROOT}/data"}}}}))
+    items = [Item(p, "plugin", p, "") for p in ("playwright@o", "ctx@o", "ds@o")]
+    plan = compose(items, items, root, passthrough=[])
+    mcp = _mcp_of(plan)
+    assert set(mcp) == {"plugin_playwright_playwright", "plugin_ctx_ctx",
+                        "plugin_ds_playwright", "plugin_ds_check"}   # same server name, no clash
+    assert mcp["plugin_ds_check"]["args"] == [str(inline / "scripts" / "check.mjs")]
+    assert mcp["plugin_ds_check"]["env"] == {"ROOT": f"{inline}/data"}
+    assert "plugin_playwright_playwright" in plan.servers
+
+def test_dropped_plugin_brings_no_mcp_servers(tmp_path: Path):
+    root = tmp_path / "root"; root.mkdir()
+    install = _installed(root, tmp_path, "playwright@o")
+    (install / ".mcp.json").write_text(json.dumps({"playwright": {"command": "npx"}}))
+    item = Item("playwright@o", "plugin", "playwright@o", "")
+    plan = compose([], [item], root, passthrough=[])
+    assert _mcp_of(plan) == {} and plan.servers == ()
+
 def test_compose_emits_project_scoped_server_def(tmp_path: Path):
     root = tmp_path / "root"; root.mkdir()
     cwd = tmp_path / "repo"; cwd.mkdir()

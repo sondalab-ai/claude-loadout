@@ -194,7 +194,11 @@ files:
   Claude with `--strict-mcp-config`, so only those load. This flag also excludes your claude.ai
   account connectors for that session (see the table below).
 - **Plugins**: dropped plugins are switched off via a `--settings` overlay. Anything a plugin
-  provides (its skills, agents, MCP servers, hooks) goes with it.
+  provides (its skills, agents, MCP servers, hooks) goes with it. Strict mode would also drop the
+  MCP servers of plugins you *keep*, so claude-loadout copies those into the curated config, under
+  the same `plugin_<plugin>_<server>` names Claude Code gives them (tools stay
+  `mcp__plugin_<plugin>_<server>__*`, so permission rules keep matching). `--explain` lists every
+  server the session will get.
 
 Both overlay files live in your temp directory and are deleted when the session ends. Your real
 configuration is never touched, claude-loadout **never** edits `settings.json` or `.claude.json`, and
@@ -205,7 +209,7 @@ it is **not** the nuclear `--bare` mode: your `CLAUDE.md`, hooks, and memory all
 | | Scoped per session? |
 |---|---|
 | MCP servers (`.claude.json` / `.mcp.json`) | **Yes**: only the kept set loads |
-| Plugins (and everything they provide) | **Yes**: dropped plugins are disabled |
+| Plugins (and everything they provide) | **Yes**: dropped plugins are disabled; kept plugins keep their MCP servers |
 | claude.ai connectors (Gmail, Calendar, ...) | **All dropped (all-or-nothing in v1)**: `--strict-mcp-config` loads only the curated overlay, so account connectors don't load at all. A connector that needs account authorization (Gmail, Calendar, ...) can't be re-added even if claude-loadout wanted to: its OAuth lives in your claude.ai account and doesn't transfer to a config claude-loadout can pass to Claude (verified, the re-injected server reports "not authorized"). Connectors that need no auth *are* technically re-injectable, but v1 keeps none either way. Run `claude-loadout measure` to see them listed with their token cost in `--explain`. |
 | Standalone skills (`$CLAUDE_CONFIG_DIR/skills`) | **Yes**: off-topic skills are dropped via `skillOverrides: "off"` (removes the skill and its description from context). On by default; `--no-scope-skills` keeps them all |
 | `CLAUDE.md`, hooks, memory | **No**: always preserved |

@@ -1709,8 +1709,8 @@ def _cmd_measure(cwd: Path) -> int:
     print(_paint(f"  cached to {_measure.costs_path(cfg.config_root)}", "dim"))
     print(_paint("  these are a diagnostic view; a measured cost feeds savings only for MCP "
                  "servers in your .claude.json/.mcp.json (matched by bare name).", "dim"))
-    print(_paint("  claude.ai connectors and plugin-bundled servers are shown here but aren't "
-                 "pruned by ccloadout.", "dim"))
+    print(_paint("  claude.ai connectors are shown here but can't be kept under strict mode; a "
+                 "plugin's own servers load exactly when the plugin is kept.", "dim"))
     return 0
 
 def _loadout_version() -> str:
@@ -1817,6 +1817,10 @@ def _print_explain(scope: _Scope, plan) -> None:
     elif not scope.measured:
         print(_paint("    on-demand:      run `claude-loadout measure` to quantify the claude.ai "
                      "connectors strict mode blocks", "dim"))
+    print()
+    servers = getattr(plan, "servers", ())
+    print(_paint("  mcp servers", "bold"))
+    print(f"    {', '.join(servers) if servers else _paint('none', 'dim')}")
     print()
     print(_paint("  command", "bold"))
     print(f"    {_paint(' '.join(plan.argv), 'dim')}")

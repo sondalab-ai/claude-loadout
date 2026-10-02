@@ -4,13 +4,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping
 from ccloadout.config import default_global_config_path
-from ccloadout.inventory import resolve_mcp_servers
+from ccloadout.inventory import plugin_mcp_servers, resolve_mcp_servers
 
 @dataclass(frozen=True)
 class LaunchPlan:
     argv: list[str]
     env: dict[str, str]
     tmp_paths: list[Path]
+    servers: tuple[str, ...] = ()        # MCP servers the curated config carries
 
 def _write_tmp_text(prefix: str, text: str, suffix: str = ".txt") -> Path:
     fd, name = tempfile.mkstemp(prefix=f"loadout-{prefix}-", suffix=suffix)
@@ -62,6 +63,9 @@ def compose(kept, all_items, config_root: Path, passthrough: list[str],
     if dropped_skills:
         settings["skillOverrides"] = dropped_skills
 
+    for i in all_items:                            # strict mode drops plugin servers too: a kept
+        if i.kind == "plugin" and i.id in kept_ids:  # plugin brings its own back
+            curated.update(plugin_mcp_servers(config_root, i.id))
     mcp_path = _write_tmp("mcp", {"mcpServers": curated})
     settings_path = _write_tmp("settings", settings)
     tmp_paths = [mcp_path, settings_path]
@@ -77,4 +81,4 @@ def compose(kept, all_items, config_root: Path, passthrough: list[str],
         env.update({k: str(v) for k, v in hook_env.items()})
     if launch_config_dir is not None:              # propagate a prompted profile to claude itself
         env["CLAUDE_CONFIG_DIR"] = str(launch_config_dir)
-    return LaunchPlan(argv=argv, env=env, tmp_paths=tmp_paths)
+    return LaunchPlan(argv=argv, env=env, tmp_paths=tmp_paths, servers=tuple(curated))

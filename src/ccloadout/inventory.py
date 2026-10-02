@@ -110,6 +110,45 @@ def _plugin_description(install_path: Path | None, pid: str) -> str:
     desc = _load_json(install_path / ".claude-plugin" / "plugin.json").get("description")
     return desc.strip() if isinstance(desc, str) and desc.strip() else pid
 
+def _servers_in(data: dict) -> dict:
+    # Plugins ship server maps two ways: bare ({"name": {...}}) or wrapped ({"mcpServers": {...}}).
+    if not isinstance(data, dict):
+        return {}
+    inner = data.get("mcpServers") if isinstance(data.get("mcpServers"), dict) else data
+    return {k: v for k, v in inner.items() if isinstance(v, dict)}
+
+def _rooted(value, root: Path):
+    # Claude Code runs plugin servers with ${CLAUDE_PLUGIN_ROOT} expanded and from the plugin's
+    # directory; under --mcp-config neither happens, so both are made explicit here.
+    if isinstance(value, dict):
+        return {k: _rooted(v, root) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_rooted(v, root) for v in value]
+    if isinstance(value, str):
+        value = value.replace("${CLAUDE_PLUGIN_ROOT}", str(root))
+        return str(root / value[2:]) if value.startswith("./") else value
+    return value
+
+def plugin_mcp_servers(config_root: Path, pid: str) -> dict[str, dict]:
+    """MCP servers an installed plugin provides, keyed as Claude Code names them in tool names.
+
+    `--strict-mcp-config` drops plugin servers along with everything else, so a kept plugin
+    would lose them; compose puts these back into the curated config. The key
+    `plugin_<plugin>_<server>` reproduces the harness's own `mcp__plugin_<plugin>_<server>__*`
+    tool names (verified on Claude Code 2.1.287), so permission allowlists keep matching.
+    """
+    install = _installed_plugin_paths(config_root).get(pid)
+    if install is None:
+        return {}
+    servers = _servers_in(_load_json(install / ".mcp.json"))
+    declared = _load_json(install / ".claude-plugin" / "plugin.json").get("mcpServers")
+    if isinstance(declared, str):                   # a path to a server file, relative to the plugin
+        declared = _load_json(install / declared)
+    if isinstance(declared, dict):
+        servers.update(_servers_in(declared))
+    plugin = pid.split("@", 1)[0]
+    return {f"plugin_{plugin}_{name}": _rooted(spec, install) for name, spec in servers.items()}
+
 def resolve_mcp_servers(global_config_path: Path, cwd: Path | None) -> dict:
     # Single source of truth for MCP discovery, shared by inventory + launch composition.
     # Merge order = least to most specific (later wins, spec §4.2):
