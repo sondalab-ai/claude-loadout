@@ -325,7 +325,11 @@ can't be confirmed). Until a repository is linked, `memory add` says so after ev
 `cld doctor` shows it.
 
 From a git worktree, every store resolves to the main checkout, the way Claude Code keys its own
-memory, so a note written in a worktree is not stranded when the worktree goes.
+memory, so a note written in a worktree is not stranded when the worktree goes. The `memory`,
+`decision`, `debt` and `recall` commands also read the main checkout's `.loadout/config.toml`
+there (a worktree has no `.loadout/` of its own), and an `--anchor` path is resolved against the
+main checkout too. A note is indexed only in a folder that already has a `MEMORY.md`;
+`cld memory link` creates one.
 
 With `[memory] git_tracked = false`, new notes go straight to Claude Code's folder instead, and
 there is nothing to link. Use that for shared or public repositories whose `docs/` you don't want
@@ -482,7 +486,7 @@ stay findable with `cld recall`.
 ### Decisions
 
 `cld decision new` writes a decision into the same store as your notes, with a line in its
-`MEMORY.md`, so Claude Code loads decisions wherever it loads notes (see
+`MEMORY.md` once the folder has one, so Claude Code loads decisions wherever it loads notes (see
 [Where notes live](#where-notes-live)). The file keeps a date-prefixed name and a Context /
 Decision / Alternatives / Rationale template. `cld decision list|show|supersede` cover both these
 and an existing `debug-decisions` corpus, which is still read and superseded in place but no longer
