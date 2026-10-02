@@ -10,6 +10,7 @@ class Item:
     kind: str
     name: str
     description: str
+    footprint: int = 0      # characters Claude Code loads up front for it; 0 = unknown
 
 def _load_json(path: Path) -> dict:
     try:
@@ -149,6 +150,27 @@ def plugin_mcp_servers(config_root: Path, pid: str) -> dict[str, dict]:
     plugin = pid.split("@", 1)[0]
     return {f"plugin_{plugin}_{name}": _rooted(spec, install) for name, spec in servers.items()}
 
+def _plugin_footprint(install: Path | None, pid: str) -> int:
+    """Characters a plugin puts in context from the first turn: one listing line per piece.
+
+    Claude Code lists each plugin skill and command as `- <plugin>:<name>: <description>`, and each
+    plugin agent the same way in the agent list; the manifest's own description is never shown.
+    A manifest `skills` entry (string or list) replaces the default `skills/` directory.
+    """
+    if install is None:
+        return 0
+    manifest = _load_json(install / ".claude-plugin" / "plugin.json")
+    declared = manifest.get("skills") if isinstance(manifest, dict) else None
+    dirs = [declared] if isinstance(declared, str) else declared if isinstance(declared, list) else ["skills"]
+    files = [md for d in dirs if isinstance(d, str) for md in sorted((install / d).glob("*/SKILL.md"))]
+    files += sorted((install / "commands").glob("*.md")) + sorted((install / "agents").glob("*.md"))
+    plugin, total = pid.split("@", 1)[0], 0
+    for md in files:
+        fm = _frontmatter(md.read_text(errors="ignore"))
+        name = fm.get("name") or (md.parent.name if md.name == "SKILL.md" else md.stem)
+        total += len(f"- {plugin}:{name}: {fm.get('description') or ''}")
+    return total
+
 def resolve_mcp_servers(global_config_path: Path, cwd: Path | None) -> dict:
     # Single source of truth for MCP discovery, shared by inventory + launch composition.
     # Merge order = least to most specific (later wins, spec §4.2):
@@ -169,7 +191,8 @@ def claude_code_inventory(config_root: Path, cwd: Path | None = None,
     for pid, enabled in (settings.get("enabledPlugins") or {}).items():
         if enabled:
             desc = _plugin_description(plugin_paths.get(pid), pid)
-            items.append(Item(id=pid, kind="plugin", name=pid, description=desc))
+            items.append(Item(id=pid, kind="plugin", name=pid, description=desc,
+                              footprint=_plugin_footprint(plugin_paths.get(pid), pid)))
     if global_config_path is None:
         global_config_path = default_global_config_path(config_root)
     servers = resolve_mcp_servers(global_config_path, cwd)
@@ -180,6 +203,7 @@ def claude_code_inventory(config_root: Path, cwd: Path | None = None,
         for md in skills_dir.glob("*/SKILL.md"):
             fm = _frontmatter(md.read_text(errors="ignore"))
             sid = fm.get("name") or md.parent.name
-            items.append(Item(id=sid, kind="skill", name=sid,
-                              description=fm.get("description", sid)))
+            desc = fm.get("description", sid)
+            items.append(Item(id=sid, kind="skill", name=sid, description=desc,
+                              footprint=len(f"- {sid}: {desc}")))   # its line in the skill listing
     return items

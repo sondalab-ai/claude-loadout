@@ -147,9 +147,13 @@ The plan reports two different kinds of saving, kept separate on purpose:
   the same once you're done authoring.
 
 > [!NOTE]
-> These are **estimates** over the items actually removed, flat per-kind figures
-> (skill ≈ 50, plugin ≈ 600 up front; MCP server ≈ 1200 on-demand), unless `claude-loadout measure`
-> has recorded a real per-server cost. Tune the constants per kind:
+> These are **estimates** over the items actually removed. A skill or plugin is costed from the
+> text Claude Code would list for it: the skill's own `name: description` line, or one such line
+> per skill, command and agent a plugin ships, at about 4 characters per token. A hook that
+> injects text at session start is not counted. An MCP server uses the cost `claude-loadout
+> measure` recorded for it, otherwise a flat ≈ 1200 on-demand. The flat per-kind figures
+> (skill ≈ 50, plugin ≈ 600, MCP ≈ 1200) remain the fallback when nothing can be read; tune
+> them per kind:
 
 ```toml
 # .loadout/config.toml
