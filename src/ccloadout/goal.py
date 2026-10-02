@@ -157,10 +157,11 @@ def write_goal_cache(cwd: Path, goal: str, origin: str | None = None) -> None:
 def detect_goal(cwd: Path, use_cache: bool = True, persist: bool = True) -> GoalResult:
     """The session goal: the cached one while it is still current, otherwise a fresh inference.
 
-    A cached goal is reused when the user chose it or its inputs are unchanged. When the inputs
-    changed (or a cache predates the sidecar), inference runs again; a confident new goal replaces
-    the cached one (source "refreshed", written back unless `persist` is False, as for --explain),
-    a weak one leaves it alone. `update` passes use_cache=False to always re-infer.
+    A cached goal is reused when the user chose it or its inputs are unchanged. When the inputs of
+    an inferred goal changed, inference runs again; a confident new goal replaces the cached one
+    (source "refreshed", written back unless `persist` is False, as for --explain), a weak one
+    leaves it alone. A cache older than the sidecar is adopted as inferred only if it matches
+    today's inference, otherwise kept as the user's. `update` passes use_cache=False to re-infer.
     """
     cache = _CACHE(cwd)
     if use_cache and cache.is_file():
@@ -170,7 +171,10 @@ def detect_goal(cwd: Path, use_cache: bool = True, persist: bool = True) -> Goal
             if meta.get("origin") == "user" or meta.get("inputs") == _inputs_digest(cwd):
                 return GoalResult(goal=txt, confidence=1.0, source="cache")
             fresh = _infer(cwd)
-            if fresh.confidence < _MIN_CONFIDENCE or fresh.goal == txt:
+            # A cache from before the sidecar can't say who wrote it, and `init` let users override
+            # a confident inference: keep it unless it matches today's inference (`update` re-infers).
+            legacy = not meta
+            if legacy or fresh.confidence < _MIN_CONFIDENCE or fresh.goal == txt:
                 if persist:                         # remember the inputs, so this isn't redone each launch
                     write_goal_cache(cwd, txt, origin=meta.get("origin") or
                                      ("inferred" if fresh.goal == txt else "user"))

@@ -56,7 +56,9 @@ installed. A few details behind the four steps above:
   and any project description it can find (a `description` field, or the README's title and opening
   line). If it can't tell, it asks once and remembers the answer. Text only, no model call. A
   remembered goal that was inferred refreshes on its own when those inputs change (a new
-  description, a rewritten README); one you typed yourself is kept until you change it.
+  description, a rewritten README); one you typed yourself is kept until you change it. A goal
+  cached by a release before 0.11.0 counts as yours unless it matches what the repo says today;
+  `claude-loadout update` re-infers it.
 - **The ranking** runs on a small, fast, local model. No network call, nothing leaves your machine.
 - **The rules** are yours: pin tools to always keep, or write plain-language ones like *"this
   corporate plugin only in work sessions."*
