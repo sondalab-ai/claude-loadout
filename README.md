@@ -54,7 +54,9 @@ installed. A few details behind the four steps above:
 
 - **The goal** comes from the directory name, marker files like `package.json` or `pyproject.toml`,
   and any project description it can find (a `description` field, or the README's title and opening
-  line). If it can't tell, it asks once and remembers the answer. Text only, no model call.
+  line). If it can't tell, it asks once and remembers the answer. Text only, no model call. A
+  remembered goal that was inferred refreshes on its own when those inputs change (a new
+  description, a rewritten README); one you typed yourself is kept until you change it.
 - **The ranking** runs on a small, fast, local model. No network call, nothing leaves your machine.
 - **The rules** are yours: pin tools to always keep, or write plain-language ones like *"this
   corporate plugin only in work sessions."*

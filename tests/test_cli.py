@@ -1091,6 +1091,19 @@ def test_update_regenerates_rules_seeded_under_the_old_name(tmp_path, monkeypatc
     rules = {x["target"]: x for x in tomllib.loads((r1 / ".loadout" / "rules.toml").read_text())["rule"]}
     assert "seeded by loadout update" in rules["Gmail"]["nl"]   # treated as machine-owned, regenerated
 
+def test_explain_shows_a_refreshed_goal_without_writing_it(tmp_path, monkeypatch, capsys):
+    _root_, _repos, r1 = _seeded_repo(tmp_path, monkeypatch)
+    (r1 / ".loadout" / "goal").write_text("stale cached goal\n")
+    (r1 / ".loadout" / "goal.meta").unlink(missing_ok=True)       # as a pre-sidecar release left it
+    (r1 / "pyproject.toml").write_text('[project]\ndescription = "a fresh purpose"\n')
+    monkeypatch.chdir(r1)
+    monkeypatch.setattr(cli.subprocess, "run", lambda *a, **k: pytest.fail("launched"))
+    assert cli.main(["--explain"]) == 0
+    out = capsys.readouterr().out
+    assert "fresh purpose" in out and "refreshed" in out
+    assert (r1 / ".loadout" / "goal").read_text() == "stale cached goal\n"   # --explain stays read-only
+    assert not (r1 / ".loadout" / "goal.meta").exists()
+
 def test_update_redetects_goal_fresh(tmp_path, monkeypatch):
     _root_, _repos, r1 = _seeded_repo(tmp_path, monkeypatch)
     (r1 / ".loadout" / "goal").write_text("stale cached goal\n")   # what a launch would reuse

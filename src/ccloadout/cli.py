@@ -99,12 +99,13 @@ def _build_compiler(cfg):
         _warn(f"rule model unavailable ({exc}); rule authoring disabled")
         return None
 
-def _resolve_goal(cwd: Path, passthrough: list[str]) -> tuple[str, str, float]:
-    goal = detect_goal(cwd)                          # returns (text, source, confidence)
+def _resolve_goal(cwd: Path, passthrough: list[str],
+                  persist: bool = True) -> tuple[str, str, float]:
+    goal = detect_goal(cwd, persist=persist)         # returns (text, source, confidence)
     if goal.confidence < 0.15 and _interactive(passthrough):
         entered = _ask(f"claude-loadout: session goal? [{goal.goal}] ").strip()
         if entered:
-            write_goal_cache(cwd, entered)         # preflight ruling: persist, don't re-ask
+            write_goal_cache(cwd, entered, origin="user")   # preflight ruling: persist, don't re-ask
             return entered, "prompt", 1.0
     return goal.goal, goal.source, goal.confidence
 
@@ -856,12 +857,12 @@ def _cmd_recall(cwd: Path, args: list[str], config_root_override: Path | None = 
     return 0
 
 def _scoped_plan(passthrough: list[str], cwd: Path, config_root_override: Path | None = None,
-                 scope_skills: bool = True):
+                 scope_skills: bool = True, persist: bool = True):
     cfg = load_config(cwd=cwd, config_root_override=config_root_override)
     items = claude_code_inventory(cfg.config_root, cwd, cfg.global_config_path)
     if not items:
         return None, None, None
-    context, gsource, gconf = _resolve_goal(cwd, passthrough)
+    context, gsource, gconf = _resolve_goal(cwd, passthrough, persist)
     rules = load_rules(cfg.config_root, cwd)
     pinned = [i for i in items if any(fnmatch(i.id, g) for g in cfg.always_keep)]
     pinned_ids = {i.id for i in pinned}            # always_keep config wins over rules (spec §12)
@@ -1953,7 +1954,8 @@ def _run(argv: list[str] | None = None) -> int:
         return _cmd_rules(cwd, override)
     fallback_env = _launch_env(override)            # keep a prompted profile on the fallback launches
     try:
-        result, plan, gate = _scoped_plan(passthrough, cwd, override, scope_skills)
+        result, plan, gate = _scoped_plan(passthrough, cwd, override, scope_skills,
+                                          persist=not explain)   # --explain writes nothing
     except Exception as exc:
         _warn(f"scoping failed ({exc}); launching full session")
         return subprocess.run(["claude", *passthrough], env=fallback_env).returncode

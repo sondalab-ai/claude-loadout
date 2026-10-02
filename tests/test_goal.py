@@ -18,6 +18,50 @@ def test_cache_write_preserves_existing_gitignore(tmp_path: Path):
     write_goal_cache(tmp_path, "x")
     assert (d / ".gitignore").read_text() == "custom\n"   # never clobber a user-authored ignore
 
+def _pyproject(d: Path, desc: str) -> None:
+    (d / "pyproject.toml").write_text(f'[project]\ndescription = "{desc}"\n')
+
+def test_inferred_goal_refreshes_when_its_inputs_change(tmp_path: Path):
+    _pyproject(tmp_path, "an old purpose")
+    write_goal_cache(tmp_path, detect_goal(tmp_path, use_cache=False).goal)
+    _pyproject(tmp_path, "a new purpose")
+    r = detect_goal(tmp_path)
+    assert "new purpose" in r.goal and r.source == "refreshed"
+    assert "new purpose" in (tmp_path / ".loadout" / "goal").read_text()   # written back
+    assert detect_goal(tmp_path).source == "cache"                         # and current again
+
+def test_a_goal_the_user_chose_is_never_refreshed(tmp_path: Path):
+    _pyproject(tmp_path, "an old purpose")
+    write_goal_cache(tmp_path, "my own words")         # differs from inference: the user's
+    _pyproject(tmp_path, "a new purpose")
+    r = detect_goal(tmp_path)
+    assert r.goal == "my own words" and r.source == "cache"
+
+def test_legacy_cache_without_sidecar_is_refreshed(tmp_path: Path):
+    _pyproject(tmp_path, "the real purpose")
+    d = tmp_path / ".loadout"; d.mkdir()
+    (d / "goal").write_text("smartctx — the old name\n")   # written by a release with no sidecar
+    r = detect_goal(tmp_path)
+    assert "real purpose" in r.goal and r.source == "refreshed"
+
+def test_weak_inference_keeps_the_cached_goal(tmp_path: Path):
+    d = tmp_path / ".loadout"; d.mkdir()
+    (d / "goal").write_text("typed at the prompt\n")   # nothing on disk to infer from
+    assert detect_goal(tmp_path).goal == "typed at the prompt"
+
+def test_goal_file_stays_one_line(tmp_path: Path):
+    write_goal_cache(tmp_path, "frontend work")
+    assert (tmp_path / ".loadout" / "goal").read_text() == "frontend work\n"   # older releases read it whole
+    assert "origin=" in (tmp_path / ".loadout" / "goal.meta").read_text()
+
+def test_persist_false_reports_the_refresh_but_writes_nothing(tmp_path: Path):
+    _pyproject(tmp_path, "the real purpose")
+    d = tmp_path / ".loadout"; d.mkdir()
+    (d / "goal").write_text("stale\n")
+    r = detect_goal(tmp_path, persist=False)
+    assert r.source == "refreshed"
+    assert (d / "goal").read_text() == "stale\n" and not (d / "goal.meta").exists()
+
 def test_signals_from_markers(tmp_path: Path):
     d = tmp_path / "my-astro-tool"; d.mkdir()
     (d / "pyproject.toml").write_text("[project]\nname='x'")
