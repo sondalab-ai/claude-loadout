@@ -9,6 +9,7 @@ from ccloadout.inventory import claude_code_inventory, Item
 from ccloadout.goal import detect_goal, write_goal_cache
 from ccloadout.ranker import Ranker, make_model2vec_embed, keyword_embed, bundled_model_path, resolve_model_source
 from ccloadout.compose import compose
+from ccloadout.repo import repo_root
 from ccloadout.memory import (EntryExists, NoStatus, forget_entry, indexed_files,
                               read_all, read_store, set_meta, set_status, slug_for,
                               write_entry)
@@ -193,6 +194,7 @@ def _recall_payload(cfg, cwd: Path, goal: str, embed):
     # nothing at all, since an instruction to query an empty store costs tokens for no answer.
     if not cfg.memory.enabled:
         return None, None
+    cwd = repo_root(cwd)                            # the store is the main checkout's, worktrees included
     store = read_store(cwd, cfg.config_root, scopes=cfg.memory.scopes)
     total = len(store.entries)
     if total < cfg.memory.min_entries:
@@ -240,7 +242,7 @@ def _capture_session(scope, cwd: Path, exit_code: int, head_before: str | None) 
     if mem is None or mem.config_root is None:
         return
     try:
-        record_session(mem.config_root, cwd, goal=scope.goal, exit_code=exit_code,
+        record_session(mem.config_root, repo_root(cwd), goal=scope.goal, exit_code=exit_code,
                        changed=_changed_since(cwd, head_before))
     except OSError as exc:                          # never fail a session over its own bookkeeping
         _warn(f"could not record session candidate ({exc})")
@@ -326,7 +328,7 @@ def _record_delivery(scope, cwd: Path) -> None:
     mem = getattr(scope, "memory", None)
     if mem and mem.delivered and mem.config_root is not None:
         try:
-            record_delivery(mem.config_root, cwd, mem.delivered)
+            record_delivery(mem.config_root, repo_root(cwd), mem.delivered)
         except OSError as exc:                      # a counter is never worth failing a launch for
             _warn(f"could not record memory usage ({exc})")
 
@@ -1822,30 +1824,31 @@ def _run(argv: list[str] | None = None) -> int:
     # English. Only claim argv when the second word names a real action; otherwise fall through
     # and let the session have the prompt.
     if argv and argv[0] == "decision" and _is_action(argv, _DECISION_ACTIONS):
-        return _cmd_decision(cwd, argv[1:], _resolve_config_root(os.environ, []))
+        return _cmd_decision(repo_root(cwd), argv[1:], _resolve_config_root(os.environ, []))
     if argv and argv[0] == "debt" and _is_action(argv, _DEBT_ACTIONS):
-        return _cmd_debt(cwd, argv[1:], _resolve_config_root(os.environ, []))
+        return _cmd_debt(repo_root(cwd), argv[1:], _resolve_config_root(os.environ, []))
     if argv and argv[0] == "memory" and _is_action(argv, _MEMORY_ACTIONS):
         sub = argv[1] if len(argv) > 1 else ""
         if sub == "add":
-            return _cmd_write_entry(cwd, argv[2:], "memory", _resolve_config_root(os.environ, []))
+            return _cmd_write_entry(repo_root(cwd), argv[2:], "memory", _resolve_config_root(os.environ, []))
         if sub == "consolidate":
-            return _cmd_consolidate(cwd, _resolve_config_root(os.environ, []))
+            return _cmd_consolidate(repo_root(cwd), _resolve_config_root(os.environ, []))
         if not sub:                                 # a bare `memory` is the entry point, not an error
-            return _print_memory_status(cwd, load_config(
-                cwd=cwd, config_root_override=_resolve_config_root(os.environ, [])))
+            root = repo_root(cwd)
+            return _print_memory_status(root, load_config(
+                cwd=root, config_root_override=_resolve_config_root(os.environ, [])))
         if sub == "scope":
-            return _cmd_scope(cwd, argv[2:], _resolve_config_root(os.environ, []))
+            return _cmd_scope(repo_root(cwd), argv[2:], _resolve_config_root(os.environ, []))
         if sub in ("enable", "disable"):
-            return _cmd_memory_toggle(cwd, sub == "enable", _resolve_config_root(os.environ, []))
+            return _cmd_memory_toggle(repo_root(cwd), sub == "enable", _resolve_config_root(os.environ, []))
         if sub == "audit":
-            return _cmd_audit(cwd, argv[2:], _resolve_config_root(os.environ, []))
+            return _cmd_audit(repo_root(cwd), argv[2:], _resolve_config_root(os.environ, []))
         if sub == "flag":
-            return _cmd_flag(cwd, argv[2:], _resolve_config_root(os.environ, []))
+            return _cmd_flag(repo_root(cwd), argv[2:], _resolve_config_root(os.environ, []))
         _warn(f"unknown memory command {sub!r}; try enable, add, audit, flag or consolidate")
         return 2                                    # unreachable: _is_action already filtered
     if argv and argv[0] == "recall":                # T2 retrieval: no scoping, no launch
-        return _cmd_recall(cwd, argv[1:], _resolve_config_root(os.environ, []))
+        return _cmd_recall(repo_root(cwd), argv[1:], _resolve_config_root(os.environ, []))
     if argv and argv[0] == "measure":               # opt-in, connects to servers; no scoping
         return _cmd_measure(cwd)
     if argv and argv[0] == "init":                  # bulk-seed repo config; resolves profiles itself
