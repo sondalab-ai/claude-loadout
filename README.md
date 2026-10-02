@@ -280,6 +280,9 @@ Four verbs, in the order you meet them:
 | `cld recall "<query>"` | search the store and print entries in full |
 | `cld memory audit` | review what you have, delete what has gone stale |
 
+One more, run once per repository: `cld memory link`, so Claude Code loads what you write
+(see [Where notes live](#where-notes-live)).
+
 ### Where notes live
 
 It reads stores that already exist rather than inventing another one:
@@ -289,7 +292,30 @@ It reads stores that already exist rather than inventing another one:
 - your `debug-decisions` corpus, if you keep one
 
 **No note is ever written to a folder of ours.** Uninstall `claude-loadout` and every note stays
-exactly where it is, in a directory Claude Code already reads. There is nothing to migrate.
+exactly where it is. There is nothing to migrate.
+
+Claude Code itself loads only the second folder, through its `MEMORY.md` index. A note in
+`./docs/memory/` therefore reaches a session without cld only when Claude Code's folder for the
+repository is a symlink to it. `cld memory link` sets that up:
+
+```sh
+cld memory link          # shows the plan, then asks
+cld memory link --yes    # for scripts
+```
+
+It copies anything Claude Code already keeps into `./docs/memory/`, merges the two `MEMORY.md`
+indexes, adds index lines for notes that have none, keeps the original folder as
+`memory.bak-<timestamp>`, and replaces it with the link. It refuses when two files share a name but
+differ, and when Claude Code has no sessions recorded for the repository (so the folder it reads
+can't be confirmed). Until a repository is linked, `memory add` says so after every write, and
+`cld doctor` shows it.
+
+From a git worktree, every store resolves to the main checkout, the way Claude Code keys its own
+memory, so a note written in a worktree is not stranded when the worktree goes.
+
+With `[memory] git_tracked = false`, new notes go straight to Claude Code's folder instead, and
+there is nothing to link. Use that for shared or public repositories whose `docs/` you don't want
+notes in.
 
 ### Notes that follow you between projects
 

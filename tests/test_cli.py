@@ -148,7 +148,11 @@ def test_doctor_prints_guidance_and_does_not_launch(tmp_path, monkeypatch, capsy
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(cli, "make_model2vec_embed", lambda name: cli.keyword_embed)
     launched = {"ran": False}
-    monkeypatch.setattr(cli.subprocess, "run", lambda *a, **k: launched.__setitem__("ran", True))
+    def run(argv, **kwargs):                           # git may be asked for the repo root; claude never
+        if argv and argv[0] == "claude":
+            launched["ran"] = True
+        return _RC(1)
+    monkeypatch.setattr(cli.subprocess, "run", run)
     rc = cli.main(["doctor"])
     assert rc == 0 and launched["ran"] is False
     out = capsys.readouterr().out

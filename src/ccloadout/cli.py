@@ -10,6 +10,7 @@ from ccloadout.goal import detect_goal, write_goal_cache
 from ccloadout.ranker import Ranker, make_model2vec_embed, keyword_embed, bundled_model_path, resolve_model_source
 from ccloadout.compose import compose
 from ccloadout.repo import repo_root
+from ccloadout.link import apply_link, is_linked, plan_link
 from ccloadout.memory import (EntryExists, NoStatus, forget_entry, indexed_files,
                               read_all, read_store, set_meta, set_status, slug_for,
                               write_entry)
@@ -362,6 +363,64 @@ def _cmd_write_entry(cwd: Path, args: list[str], kind: str, override: Path | Non
         return 1
     where = " (every project)" if scope == "global" else ""
     print(f"{_paint('wrote', 'green')} {path}{_paint(where, 'dim')}")
+    if scope == "repo":
+        _link_hint(cfg, cwd)
+    return 0
+
+def _link_hint(cfg, root: Path) -> None:
+    # A tracked note in an unlinked docs/memory reaches no session; say so where it was written.
+    if cfg.memory.git_tracked and not is_linked(cfg.config_root, root):
+        _warn("Claude Code doesn't read docs/memory in this repo yet. "
+              "Run `claude-loadout memory link` to fix that.")
+
+def _cmd_link(root: Path, args: list[str], override: Path | None = None) -> int:
+    """`memory link`: merge Claude Code's memory folder into docs/memory and symlink it there.
+
+    Prints the plan first and changes nothing without a yes (interactive) or `--yes`. Refuses when
+    notes already go to Claude Code's folder (git_tracked = false), when the folder Claude Code
+    reads cannot be confirmed, when it already points elsewhere, or when two files clash.
+    """
+    cfg = load_config(cwd=root, config_root_override=override)
+    if not cfg.memory.git_tracked:
+        print("notes here go to Claude Code's own memory folder ([memory] git_tracked = false), "
+              "which it already reads; there is nothing to link")
+        return 0
+    plan = plan_link(cfg.config_root, root)
+    if plan.state == "unknown-project":
+        _warn(f"Claude Code keeps no sessions under {plan.harness.parent}, so the folder it reads "
+              f"for {root} can't be confirmed; start one session here first")
+        return 1
+    if plan.state == "elsewhere":
+        _warn(f"{plan.harness} already links to {plan.harness.resolve()}; leaving it alone")
+        return 1
+    print(_paint("claude-loadout memory link", "bold"))
+    print(f"  Claude Code reads:  {plan.harness}")
+    print(f"  notes live in:      {plan.store}")
+    if plan.copies:
+        names = ", ".join(p.name for p in plan.copies[:6]) + (" …" if len(plan.copies) > 6 else "")
+        print(f"  copy {_plural(len(plan.copies), 'file')} into docs/memory: {_paint(names, 'dim')}")
+    if plan.added:
+        print(f"  add {_plural(len(plan.added), 'line')} to MEMORY.md, so those notes reach sessions")
+    if plan.backup:
+        print(f"  keep the original folder as {plan.backup}")
+    if plan.state in ("merge", "missing"):
+        print(f"  then link {plan.harness.name} → {plan.store}")
+    if plan.conflicts:
+        _warn("these exist on both sides with different content; reconcile them by hand, then "
+              "run this again: " + ", ".join(plan.conflicts))
+        return 1
+    if not plan.changes:
+        print(_paint("  already linked; nothing to do", "dim"))
+        return 0
+    if "--yes" not in args:
+        if not _interactive([]):
+            _warn("nothing changed; run again with --yes to link")
+            return 1
+        if not _ask("  link now? [y/N] ").strip().lower().startswith("y"):
+            print(_paint("  nothing changed", "dim"))
+            return 0
+    apply_link(plan)
+    print(f"{_paint('linked', 'green')} — Claude Code now loads {plan.store / 'MEMORY.md'}")
     return 0
 
 def _cmd_scope(cwd: Path, args: list[str], override: Path | None = None) -> int:
@@ -443,7 +502,8 @@ def _session_hooks(cfg, cwd: Path, mem) -> tuple[dict | None, dict | None]:
 
 _AUDIT_HINT = "↑/↓ move · space keep/drop · a all/none · enter apply · q cancel"
 _LIST_SEP = "\x1f"                                  # env-passed lists: see debt_hook.LIST_SEP
-_MEMORY_ACTIONS = frozenset({"enable", "disable", "add", "audit", "flag", "consolidate", "scope"})
+_MEMORY_ACTIONS = frozenset({"enable", "disable", "add", "audit", "flag", "consolidate", "scope",
+                            "link"})
 _DEBT_ACTIONS = frozenset({"add", "list", "resolve"})
 _DECISION_ACTIONS = frozenset({"new", "list", "show", "supersede"})
 
@@ -1566,6 +1626,11 @@ def _cmd_doctor(cwd: Path) -> int:
     repo_cfg = cwd / ".loadout" / "config.toml"
     print(_paint("  environment", "bold"))
     print(f"    repo config:      {_paint(str(repo_cfg), 'cyan')} ({_yn(repo_cfg.is_file())})")
+    if cfg.memory.git_tracked:                      # untracked notes already go where Claude Code reads
+        root = repo_root(cwd)
+        state = (_paint("Claude Code reads it", "green") if is_linked(cfg.config_root, root)
+                 else _paint("Claude Code doesn't read it — claude-loadout memory link", "yellow"))
+        print(f"    notes folder:     {root / 'docs' / 'memory'} ({state})")
     resolved = resolve_model_source(cfg.model_name)
     embed = _build_embed(cfg.model_name)           # warns + falls back on failure
     model_state = ("keyword fallback" if embed is keyword_embed
@@ -1654,6 +1719,7 @@ def _print_help() -> None:
         f"  {cmd('cld recall <query>')}    Search the memory store and print matching entries in full\n"
         f"  {cmd('cld memory add <text>')} Record a note (--global for every repo, --anchor path)\n"
         f"  {cmd('cld memory scope <name> repo|global')}  Change how far an existing note reaches\n"
+        f"  {cmd('cld memory link')}      Make docs/memory the folder Claude Code loads (--yes to skip the prompt)\n"
         f"  {cmd('cld memory consolidate')}  Review recorded sessions and promote them to memories\n"
         f"  {cmd('cld memory audit')}     Review the store and delete what no longer earns its place\n"
         f"                                (--context '<goal>' to see what it would recall and why,\n"
@@ -1833,6 +1899,8 @@ def _run(argv: list[str] | None = None) -> int:
             return _cmd_write_entry(repo_root(cwd), argv[2:], "memory", _resolve_config_root(os.environ, []))
         if sub == "consolidate":
             return _cmd_consolidate(repo_root(cwd), _resolve_config_root(os.environ, []))
+        if sub == "link":
+            return _cmd_link(repo_root(cwd), argv[2:], _resolve_config_root(os.environ, []))
         if not sub:                                 # a bare `memory` is the entry point, not an error
             root = repo_root(cwd)
             return _print_memory_status(root, load_config(
