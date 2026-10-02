@@ -1667,9 +1667,15 @@ def _cmd_doctor(cwd: Path) -> int:
     print(f"    repo config:      {_paint(str(repo_cfg), 'cyan')} ({_yn(repo_cfg.is_file())})")
     if cfg.memory.git_tracked:                      # untracked notes already go where Claude Code reads
         root = repo_root(cwd)
-        state = (_paint("Claude Code reads it", "green") if is_linked(cfg.config_root, root)
-                 else _paint("Claude Code doesn't read it — claude-loadout memory link", "yellow"))
-        print(f"    notes folder:     {root / 'docs' / 'memory'} ({state})")
+        notes = root / "docs" / "memory"
+        if is_linked(cfg.config_root, root):
+            state = _paint("Claude Code reads it", "green")
+        elif not notes.exists():                    # nothing unread yet; say where the next note goes
+            state = _paint("not created yet; new notes would go here, where Claude Code doesn't "
+                           "read them — claude-loadout memory link", "yellow")
+        else:
+            state = _paint("Claude Code doesn't read it — claude-loadout memory link", "yellow")
+        print(f"    notes folder:     {notes} ({state})")
     resolved = resolve_model_source(cfg.model_name)
     embed = _build_embed(cfg.model_name)           # warns + falls back on failure
     model_state = ("keyword fallback" if embed is keyword_embed
