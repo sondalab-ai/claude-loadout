@@ -388,10 +388,11 @@ def _cmd_link(root: Path, args: list[str], override: Path | None = None) -> int:
     plan = plan_link(cfg.config_root, root)
     if plan.state == "unknown-project":
         _warn(f"Claude Code keeps no sessions under {plan.harness.parent}, so the folder it reads "
-              f"for {root} can't be confirmed; start one session here first")
+              f"for {root} can't be confirmed; start one session here first (if you usually "
+              f"reach this repo through a symlinked path, run this from that path)")
         return 1
     if plan.state == "elsewhere":
-        _warn(f"{plan.harness} already links to {plan.harness.resolve()}; leaving it alone")
+        _warn(f"{plan.harness} is a symlink to {plan.harness.resolve()}; leaving it alone")
         return 1
     print(_paint("claude-loadout memory link", "bold"))
     print(f"  Claude Code reads:  {plan.harness}")

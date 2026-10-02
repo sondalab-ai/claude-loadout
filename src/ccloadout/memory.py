@@ -292,13 +292,18 @@ def indexed_files(config_root: Path, repo: Path) -> set[Path]:
                     found.add(target)
     return found
 
+def index_line(name: str, filename: str, description: str = "") -> str:
+    """One MEMORY.md entry, `- [name](file.md) — description`: the shape Claude Code reads."""
+    desc = one_line(description)
+    return f"- [{one_line(name)}]({filename})" + (f" — {desc}" if desc else "")
+
 def _index_add(path: Path, name: str, description: str) -> None:
     # Only where an index already exists: inventing one would start injecting entries into every
     # session, which is the opposite of what this tool is for.
     index = path.parent / _INDEX_FILE
     if not index.exists():
         return
-    line = f"- [{one_line(name)}]({path.name}) — {one_line(description)}\n"
+    line = index_line(name, path.name, description) + "\n"
     text = index.read_text(errors="replace")
     index.write_text(text if line in text else text.rstrip("\n") + "\n" + line)
 

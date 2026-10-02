@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from ccloadout.inventory import _frontmatter
-from ccloadout.memory import _HEADING, _INDEX_FILE, _INDEX_LINE, _INDEX_NAMES, harness_slug, one_line
+from ccloadout.memory import _HEADING, _INDEX_FILE, _INDEX_LINE, _INDEX_NAMES, harness_slug, index_line
 
 @dataclass(frozen=True)
 class LinkPlan:
@@ -50,9 +50,8 @@ def _index_line(path: Path) -> str:
     text = path.read_text(errors="ignore")
     fm = _frontmatter(text)
     heading = _HEADING.search(text)
-    name = one_line(str(fm.get("name") or path.stem))
-    desc = one_line(str(fm.get("description") or (heading.group(1) if heading else "")))
-    return f"- [{name}]({path.name})" + (f" — {desc}" if desc else "")
+    desc = str(fm.get("description") or (heading.group(1) if heading else ""))
+    return index_line(str(fm.get("name") or path.stem), path.name, desc)
 
 def _notes(directory: Path) -> list[Path]:
     try:
@@ -81,11 +80,15 @@ def plan_link(config_root: Path, root: Path, now: datetime | None = None) -> Lin
     copies, conflicts = [], []
     if state == "merge":
         for src in sorted(harness.iterdir()):
-            if src.name == _INDEX_FILE:
-                continue
+            if src.name == _INDEX_FILE or src.name.startswith("."):
+                continue                            # .DS_Store and friends stay in the backup
             dest = store / src.name
-            if src.is_dir() or (dest.exists() and dest.read_bytes() != src.read_bytes()):
-                conflicts.append(src.name)          # a folder, or a different file by the same name
+            if src.is_symlink():                    # never follow one into a tracked repository
+                conflicts.append(f"{src.name} (a symlink)")
+            elif src.is_dir() or dest.is_dir():
+                conflicts.append(src.name)
+            elif dest.exists() and dest.read_bytes() != src.read_bytes():
+                conflicts.append(src.name)          # a different file by the same name
             elif not dest.exists():
                 copies.append(src)
     base = _read(store / _INDEX_FILE)
@@ -102,10 +105,15 @@ def plan_link(config_root: Path, root: Path, now: datetime | None = None) -> Lin
     for note in [*_notes(store), *copies]:          # notes nothing indexes reach no session
         if note.suffix == ".md" and note.name not in have:
             added.append(_index_line(note)); have.add(note.name)
-    stamp = (now or datetime.now()).strftime("%Y%m%d-%H%M%S")
+    backup = None
+    if state == "merge":
+        stamp = (now or datetime.now()).strftime("%Y%m%d-%H%M%S")
+        backup, suffix = harness.with_name(f"memory.bak-{stamp}"), 2
+        while backup.exists():                      # a second run within the same second
+            backup = harness.with_name(f"memory.bak-{stamp}-{suffix}")
+            suffix += 1
     return LinkPlan(harness, store, state, tuple(copies), tuple(conflicts), tuple(added),
-                    "\n".join([*lines, *added]) + "\n",
-                    harness.with_name(f"memory.bak-{stamp}") if state == "merge" else None)
+                    "\n".join([*lines, *added]) + "\n", backup)
 
 def apply_link(plan: LinkPlan) -> None:
     """Carry out a plan from `plan_link`. Copies, never moves: the backup keeps every original."""
@@ -115,13 +123,17 @@ def apply_link(plan: LinkPlan) -> None:
     for src in plan.copies:
         shutil.copy2(src, plan.store / src.name)
     index = plan.store / _INDEX_FILE
-    if plan.added or not index.exists():
+    if _read(index).strip() != plan.index_text.strip():
         index.write_text(plan.index_text)
     if plan.state == "merge":
         plan.harness.rename(plan.backup)
     if plan.state in ("merge", "missing"):
-        plan.harness.parent.mkdir(parents=True, exist_ok=True)
-        plan.harness.symlink_to(plan.store.resolve(), target_is_directory=True)
+        try:
+            plan.harness.symlink_to(plan.store.resolve(), target_is_directory=True)
+        except OSError:                             # put Claude Code's folder back as it was
+            if plan.state == "merge":
+                plan.backup.rename(plan.harness)
+            raise
 
 def _read(path: Path) -> str:
     try:

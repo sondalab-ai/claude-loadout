@@ -82,6 +82,52 @@ def test_link_pointing_elsewhere_is_left_alone(env, tmp_path):
     harness.symlink_to(other, target_is_directory=True)
     assert plan_link(root, repo, NOW).state == "elsewhere"
 
+def test_dotfiles_are_ignored_and_never_block(env):
+    root, repo, harness, store = env
+    harness.mkdir(); (harness / ".DS_Store").write_bytes(b"one")
+    store.mkdir(parents=True); (store / ".DS_Store").write_bytes(b"two")
+    plan = plan_link(root, repo, NOW)
+    assert plan.conflicts == () and plan.copies == ()
+
+def test_a_symlink_in_the_harness_folder_is_not_followed(env, tmp_path):
+    root, repo, harness, store = env
+    secret = tmp_path / "secret.md"; secret.write_text("private\n")
+    harness.mkdir(); (harness / "leak.md").symlink_to(secret)
+    plan = plan_link(root, repo, NOW)
+    assert plan.blocked and "leak.md" in plan.conflicts[0]   # never copied into the tracked repo
+
+def test_a_directory_on_the_repo_side_is_a_conflict_not_a_crash(env):
+    root, repo, harness, store = env
+    _note(harness, "clash")
+    (store / "clash.md").mkdir(parents=True)
+    assert plan_link(root, repo, NOW).conflicts == ("clash.md",)
+
+def test_empty_repo_index_takes_the_harness_lines(env):
+    root, repo, harness, store = env
+    _note(harness, "kept")
+    (harness / "MEMORY.md").write_text("- [kept](kept.md) — a fact\n")
+    store.mkdir(parents=True); (store / "MEMORY.md").write_text("")
+    apply_link(plan_link(root, repo, NOW))
+    assert "(kept.md)" in (store / "MEMORY.md").read_text()
+
+def test_a_failed_symlink_restores_the_original_folder(env, monkeypatch):
+    root, repo, harness, store = env
+    _note(harness, "precious")
+    plan = plan_link(root, repo, NOW)
+    def fail(self, *a, **k): raise OSError("no symlinks here")
+    monkeypatch.setattr(Path, "symlink_to", fail)
+    with pytest.raises(OSError):
+        apply_link(plan)
+    assert (harness / "precious.md").is_file() and not harness.is_symlink()   # as before
+    assert not plan.backup.exists()
+
+def test_backup_name_does_not_collide(env):
+    root, repo, harness, store = env
+    _note(harness, "x")
+    harness.with_name("memory.bak-20261002-120000").mkdir()   # left by a run in the same second
+    plan = plan_link(root, repo, NOW)
+    assert plan.backup.name == "memory.bak-20261002-120000-2"
+
 def test_refuses_when_claude_code_has_no_sessions_for_the_repo(tmp_path):
     root, repo = tmp_path / "profile", tmp_path / "repo"
     repo.mkdir(); root.mkdir()
