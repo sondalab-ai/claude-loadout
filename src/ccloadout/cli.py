@@ -369,6 +369,10 @@ def _cmd_write_entry(cwd: Path, args: list[str], kind: str, override: Path | Non
 
 def _link_hint(cfg, root: Path) -> None:
     # A tracked note in an unlinked docs/memory reaches no session; say so where it was written.
+    # Only to a person at a terminal: sessions write notes on their own, and linking copies notes
+    # into a git-tracked folder, which an agent must not be nudged into (doctor still reports it).
+    if not _interactive([]):
+        return
     if cfg.memory.git_tracked and not is_linked(cfg.config_root, root):
         _warn("Claude Code doesn't read docs/memory in this repo yet. "
               "Run `claude-loadout memory link` to fix that.")

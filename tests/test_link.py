@@ -158,9 +158,19 @@ def test_cli_link_refuses_when_notes_are_untracked(env, tmp_path, monkeypatch, c
     assert "nothing to link" in capsys.readouterr().out
     assert not harness.exists()
 
+def test_an_agent_writing_a_note_is_never_told_to_link(env, tmp_path, monkeypatch, capsys):
+    # Sessions run `memory add` on their own (the end-of-session reminder asks them to). Linking
+    # copies notes into a git-tracked folder, which is a person's call, not an agent's.
+    root, repo, harness, store = env
+    _cli_env(monkeypatch, tmp_path, root, repo)
+    monkeypatch.setattr(cli, "_interactive", lambda passthrough: False)
+    assert cli.main(["memory", "add", "--name", "quiet", "a fact"]) == 0
+    assert "memory link" not in capsys.readouterr().err
+
 def test_memory_add_hints_only_when_docs_memory_is_unread(env, tmp_path, monkeypatch, capsys):
     root, repo, harness, store = env
     _cli_env(monkeypatch, tmp_path, root, repo)
+    monkeypatch.setattr(cli, "_interactive", lambda passthrough: True)   # a person at the terminal
     assert cli.main(["memory", "add", "--name", "first", "a first fact"]) == 0
     assert "memory link" in capsys.readouterr().err         # unlinked: the note reaches no session
     assert cli.main(["memory", "link", "--yes"]) == 0
