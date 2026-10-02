@@ -176,6 +176,20 @@ def test_doctor_enumerates_multiple_profiles(tmp_path, monkeypatch, capsys):
     assert f"{tmp_path / '.claude-perso'} (active)" in out   # env-selected profile marked active
     assert f"{tmp_path / '.claude'}\n" in out                # sibling listed, not marked active
 
+def test_doctor_words_the_notes_folder_by_whether_it_exists(tmp_path, monkeypatch, capsys):
+    root = _root(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "make_model2vec_embed", lambda name: cli.keyword_embed)
+    assert cli.main(["doctor"]) == 0
+    out = capsys.readouterr().out
+    assert "not created yet" in out and "doesn't read it" not in out   # nothing is going unread
+    (tmp_path / "docs" / "memory").mkdir(parents=True)
+    assert cli.main(["doctor"]) == 0
+    out = capsys.readouterr().out
+    assert "Claude Code doesn't read it" in out and "not created yet" not in out
+
 def test_doctor_warns_per_profile_when_the_reminder_is_off(tmp_path, monkeypatch, capsys):
     for name in (".claude", ".claude-perso"):
         prof = tmp_path / name; prof.mkdir()
