@@ -176,6 +176,21 @@ def test_doctor_enumerates_multiple_profiles(tmp_path, monkeypatch, capsys):
     assert f"{tmp_path / '.claude-perso'} (active)" in out   # env-selected profile marked active
     assert f"{tmp_path / '.claude'}\n" in out                # sibling listed, not marked active
 
+def test_doctor_warns_per_profile_when_the_reminder_is_off(tmp_path, monkeypatch, capsys):
+    for name in (".claude", ".claude-perso"):
+        prof = tmp_path / name; prof.mkdir()
+        prof.joinpath("settings.json").write_text('{"enabledPlugins": {}}')
+    perso_cfg = tmp_path / ".claude-perso" / "loadout"; perso_cfg.mkdir()
+    (perso_cfg / "config.toml").write_text("[memory]\nstop_prompt = true\n")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / ".claude-perso"))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "make_model2vec_embed", lambda name: cli.keyword_embed)
+    assert cli.main(["doctor"]) == 0
+    out = capsys.readouterr().out
+    assert out.count("stop_prompt = true in") == 1                       # only the profile without it
+    assert f"{tmp_path / '.claude' / 'loadout' / 'config.toml'}" in out   # names the file to edit
+
 def test_doctor_reports_external_model_over_bundled_dir(tmp_path, monkeypatch, capsys):
     root = _root(tmp_path)
     monkeypatch.setenv("HOME", str(tmp_path))

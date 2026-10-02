@@ -1561,6 +1561,14 @@ def _profile_report(root: Path, cwd: Path, active: bool,
     print(f"  {_paint(str(root), 'cyan')}{tag}")
     user_cfg = root / "loadout" / "config.toml"
     print(f"    user config:  {_yn(user_cfg.is_file())}")
+    try:                                            # what a launch here with this profile would use
+        reminder = load_config(cwd=cwd, config_root_override=root).memory.stop_prompt
+    except Exception:                               # fail-open: doctor must never crash
+        reminder = None
+    if reminder is False:
+        print(f"    reminder:     {_paint('off', 'yellow')} "
+              + _paint(f"— sessions are not asked to record decisions; set [memory] "
+                       f"stop_prompt = true in {user_cfg}", "dim"))
     try:
         items = claude_code_inventory(root, cwd, global_config_path)
     except Exception as exc:                        # fail-open: doctor must never crash

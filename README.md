@@ -125,9 +125,11 @@ claude-loadout doctor
 
 It enumerates every Claude profile it finds (`~/.claude`, `~/.claude-perso`, ...), marks the one
 selected by `CLAUDE_CONFIG_DIR` as active, and for each shows which config files exist and how many
-MCP servers / plugins / skills it would inventory. It then reports which embedding model is in use
-(bundled, external, or keyword fallback), whether a rule model is configured, and finishes with the
-alias + `--explain` + `rules` cheat sheet to get going.
+MCP servers / plugins / skills it would inventory. A profile whose end-of-session reminder is off
+(`[memory] stop_prompt`) gets a warning naming the file to edit. It then reports whether Claude
+Code reads this repository's `docs/memory` (see [Where notes live](#where-notes-live)), which
+embedding model is in use (bundled, external, or keyword fallback), whether a rule model is
+configured, and finishes with the alias + `--explain` + `rules` cheat sheet to get going.
 
 ## How much it saves
 
