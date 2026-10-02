@@ -74,6 +74,23 @@ def test_plugin_footprint_sums_its_skills_commands_and_agents(tmp_path: Path):
     assert plugin.footprint == sum(len(s) for s in
                                    ("- kit:plan: plans work", "- kit:go: runs it", "- kit:rev: reviews"))
 
+def test_plugin_footprint_handles_a_single_skill_path_and_hooks_only_plugins(tmp_path: Path):
+    root = tmp_path / "root"; root.mkdir()
+    (root / "settings.json").write_text('{"enabledPlugins": {"one@m": true, "hooks@m": true, "gone@m": true}}')
+    one = tmp_path / "one"; (one / ".claude-plugin").mkdir(parents=True)
+    (one / ".claude-plugin" / "plugin.json").write_text('{"skills": "./skills/solo"}')
+    (one / "skills" / "solo").mkdir(parents=True)
+    (one / "skills" / "solo" / "SKILL.md").write_text("---\nname: solo\ndescription: alone\n---\n")
+    hooks = tmp_path / "hooks"; (hooks / "hooks").mkdir(parents=True)   # ships hooks, lists nothing
+    (root / "plugins").mkdir()
+    (root / "plugins" / "installed_plugins.json").write_text(
+        '{"plugins": {"one@m": [{"installPath": "%s"}], "hooks@m": [{"installPath": "%s"}]}}'
+        % (one, hooks))
+    by_id = {i.id: i for i in claude_code_inventory(root) if i.kind == "plugin"}
+    assert by_id["one@m"].footprint == len("- one:solo: alone")
+    assert by_id["hooks@m"].footprint == 0                  # known to list nothing
+    assert by_id["gone@m"].footprint is None                # not installed: unknown
+
 def test_plugin_description_falls_back_to_id_without_manifest(tmp_path: Path):
     root = tmp_path / "root"; root.mkdir()
     (root / "settings.json").write_text('{"enabledPlugins": {"mytool@mkt": true}}')

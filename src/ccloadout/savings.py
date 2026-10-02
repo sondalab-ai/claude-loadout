@@ -61,9 +61,9 @@ def _item_cost(item: _Kinded, costs: Mapping[str, int],
     # the text the item actually puts in context, then the flat per-kind estimate.
     if measured and item.id in measured:
         return measured[item.id]
-    footprint = getattr(item, "footprint", 0)
-    if footprint > 0:
-        return max(1, footprint // _CHARS_PER_TOKEN)
+    footprint = getattr(item, "footprint", None)
+    if footprint is not None:                       # 0 is a real answer: it lists nothing
+        return -(-footprint // _CHARS_PER_TOKEN)    # ceiling division
     return costs.get(item.kind, 0)
 
 def token_estimate(items: Iterable[_Kinded], costs: Mapping[str, int] | None = None,

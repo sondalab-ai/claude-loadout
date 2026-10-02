@@ -10,7 +10,7 @@ class Item:
     kind: str
     name: str
     description: str
-    footprint: int = 0      # characters Claude Code loads up front for it; 0 = unknown
+    footprint: int | None = None   # characters Claude Code loads up front for it; None = unknown
 
 def _load_json(path: Path) -> dict:
     try:
@@ -158,23 +158,30 @@ def plugin_mcp_servers(config_root: Path, pid: str) -> dict[str, dict]:
     plugin = pid.split("@", 1)[0]
     return {f"plugin_{plugin}_{name}": _rooted(spec, install) for name, spec in servers.items()}
 
-def _plugin_footprint(install: Path | None, pid: str) -> int:
+def _plugin_footprint(install: Path | None, pid: str) -> int | None:
     """Characters a plugin puts in context from the first turn: one listing line per piece.
 
     Claude Code lists each plugin skill and command as `- <plugin>:<name>: <description>`, and each
     plugin agent the same way in the agent list; the manifest's own description is never shown.
-    A manifest `skills` entry (string or list) replaces the default `skills/` directory.
+    A manifest `skills` entry (string or list, a skills folder or one skill's folder) replaces
+    the default `skills/`. None when the plugin isn't installed where the registry says; 0 when it
+    is and lists nothing (a hooks-only or MCP-only plugin).
     """
-    if install is None:
-        return 0
+    if install is None or not install.is_dir():
+        return None
     manifest = _load_json(install / ".claude-plugin" / "plugin.json")
     declared = manifest.get("skills") if isinstance(manifest, dict) else None
     dirs = [declared] if isinstance(declared, str) else declared if isinstance(declared, list) else ["skills"]
-    files = [md for d in dirs if isinstance(d, str) for md in sorted((install / d).glob("*/SKILL.md"))]
+    files = [md for d in dirs if isinstance(d, str)
+             for md in [*sorted((install / d).glob("*/SKILL.md")), install / d / "SKILL.md"]
+             if md.is_file()]
     files += sorted((install / "commands").glob("*.md")) + sorted((install / "agents").glob("*.md"))
     plugin, total = pid.split("@", 1)[0], 0
     for md in files:
-        fm = _frontmatter(md.read_text(errors="ignore"))
+        try:
+            fm = _frontmatter(md.read_text(errors="ignore"))
+        except OSError:                             # a folder named x.md, an unreadable file
+            continue
         name = fm.get("name") or (md.parent.name if md.name == "SKILL.md" else md.stem)
         total += len(f"- {plugin}:{name}: {fm.get('description') or ''}")
     return total
