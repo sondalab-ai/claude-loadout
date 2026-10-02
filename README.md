@@ -27,6 +27,9 @@ Nothing is uninstalled or changed globally; the rest is simply not loaded for th
 cached in `.loadout/` and reused on every later launch until you run `cld update`. If any step fails, you
 get a normal, full session.
 
+Notes and decisions you or a session record (`cld memory add`, `cld decision new`) go to
+`./docs/memory/`; run `cld memory link` once per repository so Claude Code loads them too.
+
 ```bash
 pipx install ccloadout
 cld            # in place of `claude`
@@ -228,7 +231,8 @@ it is **not** the nuclear `--bare` mode: your `CLAUDE.md`, hooks, and memory all
 
 Everything is optional, claude-loadout works with zero configuration. When you do want to tune it,
 settings are TOML and resolved through a chain, where **a later layer replaces an earlier one for
-each key** (layers don't merge; a list value is overwritten wholesale):
+each top-level key** (a list value is overwritten wholesale); the `[memory]` and `[token_costs]`
+tables merge field by field instead:
 
 1. Built-in defaults
 2. User / profile, `$CLAUDE_CONFIG_DIR/loadout/config.toml`
@@ -370,12 +374,13 @@ smuggle its neighbours in.
 enabled = true
 budget_tokens = 800     # ceiling on what recall may inject
 threshold = 0.24        # relevance cutoff, same scale as tool ranking
-git_tracked = true      # new notes land in ./docs/memory and travel with the repo
+git_tracked = true      # new notes land in ./docs/memory and travel with the repo (link it, see above);
+                        # false writes them to Claude Code's own memory folder instead
 scopes = ["repo", "global"]   # drop "global" to see only this repository's notes
 promote_after = 3       # deliveries after which a note is pinned into recall
 decay_days = 90         # untouched for this long, a note is demoted (never deleted)
 prompt_recall = false   # also re-rank on every prompt (see below)
-stop_prompt = false     # at session end, ask the session to record what it decided
+stop_prompt = false     # at session end, ask the session to record what it decided (doctor warns when off)
 decision_keywords = []  # deliberation stems; empty keeps the built-in en/it/es/de list
 ```
 
@@ -665,9 +670,11 @@ of a rule you author by hand with `claude-loadout rules`, which stays shareable,
 per-machine, hand-authored scoping is for the team.
 
 For each seeded project it ranks the profile's tools against that goal and, after the keep/drop
-review in step 4, freezes that decision into `rules.toml` (only for the kinds launches actually
-prune, MCP servers and plugins).
-`config.toml` gets the resolved `threshold` and `model_name`. Pass **`--yes`** to run
+review in step 4, freezes that decision into `rules.toml` (for every kind launches prune: MCP
+servers, plugins and standalone skills).
+`config.toml` gets the resolved `threshold` and `model_name`; when the file already exists, only
+those two keys are updated, so `[memory]` and anything else you added survive a re-seed (a file
+that can't be edited safely in place is left unchanged, with a warning). Pass **`--yes`** to run
 non-interactively (every eligible project, auto-detected goals, auto keep/drop, active profile) -
 required when there's no terminal, e.g. in a script.
 
@@ -683,7 +690,7 @@ required when there's no terminal, e.g. in a script.
 
 Seeds go stale: you install a new plugin or MCP server, the project's purpose shifts, or you want a
 tighter keep/drop than the first pass gave you. `claude-loadout update` re-runs the decision over a repo
-that `init` already seeded and rewrites its `.loadout/`.
+that `init` already seeded, regenerates its machine-written rules and refreshes its goal.
 
 ```sh
 claude-loadout update            # refresh the repo you're standing in
@@ -709,8 +716,10 @@ claude-loadout update ~/src      # refresh every seeded project under a root (bu
 ## Design guarantees
 
 - **Session-local.** Scoping affects only the session it launches. Your Claude configuration is
-  never modified. (claude-loadout does write two of its own files under your control: authored rules in
-  `loadout/rules.toml`, and a remembered goal in `./.loadout/goal`.)
+  never modified by a launch. (claude-loadout does write its own files under your control: authored
+  rules in `loadout/rules.toml`, a remembered goal in `./.loadout/goal` with its `goal.meta`, and
+  the notes and decisions you ask it to record.) The one command that changes a Claude Code folder is
+  `cld memory link`, and only when you confirm it; it keeps the original as a backup.
 - **Fail-open, always.** A missing config, malformed rules file, unavailable model, or any other
   error degrades to launching the full, unscoped Claude Code, with a warning where it helps. The
   child process's exit code is passed straight back. claude-loadout can slim a session down; it can

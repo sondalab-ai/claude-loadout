@@ -7,7 +7,7 @@
 > live under `docs/plans/`. This spec is the contract; trade-offs and rejected alternatives
 > are recorded inline in the "Alternatives considered" sections.
 
-Date: 2026-08-18 · Status: **Design approved, pre-implementation** · Target harness (v1): Claude Code
+Date: 2026-08-18 · Status: **Delivered** · Target harness (v1): Claude Code
 
 ---
 

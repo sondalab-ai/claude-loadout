@@ -1,9 +1,13 @@
 # TODOs
 
-All items below are implemented/verified. The first six are covered by
+The first item is open; the rest are implemented/verified. Of those, the first six are covered by
 [docs/handoff/2026-08-19-todo-implementation.md](docs/handoff/2026-08-19-todo-implementation.md);
 the memory item has its own spec and pull request, linked inline.
 
+- [ ] Usage-based skill scoping: rules plus per-repo skill usage instead of the embedding ranker,
+  reaching bundled, org and repo skills — designed in
+  [docs/specs/2026-10-02-usage-based-scoping-design.md](docs/specs/2026-10-02-usage-based-scoping-design.md)
+  (Proposed). Follows the usage-audit fixes shipped in https://github.com/sondalab-ai/claude-loadout/pull/8.
 - [x] Uninstall script (`scripts/uninstall.sh`)
 - [x] Better informative guidance once setup is done (how to init) — `loadout doctor`
 - [x] Review readme after having shipped the model inside the repo — verified accurate

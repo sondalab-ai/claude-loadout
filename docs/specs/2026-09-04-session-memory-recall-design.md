@@ -11,11 +11,20 @@
 > (the `--settings` overlay this spec reuses as its injection point). Closes the open TODO item
 > in `TODO.md`. This file is the contract; trade-offs and rejected alternatives are inline.
 
-Date: 2026-09-04 · Status: **Proposed** · Target harness: Claude Code 2.1.261
+Date: 2026-09-04 · Status: **Delivered** (https://github.com/sondalab-ai/claude-loadout/pull/5) · Target harness: Claude Code 2.1.261
+
+> **Update 2026-10-02 (0.11.0, https://github.com/sondalab-ai/claude-loadout/pull/8).** A usage audit
+> found that `docs/memory` notes reach a session only when Claude Code's `projects/<slug>/memory` is
+> symlinked to them, and that decisions written to the `debug-decisions` corpus were read by nothing
+> while recall is off. Since 0.11.0: `cld decision new` writes decisions as indexed entries in the
+> note store (the corpus is still read, no longer written); `cld memory link` performs the
+> `memory-org` symlink, with a merge and a backup; every store resolves to the main checkout, so
+> worktrees share it. The sections below describe the design as delivered in
+> https://github.com/sondalab-ai/claude-loadout/pull/5.
 
 **Status legend** (used throughout): `Proposed` — this document only, no code exists. `PoC implemented
 (not delivered)` — code exists but is not shipped. `Delivered` — merged and available to users.
-This spec is `Proposed` in its entirety.
+This spec is `Delivered`; the update note above lists what changed afterwards.
 
 ---
 
