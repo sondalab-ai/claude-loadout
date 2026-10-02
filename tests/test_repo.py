@@ -26,6 +26,21 @@ def test_worktree_resolves_to_the_main_checkout(checkout):
     (wt / "pkg").mkdir()
     assert repo_root(wt / "pkg") == main.resolve()   # a subdirectory is the same repository
 
+def test_separate_git_dir_resolves_to_the_checkout_top_level(tmp_path):
+    top = tmp_path / "top"; top.mkdir()
+    _git(tmp_path, "init", "-q", "--separate-git-dir", str(tmp_path / "store.git"), str(top))
+    (top / "sub").mkdir()
+    assert repo_root(top / "sub") == top.resolve()   # not the subdirectory it was asked from
+
+def test_submodule_resolves_to_its_own_top_level(checkout, tmp_path):
+    main, _wt = checkout
+    lib = tmp_path / "lib"; lib.mkdir()
+    _git(lib, "init", "-q"); (lib / "f").write_text("x\n"); _git(lib, "add", "f")
+    _git(lib, "commit", "-q", "-m", "lib")
+    _git(main, "-c", "protocol.file.allow=always", "submodule", "add", "-q", str(lib), "vendor/lib")
+    (main / "vendor" / "lib" / "deep").mkdir()
+    assert repo_root(main / "vendor" / "lib" / "deep") == (main / "vendor" / "lib").resolve()
+
 def test_outside_git_is_the_path_itself(tmp_path):
     lone = tmp_path / "lone"; lone.mkdir()
     assert repo_root(lone) == lone.resolve()
