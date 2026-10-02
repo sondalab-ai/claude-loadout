@@ -1272,30 +1272,52 @@ def _write_seed_scaffold(repo: Path, cfg, goal: str) -> None:
     model = cfg.model_name.replace("\\", "\\\\").replace('"', '\\"')   # TOML basic string
     seeded = {"threshold": str(cfg.threshold), "model_name": f'"{model}"'}
     path = d / "config.toml"
-    if path.exists():
-        path.write_text(_set_top_level_keys(path.read_text(), seeded))
-    else:
+    if not path.exists():
         path.write_text(_CONFIG_HEADER + "".join(f"{k} = {v}\n" for k, v in seeded.items()))
+        return
+    edited = _set_top_level_keys(path.read_text(), seeded)
+    if edited is None:                              # never trade a working config for a broken one
+        _warn(f"{path} left unchanged: couldn't update threshold/model_name in place safely; "
+              f"set them by hand if needed")
+    else:
+        path.write_text(edited)
 
-def _set_top_level_keys(text: str, values: dict[str, str]) -> str:
+# A bare top-level key line, optionally followed by a comment. Quoted and dotted keys don't match,
+# so they are never rewritten (the result is validated anyway).
+_TOP_KEY = re.compile(r'^(?P<key>[A-Za-z0-9_-]+)\s*=\s*'
+                      r'(?P<value>"(?:[^"\\]|\\.)*"|[^#]*?)\s*(?P<comment>#.*)?$')
+# A table header, `[name]` or `[[name]]`, alone on its line. An array continuation such as
+# `  ["b"],` has a trailing comma and is not one.
+_TABLE_HEADER = re.compile(r'^\s*\[\[?\s*[^\[\]]+?\s*\]\]?\s*(#.*)?$')
+
+def _set_top_level_keys(text: str, values: dict[str, str]) -> str | None:
     """Replace or add top-level `key = value` lines in a TOML file's text, touching nothing else.
 
     A re-seed must not wipe what the user or `memory enable` wrote in [memory], [token_costs] or
-    any other table, so only lines above the first table header are candidates, and missing keys
-    are inserted just before that header (after the preamble's last non-blank line).
+    any other table, so only lines above the first table header are candidates (a trailing comment
+    is kept), and missing keys go just before that header. The result is parsed back; anything
+    that would not round-trip (a quoted key, a broken file) returns None and nothing is written.
     """
+    import tomllib
     lines = text.splitlines()
-    end = next((i for i, ln in enumerate(lines) if ln.lstrip().startswith("[")), len(lines))
+    end = next((i for i, ln in enumerate(lines) if _TABLE_HEADER.match(ln)), len(lines))
     missing = dict(values)
     for i in range(end):
-        key = lines[i].split("=", 1)[0].strip()
-        if "=" in lines[i] and key in missing:
-            lines[i] = f"{key} = {missing.pop(key)}"
+        m = _TOP_KEY.match(lines[i])
+        if m and m.group("key") in missing:
+            comment = f"  {m.group('comment')}" if m.group("comment") else ""
+            lines[i] = f"{m.group('key')} = {missing.pop(m.group('key'))}{comment}"
     at = end
     while at > 0 and not lines[at - 1].strip():
         at -= 1
     lines[at:at] = [f"{k} = {v}" for k, v in missing.items()]
-    return "\n".join(lines) + "\n"
+    out = "\n".join(lines) + "\n"
+    try:
+        parsed = tomllib.loads(out)
+        expected = tomllib.loads("".join(f"{k} = {v}\n" for k, v in values.items()))
+    except tomllib.TOMLDecodeError:
+        return None
+    return out if all(parsed.get(k) == v for k, v in expected.items()) else None
 
 def _write_seed(repo: Path, cfg, goal: str, rules: list[Rule]) -> None:
     # Persist the local seed: scaffold + a fresh rules.toml holding `rules`.

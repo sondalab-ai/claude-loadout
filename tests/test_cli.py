@@ -1064,6 +1064,38 @@ def test_update_single_refuses_unseeded(tmp_path, monkeypatch, capsys):
     assert "isn't claude-loadout-seeded" in capsys.readouterr().err
     assert not (bare / ".loadout").exists()
 
+_SEEDED = {"threshold": "0.3", "model_name": '"m"'}
+
+def test_set_top_level_keys_keeps_comments_arrays_and_tables():
+    import tomllib
+    text = ('# header\nthreshold = 0.1  # my note\nalways_keep = [\n  "a",\n  "b",\n]\n'
+            '\n[memory]\nstop_prompt = true\n')
+    out = cli._set_top_level_keys(text, _SEEDED)
+    data = tomllib.loads(out)
+    assert data["threshold"] == 0.3 and data["model_name"] == "m"
+    assert data["always_keep"] == ["a", "b"] and data["memory"] == {"stop_prompt": True}
+    assert "threshold = 0.3  # my note" in out                  # the user's comment survives
+
+def test_set_top_level_keys_inserts_before_a_leading_table_and_into_an_empty_file():
+    import tomllib
+    assert tomllib.loads(cli._set_top_level_keys("", _SEEDED))["threshold"] == 0.3
+    out = cli._set_top_level_keys("[memory]\nenabled = true\n", _SEEDED)
+    assert tomllib.loads(out) == {"threshold": 0.3, "model_name": "m", "memory": {"enabled": True}}
+
+def test_set_top_level_keys_refuses_what_it_cannot_edit_safely():
+    # A quoted key would otherwise gain a duplicate, and a duplicate key breaks the whole file.
+    assert cli._set_top_level_keys('"threshold" = 0.1\n', _SEEDED) is None
+    assert cli._set_top_level_keys("not = [valid\n", _SEEDED) is None
+
+def test_reseed_leaves_a_file_it_cannot_edit_untouched(tmp_path, monkeypatch, capsys):
+    _root_, _repos, r1 = _seeded_repo(tmp_path, monkeypatch)
+    cfg = r1 / ".loadout" / "config.toml"
+    cfg.write_text('"threshold" = 0.1\n')
+    monkeypatch.chdir(r1)
+    assert cli.main(["update", "--yes"]) == 0
+    assert cfg.read_text() == '"threshold" = 0.1\n'
+    assert "left unchanged" in capsys.readouterr().err
+
 def test_update_keeps_repo_memory_config(tmp_path, monkeypatch):
     import tomllib
     _root_, _repos, r1 = _seeded_repo(tmp_path, monkeypatch)
