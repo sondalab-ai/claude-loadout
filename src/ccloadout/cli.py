@@ -12,12 +12,11 @@ from ccloadout.compose import compose
 from ccloadout.repo import repo_root
 from ccloadout.link import apply_link, is_linked, plan_link
 from ccloadout.memory import (EntryExists, NoStatus, forget_entry, indexed_files,
-                              read_all, read_store, set_meta, set_status, slug_for,
-                              write_entry)
+                              read_all, read_store, set_meta, set_status, write_entry)
 from ccloadout.flags import clear_flag, load_flags, set_flag
 from ccloadout.usage import load_usage, record_delivery
 from ccloadout.candidates import drop_rows, load_candidates, record_session
-from ccloadout.decisions import corpus_dir, new_decision, supersede
+from ccloadout.decisions import supersede, supersede_entry, write_decision
 from ccloadout.recall import (anchor_state, assess, build_payload, estimate_tokens,
                               recall_command, search, select, strip_frontmatter)
 from ccloadout.rules import (load_rules, apply_rules, has_rule, save_rule, write_rules,
@@ -791,8 +790,9 @@ def _cmd_decision(cwd: Path, args: list[str], override: Path | None = None) -> i
             _warn("decision new needs a title")
             return 2
         tags = [t for arg in tag_args for t in arg.split(",") if t]
-        path = new_decision(corpus_dir(cfg.config_root, cwd), slug_for(cwd), title, tags)
+        path = write_decision(cfg.config_root, cwd, title, tags, cfg.memory.git_tracked)
         print(f"{_paint('wrote', 'green')} {path}")
+        _link_hint(cfg, cwd)
         return 0
     if action == "show":
         match = next((e for e in decisions if rest and e.name.startswith(rest[0])), None)
@@ -809,8 +809,11 @@ def _cmd_decision(cwd: Path, args: list[str], override: Path | None = None) -> i
         if old is None:
             _warn(f"no decision matching {rest[0]!r}")
             return 1
-        path = new_decision(corpus_dir(cfg.config_root, cwd), slug_for(cwd), " ".join(rest[1:]), [])
-        supersede(old.path, path.stem)
+        path = write_decision(cfg.config_root, cwd, " ".join(rest[1:]), [], cfg.memory.git_tracked)
+        if "/" in old.id:                           # `decision:<slug>/<id>`: a legacy corpus file
+            supersede(old.path, path.stem)
+        else:
+            supersede_entry(old.path, path)
         print(f"{_paint('wrote', 'green')} {path}\n{_paint('superseded', 'dim')} {old.name}")
         return 0
     if action != "list":

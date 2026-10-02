@@ -467,9 +467,13 @@ stay findable with `cld recall`.
 
 ### Decisions
 
-`cld decision new|list|show|supersede` writes the same files as the `debug-decisions` skill, in the
-same directory, so both tools see one corpus. `cld decision revert` is deliberately absent:
-executing destructive git operations does not belong in a launcher.
+`cld decision new` writes a decision into the same store as your notes, with a line in its
+`MEMORY.md`, so Claude Code loads decisions wherever it loads notes (see
+[Where notes live](#where-notes-live)). The file keeps a date-prefixed name and a Context /
+Decision / Alternatives / Rationale template. `cld decision list|show|supersede` cover both these
+and an existing `debug-decisions` corpus, which is still read and superseded in place but no longer
+written to. Superseding a decision takes its line out of `MEMORY.md`. `cld decision revert` is
+deliberately absent: executing destructive git operations does not belong in a launcher.
 
 ### Recall on every prompt (optional)
 
