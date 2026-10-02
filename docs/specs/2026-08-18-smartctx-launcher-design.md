@@ -7,7 +7,7 @@
 > live under `docs/plans/`. This spec is the contract; trade-offs and rejected alternatives
 > are recorded inline in the "Alternatives considered" sections.
 
-Date: 2026-08-18 · Status: **Design approved, pre-implementation** · Target harness (v1): Claude Code
+Date: 2026-08-18 · Status: **Delivered** · Target harness (v1): Claude Code
 
 ---
 
@@ -30,7 +30,7 @@ Confirmed against `claude --help` and `~/.claude/settings.json` on 2026-08-18.
 |---|---|---|
 | MCP servers | `--strict-mcp-config --mcp-config <tmp.json>` — use ONLY the listed servers | fine |
 | Plugins | `--settings <tmp.json>` overlay flipping `enabledPlugins.<id> = false` | fine |
-| Plugin-provided skills / agents / MCP / hooks | transitive: removed when their plugin is disabled | fine |
+| Plugin-provided skills / agents / MCP / hooks | transitive: removed when their plugin is disabled (strict mode drops a *kept* plugin's MCP servers too, so compose re-adds them as `plugin_<plugin>_<server>` — added 2026-10-02) | fine |
 | Standalone skills (`$CLAUDE_CONFIG_DIR/skills`, non-plugin) | `--disable-slash-commands` = all-off only | coarse (accepted) |
 
 **Base strategy:** a *normal* session (keeps `CLAUDE.md`, hooks, memory) plus two ephemeral

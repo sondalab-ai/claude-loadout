@@ -10,6 +10,7 @@ class Item:
     kind: str
     name: str
     description: str
+    footprint: int | None = None   # characters Claude Code loads up front for it; None = unknown
 
 def _load_json(path: Path) -> dict:
     try:
@@ -110,6 +111,81 @@ def _plugin_description(install_path: Path | None, pid: str) -> str:
     desc = _load_json(install_path / ".claude-plugin" / "plugin.json").get("description")
     return desc.strip() if isinstance(desc, str) and desc.strip() else pid
 
+def _servers_in(data: dict) -> dict:
+    # Plugins ship server maps two ways: bare ({"name": {...}}) or wrapped ({"mcpServers": {...}}).
+    if not isinstance(data, dict):
+        return {}
+    inner = data.get("mcpServers") if isinstance(data.get("mcpServers"), dict) else data
+    return {k: v for k, v in inner.items() if isinstance(v, dict)}
+
+def _expand_root(value, root: Path):
+    if isinstance(value, dict):
+        return {k: _expand_root(v, root) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_expand_root(v, root) for v in value]
+    return value.replace("${CLAUDE_PLUGIN_ROOT}", str(root)) if isinstance(value, str) else value
+
+def _rooted(spec: dict, root: Path) -> dict:
+    # Claude Code expands ${CLAUDE_PLUGIN_ROOT} and runs a plugin's server from the plugin's
+    # directory; under --mcp-config neither happens. The variable is expanded everywhere, but only
+    # the command and its arguments are rebased: an env value or URL starting with ./ isn't a path.
+    rebase = lambda v: str(root / v[2:]) if isinstance(v, str) and v.startswith("./") else v
+    spec = _expand_root(spec, root)
+    if "command" in spec:
+        spec["command"] = rebase(spec["command"])
+    if isinstance(spec.get("args"), list):
+        spec["args"] = [rebase(a) for a in spec["args"]]
+    return spec
+
+def plugin_mcp_servers(config_root: Path, pid: str) -> dict[str, dict]:
+    """MCP servers an installed plugin provides, keyed as Claude Code names them in tool names.
+
+    `--strict-mcp-config` drops plugin servers along with everything else, so a kept plugin
+    would lose them; compose puts these back into the curated config. The key
+    `plugin_<plugin>_<server>` reproduces the harness's own `mcp__plugin_<plugin>_<server>__*`
+    tool names (verified on Claude Code 2.1.287), so permission allowlists keep matching.
+    """
+    install = _installed_plugin_paths(config_root).get(pid)
+    if install is None:
+        return {}
+    servers = _servers_in(_load_json(install / ".mcp.json"))
+    declared = _load_json(install / ".claude-plugin" / "plugin.json").get("mcpServers")
+    if isinstance(declared, str):                   # a path to a server file, relative to the plugin
+        target = (install / declared).resolve()
+        declared = _load_json(target) if target.is_relative_to(install.resolve()) else None
+    if isinstance(declared, dict):
+        servers.update(_servers_in(declared))
+    plugin = pid.split("@", 1)[0]
+    return {f"plugin_{plugin}_{name}": _rooted(spec, install) for name, spec in servers.items()}
+
+def _plugin_footprint(install: Path | None, pid: str) -> int | None:
+    """Characters a plugin puts in context from the first turn: one listing line per piece.
+
+    Claude Code lists each plugin skill and command as `- <plugin>:<name>: <description>`, and each
+    plugin agent the same way in the agent list; the manifest's own description is never shown.
+    A manifest `skills` entry (string or list, a skills folder or one skill's folder) replaces
+    the default `skills/`. None when the plugin isn't installed where the registry says; 0 when it
+    is and lists nothing (a hooks-only or MCP-only plugin).
+    """
+    if install is None or not install.is_dir():
+        return None
+    manifest = _load_json(install / ".claude-plugin" / "plugin.json")
+    declared = manifest.get("skills") if isinstance(manifest, dict) else None
+    dirs = [declared] if isinstance(declared, str) else declared if isinstance(declared, list) else ["skills"]
+    files = [md for d in dirs if isinstance(d, str)
+             for md in [*sorted((install / d).glob("*/SKILL.md")), install / d / "SKILL.md"]
+             if md.is_file()]
+    files += sorted((install / "commands").glob("*.md")) + sorted((install / "agents").glob("*.md"))
+    plugin, total = pid.split("@", 1)[0], 0
+    for md in files:
+        try:
+            fm = _frontmatter(md.read_text(errors="ignore"))
+        except OSError:                             # a folder named x.md, an unreadable file
+            continue
+        name = fm.get("name") or (md.parent.name if md.name == "SKILL.md" else md.stem)
+        total += len(f"- {plugin}:{name}: {fm.get('description') or ''}")
+    return total
+
 def resolve_mcp_servers(global_config_path: Path, cwd: Path | None) -> dict:
     # Single source of truth for MCP discovery, shared by inventory + launch composition.
     # Merge order = least to most specific (later wins, spec §4.2):
@@ -130,7 +206,8 @@ def claude_code_inventory(config_root: Path, cwd: Path | None = None,
     for pid, enabled in (settings.get("enabledPlugins") or {}).items():
         if enabled:
             desc = _plugin_description(plugin_paths.get(pid), pid)
-            items.append(Item(id=pid, kind="plugin", name=pid, description=desc))
+            items.append(Item(id=pid, kind="plugin", name=pid, description=desc,
+                              footprint=_plugin_footprint(plugin_paths.get(pid), pid)))
     if global_config_path is None:
         global_config_path = default_global_config_path(config_root)
     servers = resolve_mcp_servers(global_config_path, cwd)
@@ -141,6 +218,7 @@ def claude_code_inventory(config_root: Path, cwd: Path | None = None,
         for md in skills_dir.glob("*/SKILL.md"):
             fm = _frontmatter(md.read_text(errors="ignore"))
             sid = fm.get("name") or md.parent.name
-            items.append(Item(id=sid, kind="skill", name=sid,
-                              description=fm.get("description", sid)))
+            desc = fm.get("description", sid)
+            items.append(Item(id=sid, kind="skill", name=sid, description=desc,
+                              footprint=len(f"- {sid}: {desc}")))   # its line in the skill listing
     return items

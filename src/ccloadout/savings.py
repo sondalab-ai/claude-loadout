@@ -6,17 +6,17 @@ class _Kinded(Protocol):
     kind: str
     id: str
 
-# Rough, offline estimates of the context each pruned item injects into a session
-# (an MCP server's tool schemas, a plugin's bundled skills/agents/hooks). The real
-# cost depends on the server's actual tool set, which loadout can't see without
-# connecting to it — so these are deliberately labelled estimates everywhere they
-# surface. Override per-kind with a [token_costs] table in config.toml.
+# Fallback estimates of the context each pruned item injects into a session, used only when
+# nothing better is known. Skills and plugins normally carry a footprint (the characters of their
+# listing lines, read from disk by inventory), which is converted at ~4 characters per token. An
+# MCP server's real cost depends on its tool set, which loadout can't see without connecting to
+# it (`claude-loadout measure`). Override the fallbacks per kind with [token_costs] in config.toml.
 DEFAULT_TOKEN_COSTS: dict[str, int] = {"mcp": 1200, "plugin": 600, "skill": 50}
 
 # Kinds that a scoped session can actually remove. Standalone user skills join mcp and
 # plugins here: they are dropped via skillOverrides "off" (see compose), so they count
-# toward savings. A skill's flat cost is a conservative fallback for its listing description;
-# a real per-skill measurement (measured[id], from `claude-loadout measure`) wins over it.
+# toward savings. A measured cost (measured[id], from `claude-loadout measure`) wins, then the
+# item's footprint, then the flat per-kind fallback.
 PRUNABLE = frozenset(DEFAULT_TOKEN_COSTS)
 
 # How a dropped item's cost lands in a session. EAGER kinds (skill/plugin descriptions and the
@@ -27,6 +27,7 @@ PRUNABLE = frozenset(DEFAULT_TOKEN_COSTS)
 # `memory` is deliberately absent from PRUNABLE and from the cost table: recalled memory is a
 # cost the session pays, tracked as Savings.injected, not an item that pruning can remove.
 EAGER_KINDS = frozenset({"skill", "plugin"})
+_CHARS_PER_TOKEN = 4    # same heuristic as measure.CHARS_PER_TOKEN; labelled an estimate everywhere
 DEFERRED_KINDS = frozenset({"mcp"})
 
 class Savings(NamedTuple):
@@ -56,10 +57,13 @@ def _split_by_load(items: Iterable[_Kinded], costs: Mapping[str, int],
 
 def _item_cost(item: _Kinded, costs: Mapping[str, int],
                measured: Mapping[str, int] | None) -> int:
-    # A real measured cost for this exact server (from `claude-loadout measure`) wins over
-    # the flat per-kind estimate.
+    # A real measured cost for this exact server (from `claude-loadout measure`) wins, then
+    # the text the item actually puts in context, then the flat per-kind estimate.
     if measured and item.id in measured:
         return measured[item.id]
+    footprint = getattr(item, "footprint", None)
+    if footprint is not None:                       # 0 is a real answer: it lists nothing
+        return -(-footprint // _CHARS_PER_TOKEN)    # ceiling division
     return costs.get(item.kind, 0)
 
 def token_estimate(items: Iterable[_Kinded], costs: Mapping[str, int] | None = None,

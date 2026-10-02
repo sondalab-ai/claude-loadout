@@ -148,7 +148,11 @@ def test_doctor_prints_guidance_and_does_not_launch(tmp_path, monkeypatch, capsy
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(cli, "make_model2vec_embed", lambda name: cli.keyword_embed)
     launched = {"ran": False}
-    monkeypatch.setattr(cli.subprocess, "run", lambda *a, **k: launched.__setitem__("ran", True))
+    def run(argv, **kwargs):                           # git may be asked for the repo root; claude never
+        if argv and argv[0] == "claude":
+            launched["ran"] = True
+        return _RC(1)
+    monkeypatch.setattr(cli.subprocess, "run", run)
     rc = cli.main(["doctor"])
     assert rc == 0 and launched["ran"] is False
     out = capsys.readouterr().out
@@ -171,6 +175,21 @@ def test_doctor_enumerates_multiple_profiles(tmp_path, monkeypatch, capsys):
     assert "claude profiles: 2 profiles" in out
     assert f"{tmp_path / '.claude-perso'} (active)" in out   # env-selected profile marked active
     assert f"{tmp_path / '.claude'}\n" in out                # sibling listed, not marked active
+
+def test_doctor_warns_per_profile_when_the_reminder_is_off(tmp_path, monkeypatch, capsys):
+    for name in (".claude", ".claude-perso"):
+        prof = tmp_path / name; prof.mkdir()
+        prof.joinpath("settings.json").write_text('{"enabledPlugins": {}}')
+    perso_cfg = tmp_path / ".claude-perso" / "loadout"; perso_cfg.mkdir()
+    (perso_cfg / "config.toml").write_text("[memory]\nstop_prompt = true\n")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / ".claude-perso"))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "make_model2vec_embed", lambda name: cli.keyword_embed)
+    assert cli.main(["doctor"]) == 0
+    out = capsys.readouterr().out
+    assert out.count("stop_prompt = true in") == 1                       # only the profile without it
+    assert f"{tmp_path / '.claude' / 'loadout' / 'config.toml'}" in out   # names the file to edit
 
 def test_doctor_reports_external_model_over_bundled_dir(tmp_path, monkeypatch, capsys):
     root = _root(tmp_path)
@@ -1044,6 +1063,78 @@ def test_update_single_refuses_unseeded(tmp_path, monkeypatch, capsys):
     assert rc == 0
     assert "isn't claude-loadout-seeded" in capsys.readouterr().err
     assert not (bare / ".loadout").exists()
+
+_SEEDED = {"threshold": "0.3", "model_name": '"m"'}
+
+def test_set_top_level_keys_keeps_comments_arrays_and_tables():
+    import tomllib
+    text = ('# header\nthreshold = 0.1  # my note\nalways_keep = [\n  "a",\n  "b",\n]\n'
+            '\n[memory]\nstop_prompt = true\n')
+    out = cli._set_top_level_keys(text, _SEEDED)
+    data = tomllib.loads(out)
+    assert data["threshold"] == 0.3 and data["model_name"] == "m"
+    assert data["always_keep"] == ["a", "b"] and data["memory"] == {"stop_prompt": True}
+    assert "threshold = 0.3  # my note" in out                  # the user's comment survives
+
+def test_set_top_level_keys_inserts_before_a_leading_table_and_into_an_empty_file():
+    import tomllib
+    assert tomllib.loads(cli._set_top_level_keys("", _SEEDED))["threshold"] == 0.3
+    out = cli._set_top_level_keys("[memory]\nenabled = true\n", _SEEDED)
+    assert tomllib.loads(out) == {"threshold": 0.3, "model_name": "m", "memory": {"enabled": True}}
+
+def test_set_top_level_keys_refuses_what_it_cannot_edit_safely():
+    # A quoted key would otherwise gain a duplicate, and a duplicate key breaks the whole file.
+    assert cli._set_top_level_keys('"threshold" = 0.1\n', _SEEDED) is None
+    assert cli._set_top_level_keys("not = [valid\n", _SEEDED) is None
+
+def test_reseed_leaves_a_file_it_cannot_edit_untouched(tmp_path, monkeypatch, capsys):
+    _root_, _repos, r1 = _seeded_repo(tmp_path, monkeypatch)
+    cfg = r1 / ".loadout" / "config.toml"
+    cfg.write_text('"threshold" = 0.1\n')
+    monkeypatch.chdir(r1)
+    assert cli.main(["update", "--yes"]) == 0
+    assert cfg.read_text() == '"threshold" = 0.1\n'
+    assert "left unchanged" in capsys.readouterr().err
+
+def test_update_keeps_repo_memory_config(tmp_path, monkeypatch):
+    import tomllib
+    _root_, _repos, r1 = _seeded_repo(tmp_path, monkeypatch)
+    cfg = r1 / ".loadout" / "config.toml"
+    cfg.write_text(cfg.read_text() + "\n[memory]\nstop_prompt = true\nenabled = true\n"
+                   "\n[token_costs]\nskill = 70\n")
+    monkeypatch.chdir(r1)
+    rc = cli.main(["update", "--yes"])
+    assert rc == 0
+    data = tomllib.loads(cfg.read_text())
+    assert data["memory"] == {"stop_prompt": True, "enabled": True}   # a re-seed used to wipe these
+    assert data["token_costs"] == {"skill": 70}
+    assert "threshold" in data and "model_name" in data              # seeded keys still written
+    assert cfg.read_text().count("threshold =") == 1                  # updated in place, not appended
+
+def test_update_regenerates_rules_seeded_under_the_old_name(tmp_path, monkeypatch):
+    import tomllib
+    _root_, _repos, r1 = _seeded_repo(tmp_path, monkeypatch)
+    legacy = ('[[rule]]\ntarget = "Gmail"\nnl = "seeded by smartctx update (goal: old)"\n'
+              '[rule.predicate]\naction = "always_drop"\nmatch = []\nmatch_mode = "any"\n')
+    (r1 / ".loadout" / "rules.toml").write_text(legacy)   # written before the smartctx → loadout rename
+    monkeypatch.chdir(r1)
+    rc = cli.main(["update", "--yes"])
+    assert rc == 0
+    rules = {x["target"]: x for x in tomllib.loads((r1 / ".loadout" / "rules.toml").read_text())["rule"]}
+    assert "seeded by loadout update" in rules["Gmail"]["nl"]   # treated as machine-owned, regenerated
+
+def test_explain_shows_a_refreshed_goal_without_writing_it(tmp_path, monkeypatch, capsys):
+    _root_, _repos, r1 = _seeded_repo(tmp_path, monkeypatch)
+    goal, meta = r1 / ".loadout" / "goal", r1 / ".loadout" / "goal.meta"
+    assert "origin=inferred" in meta.read_text()                  # init seeded an inferred goal
+    before = (goal.read_text(), meta.read_text())
+    (r1 / "pyproject.toml").write_text('[project]\ndescription = "a fresh purpose"\n')
+    monkeypatch.chdir(r1)
+    monkeypatch.setattr(cli.subprocess, "run", lambda *a, **k: pytest.fail("launched"))
+    assert cli.main(["--explain"]) == 0
+    out = capsys.readouterr().out
+    assert "fresh purpose" in out and "refreshed" in out
+    assert (goal.read_text(), meta.read_text()) == before          # --explain stays read-only
 
 def test_update_redetects_goal_fresh(tmp_path, monkeypatch):
     _root_, _repos, r1 = _seeded_repo(tmp_path, monkeypatch)

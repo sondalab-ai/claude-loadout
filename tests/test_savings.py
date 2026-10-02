@@ -12,6 +12,18 @@ def test_estimate_counts_all_prunable_kinds_including_skills():
     assert s.total == 5                        # 2 kept prunable + 3 dropped prunable
     assert s.tokens == 600 + 50 + 1200         # plugin + skill + mcp defaults
 
+def test_footprint_beats_the_flat_fallback_and_measured_beats_both():
+    skill = Item(id="s", kind="skill", name="s", description="d", footprint=600)
+    plugin = Item(id="P", kind="plugin", name="P", description="d", footprint=2000)
+    assert savings.estimate_savings([], [skill, plugin]).eager == 150 + 500   # chars / 4, not 50 + 600
+    assert savings.estimate_savings([], [skill], measured={"s": 7}).eager == 7
+
+def test_a_plugin_that_lists_nothing_costs_nothing_up_front():
+    hooks_only = Item(id="H", kind="plugin", name="H", description="d", footprint=0)
+    unknown = Item(id="U", kind="plugin", name="U", description="d")       # install dir unreadable
+    assert savings.estimate_savings([], [hooks_only]).eager == 0
+    assert savings.estimate_savings([], [unknown]).eager == 600           # flat fallback
+
 def test_skills_contribute_their_fallback_cost():
     assert savings.token_estimate([_it("skill", "s1"), _it("skill", "s2")]) == 100
 

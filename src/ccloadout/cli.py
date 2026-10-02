@@ -9,13 +9,14 @@ from ccloadout.inventory import claude_code_inventory, Item
 from ccloadout.goal import detect_goal, write_goal_cache
 from ccloadout.ranker import Ranker, make_model2vec_embed, keyword_embed, bundled_model_path, resolve_model_source
 from ccloadout.compose import compose
+from ccloadout.repo import repo_root
+from ccloadout.link import apply_link, is_linked, plan_link
 from ccloadout.memory import (EntryExists, NoStatus, forget_entry, indexed_files,
-                              read_all, read_store, set_meta, set_status, slug_for,
-                              write_entry)
+                              read_all, read_store, set_meta, set_status, write_entry)
 from ccloadout.flags import clear_flag, load_flags, set_flag
 from ccloadout.usage import load_usage, record_delivery
 from ccloadout.candidates import drop_rows, load_candidates, record_session
-from ccloadout.decisions import corpus_dir, new_decision, supersede
+from ccloadout.decisions import supersede, supersede_entry, write_decision
 from ccloadout.recall import (anchor_state, assess, build_payload, estimate_tokens,
                               recall_command, search, select, strip_frontmatter)
 from ccloadout.rules import (load_rules, apply_rules, has_rule, save_rule, write_rules,
@@ -98,12 +99,13 @@ def _build_compiler(cfg):
         _warn(f"rule model unavailable ({exc}); rule authoring disabled")
         return None
 
-def _resolve_goal(cwd: Path, passthrough: list[str]) -> tuple[str, str, float]:
-    goal = detect_goal(cwd)                          # returns (text, source, confidence)
+def _resolve_goal(cwd: Path, passthrough: list[str],
+                  persist: bool = True) -> tuple[str, str, float]:
+    goal = detect_goal(cwd, persist=persist)         # returns (text, source, confidence)
     if goal.confidence < 0.15 and _interactive(passthrough):
         entered = _ask(f"claude-loadout: session goal? [{goal.goal}] ").strip()
         if entered:
-            write_goal_cache(cwd, entered)         # preflight ruling: persist, don't re-ask
+            write_goal_cache(cwd, entered, origin="user")   # preflight ruling: persist, don't re-ask
             return entered, "prompt", 1.0
     return goal.goal, goal.source, goal.confidence
 
@@ -193,6 +195,7 @@ def _recall_payload(cfg, cwd: Path, goal: str, embed):
     # nothing at all, since an instruction to query an empty store costs tokens for no answer.
     if not cfg.memory.enabled:
         return None, None
+    cwd = repo_root(cwd)                            # the store is the main checkout's, worktrees included
     store = read_store(cwd, cfg.config_root, scopes=cfg.memory.scopes)
     total = len(store.entries)
     if total < cfg.memory.min_entries:
@@ -240,7 +243,7 @@ def _capture_session(scope, cwd: Path, exit_code: int, head_before: str | None) 
     if mem is None or mem.config_root is None:
         return
     try:
-        record_session(mem.config_root, cwd, goal=scope.goal, exit_code=exit_code,
+        record_session(mem.config_root, repo_root(cwd), goal=scope.goal, exit_code=exit_code,
                        changed=_changed_since(cwd, head_before))
     except OSError as exc:                          # never fail a session over its own bookkeeping
         _warn(f"could not record session candidate ({exc})")
@@ -326,7 +329,7 @@ def _record_delivery(scope, cwd: Path) -> None:
     mem = getattr(scope, "memory", None)
     if mem and mem.delivered and mem.config_root is not None:
         try:
-            record_delivery(mem.config_root, cwd, mem.delivered)
+            record_delivery(mem.config_root, repo_root(cwd), mem.delivered)
         except OSError as exc:                      # a counter is never worth failing a launch for
             _warn(f"could not record memory usage ({exc})")
 
@@ -360,6 +363,69 @@ def _cmd_write_entry(cwd: Path, args: list[str], kind: str, override: Path | Non
         return 1
     where = " (every project)" if scope == "global" else ""
     print(f"{_paint('wrote', 'green')} {path}{_paint(where, 'dim')}")
+    if scope == "repo":
+        _link_hint(cfg, cwd)
+    return 0
+
+def _link_hint(cfg, root: Path) -> None:
+    # A tracked note in an unlinked docs/memory reaches no session; say so where it was written.
+    # Only to a person at a terminal: sessions write notes on their own, and linking copies notes
+    # into a git-tracked folder, which an agent must not be nudged into (doctor still reports it).
+    if not _interactive([]):
+        return
+    if cfg.memory.git_tracked and not is_linked(cfg.config_root, root):
+        _warn("Claude Code doesn't read docs/memory in this repo yet. "
+              "Run `claude-loadout memory link` to fix that.")
+
+def _cmd_link(root: Path, args: list[str], override: Path | None = None) -> int:
+    """`memory link`: merge Claude Code's memory folder into docs/memory and symlink it there.
+
+    Prints the plan first and changes nothing without a yes (interactive) or `--yes`. Refuses when
+    notes already go to Claude Code's folder (git_tracked = false), when the folder Claude Code
+    reads cannot be confirmed, when it already points elsewhere, or when two files clash.
+    """
+    cfg = load_config(cwd=root, config_root_override=override)
+    if not cfg.memory.git_tracked:
+        print("notes here go to Claude Code's own memory folder ([memory] git_tracked = false), "
+              "which it already reads; there is nothing to link")
+        return 0
+    plan = plan_link(cfg.config_root, root)
+    if plan.state == "unknown-project":
+        _warn(f"Claude Code keeps no sessions under {plan.harness.parent}, so the folder it reads "
+              f"for {root} can't be confirmed; start one session here first (if you usually "
+              f"reach this repo through a symlinked path, run this from that path)")
+        return 1
+    if plan.state == "elsewhere":
+        _warn(f"{plan.harness} is a symlink to {plan.harness.resolve()}; leaving it alone")
+        return 1
+    print(_paint("claude-loadout memory link", "bold"))
+    print(f"  Claude Code reads:  {plan.harness}")
+    print(f"  notes live in:      {plan.store}")
+    if plan.copies:
+        names = ", ".join(p.name for p in plan.copies[:6]) + (" …" if len(plan.copies) > 6 else "")
+        print(f"  copy {_plural(len(plan.copies), 'file')} into docs/memory: {_paint(names, 'dim')}")
+    if plan.added:
+        print(f"  add {_plural(len(plan.added), 'line')} to MEMORY.md, so those notes reach sessions")
+    if plan.backup:
+        print(f"  keep the original folder as {plan.backup}")
+    if plan.state in ("merge", "missing"):
+        print(f"  then link {plan.harness.name} → {plan.store}")
+    if plan.conflicts:
+        _warn("these exist on both sides with different content; reconcile them by hand, then "
+              "run this again: " + ", ".join(plan.conflicts))
+        return 1
+    if not plan.changes:
+        print(_paint("  already linked; nothing to do", "dim"))
+        return 0
+    if "--yes" not in args:
+        if not _interactive([]):
+            _warn("nothing changed; run again with --yes to link")
+            return 1
+        if not _ask("  link now? [y/N] ").strip().lower().startswith("y"):
+            print(_paint("  nothing changed", "dim"))
+            return 0
+    apply_link(plan)
+    print(f"{_paint('linked', 'green')} — Claude Code now loads {plan.store / 'MEMORY.md'}")
     return 0
 
 def _cmd_scope(cwd: Path, args: list[str], override: Path | None = None) -> int:
@@ -441,7 +507,8 @@ def _session_hooks(cfg, cwd: Path, mem) -> tuple[dict | None, dict | None]:
 
 _AUDIT_HINT = "↑/↓ move · space keep/drop · a all/none · enter apply · q cancel"
 _LIST_SEP = "\x1f"                                  # env-passed lists: see debt_hook.LIST_SEP
-_MEMORY_ACTIONS = frozenset({"enable", "disable", "add", "audit", "flag", "consolidate", "scope"})
+_MEMORY_ACTIONS = frozenset({"enable", "disable", "add", "audit", "flag", "consolidate", "scope",
+                            "link"})
 _DEBT_ACTIONS = frozenset({"add", "list", "resolve"})
 _DECISION_ACTIONS = frozenset({"new", "list", "show", "supersede"})
 
@@ -729,8 +796,9 @@ def _cmd_decision(cwd: Path, args: list[str], override: Path | None = None) -> i
             _warn("decision new needs a title")
             return 2
         tags = [t for arg in tag_args for t in arg.split(",") if t]
-        path = new_decision(corpus_dir(cfg.config_root, cwd), slug_for(cwd), title, tags)
+        path = write_decision(cfg.config_root, cwd, title, tags, cfg.memory.git_tracked)
         print(f"{_paint('wrote', 'green')} {path}")
+        _link_hint(cfg, cwd)
         return 0
     if action == "show":
         match = next((e for e in decisions if rest and e.name.startswith(rest[0])), None)
@@ -747,8 +815,11 @@ def _cmd_decision(cwd: Path, args: list[str], override: Path | None = None) -> i
         if old is None:
             _warn(f"no decision matching {rest[0]!r}")
             return 1
-        path = new_decision(corpus_dir(cfg.config_root, cwd), slug_for(cwd), " ".join(rest[1:]), [])
-        supersede(old.path, path.stem)
+        path = write_decision(cfg.config_root, cwd, " ".join(rest[1:]), [], cfg.memory.git_tracked)
+        if "/" in old.id:                           # `decision:<slug>/<id>`: a legacy corpus file
+            supersede(old.path, path.stem)
+        else:
+            supersede_entry(old.path, path)
         print(f"{_paint('wrote', 'green')} {path}\n{_paint('superseded', 'dim')} {old.name}")
         return 0
     if action != "list":
@@ -791,12 +862,12 @@ def _cmd_recall(cwd: Path, args: list[str], config_root_override: Path | None = 
     return 0
 
 def _scoped_plan(passthrough: list[str], cwd: Path, config_root_override: Path | None = None,
-                 scope_skills: bool = True):
+                 scope_skills: bool = True, persist: bool = True):
     cfg = load_config(cwd=cwd, config_root_override=config_root_override)
     items = claude_code_inventory(cfg.config_root, cwd, cfg.global_config_path)
     if not items:
         return None, None, None
-    context, gsource, gconf = _resolve_goal(cwd, passthrough)
+    context, gsource, gconf = _resolve_goal(cwd, passthrough, persist)
     rules = load_rules(cfg.config_root, cwd)
     pinned = [i for i in items if any(fnmatch(i.id, g) for g in cfg.always_keep)]
     pinned_ids = {i.id for i in pinned}            # always_keep config wins over rules (spec §12)
@@ -1114,9 +1185,10 @@ def _decide_keep(items, cfg, context: str, rules: list[Rule]) -> set[str]:
 # Machine-materialized rules carry this nl prefix so `update` can tell them from rules a human
 # authored (via `claude-loadout rules` or by hand) and regenerate only the machine ones.
 _SEED_NL_PREFIX = "seeded by loadout"   # on-disk marker in rules.toml (read back by is_seed_rule); keep stable for compat
+_LEGACY_SEED_NL_PREFIX = "seeded by smartctx"   # seeds written before the rename are machine-owned too
 
 def _is_seeded_rule(rule: Rule) -> bool:
-    return rule.nl.startswith(_SEED_NL_PREFIX)
+    return rule.nl.startswith((_SEED_NL_PREFIX, _LEGACY_SEED_NL_PREFIX))
 
 def _materialize_rules(items, kept_ids: set[str], goal: str, verb: str = "init") -> list[Rule]:
     # Freeze keep/drop for every kind compose can prune (mcp, plugin, and skills via skillOverrides).
@@ -1203,8 +1275,54 @@ def _write_seed_scaffold(repo: Path, cfg, goal: str) -> None:
     (d / ".gitignore").write_text(_LOCAL_GITIGNORE)   # before write_goal_cache, which only writes if absent
     write_goal_cache(repo, goal)
     model = cfg.model_name.replace("\\", "\\\\").replace('"', '\\"')   # TOML basic string
-    (d / "config.toml").write_text(
-        f'{_CONFIG_HEADER}threshold = {cfg.threshold}\nmodel_name = "{model}"\n')
+    seeded = {"threshold": str(cfg.threshold), "model_name": f'"{model}"'}
+    path = d / "config.toml"
+    if not path.exists():
+        path.write_text(_CONFIG_HEADER + "".join(f"{k} = {v}\n" for k, v in seeded.items()))
+        return
+    edited = _set_top_level_keys(path.read_text(), seeded)
+    if edited is None:                              # never trade a working config for a broken one
+        _warn(f"{path} left unchanged: couldn't update threshold/model_name in place safely; "
+              f"set them by hand if needed")
+    else:
+        path.write_text(edited)
+
+# A bare top-level key line, optionally followed by a comment. Quoted and dotted keys don't match,
+# so they are never rewritten (the result is validated anyway).
+_TOP_KEY = re.compile(r'^(?P<key>[A-Za-z0-9_-]+)\s*=\s*'
+                      r'(?P<value>"(?:[^"\\]|\\.)*"|[^#]*?)\s*(?P<comment>#.*)?$')
+# A table header, `[name]` or `[[name]]`, alone on its line. An array continuation such as
+# `  ["b"],` has a trailing comma and is not one.
+_TABLE_HEADER = re.compile(r'^\s*\[\[?\s*[^\[\]]+?\s*\]\]?\s*(#.*)?$')
+
+def _set_top_level_keys(text: str, values: dict[str, str]) -> str | None:
+    """Replace or add top-level `key = value` lines in a TOML file's text, touching nothing else.
+
+    A re-seed must not wipe what the user or `memory enable` wrote in [memory], [token_costs] or
+    any other table, so only lines above the first table header are candidates (a trailing comment
+    is kept), and missing keys go just before that header. The result is parsed back; anything
+    that would not round-trip (a quoted key, a broken file) returns None and nothing is written.
+    """
+    import tomllib
+    lines = text.splitlines()
+    end = next((i for i, ln in enumerate(lines) if _TABLE_HEADER.match(ln)), len(lines))
+    missing = dict(values)
+    for i in range(end):
+        m = _TOP_KEY.match(lines[i])
+        if m and m.group("key") in missing:
+            comment = f"  {m.group('comment')}" if m.group("comment") else ""
+            lines[i] = f"{m.group('key')} = {missing.pop(m.group('key'))}{comment}"
+    at = end
+    while at > 0 and not lines[at - 1].strip():
+        at -= 1
+    lines[at:at] = [f"{k} = {v}" for k, v in missing.items()]
+    out = "\n".join(lines) + "\n"
+    try:
+        parsed = tomllib.loads(out)
+        expected = tomllib.loads("".join(f"{k} = {v}\n" for k, v in values.items()))
+    except tomllib.TOMLDecodeError:
+        return None
+    return out if all(parsed.get(k) == v for k, v in expected.items()) else None
 
 def _write_seed(repo: Path, cfg, goal: str, rules: list[Rule]) -> None:
     # Persist the local seed: scaffold + a fresh rules.toml holding `rules`.
@@ -1471,6 +1589,14 @@ def _profile_report(root: Path, cwd: Path, active: bool,
     print(f"  {_paint(str(root), 'cyan')}{tag}")
     user_cfg = root / "loadout" / "config.toml"
     print(f"    user config:  {_yn(user_cfg.is_file())}")
+    try:                                            # what a launch here with this profile would use
+        reminder = load_config(cwd=cwd, config_root_override=root).memory.stop_prompt
+    except Exception:                               # fail-open: doctor must never crash
+        reminder = None
+    if reminder is False:
+        print(f"    reminder:     {_paint('off', 'yellow')} "
+              + _paint(f"— sessions are not asked to record decisions; set [memory] "
+                       f"stop_prompt = true in {user_cfg}", "dim"))
     try:
         items = claude_code_inventory(root, cwd, global_config_path)
     except Exception as exc:                        # fail-open: doctor must never crash
@@ -1539,6 +1665,11 @@ def _cmd_doctor(cwd: Path) -> int:
     repo_cfg = cwd / ".loadout" / "config.toml"
     print(_paint("  environment", "bold"))
     print(f"    repo config:      {_paint(str(repo_cfg), 'cyan')} ({_yn(repo_cfg.is_file())})")
+    if cfg.memory.git_tracked:                      # untracked notes already go where Claude Code reads
+        root = repo_root(cwd)
+        state = (_paint("Claude Code reads it", "green") if is_linked(cfg.config_root, root)
+                 else _paint("Claude Code doesn't read it — claude-loadout memory link", "yellow"))
+        print(f"    notes folder:     {root / 'docs' / 'memory'} ({state})")
     resolved = resolve_model_source(cfg.model_name)
     embed = _build_embed(cfg.model_name)           # warns + falls back on failure
     model_state = ("keyword fallback" if embed is keyword_embed
@@ -1606,8 +1737,8 @@ def _cmd_measure(cwd: Path) -> int:
     print(_paint(f"  cached to {_measure.costs_path(cfg.config_root)}", "dim"))
     print(_paint("  these are a diagnostic view; a measured cost feeds savings only for MCP "
                  "servers in your .claude.json/.mcp.json (matched by bare name).", "dim"))
-    print(_paint("  claude.ai connectors and plugin-bundled servers are shown here but aren't "
-                 "pruned by ccloadout.", "dim"))
+    print(_paint("  claude.ai connectors are shown here but can't be kept under strict mode; a "
+                 "plugin's own servers load exactly when the plugin is kept.", "dim"))
     return 0
 
 def _loadout_version() -> str:
@@ -1627,6 +1758,7 @@ def _print_help() -> None:
         f"  {cmd('cld recall <query>')}    Search the memory store and print matching entries in full\n"
         f"  {cmd('cld memory add <text>')} Record a note (--global for every repo, --anchor path)\n"
         f"  {cmd('cld memory scope <name> repo|global')}  Change how far an existing note reaches\n"
+        f"  {cmd('cld memory link')}      Make docs/memory the folder Claude Code loads (--yes to skip the prompt)\n"
         f"  {cmd('cld memory consolidate')}  Review recorded sessions and promote them to memories\n"
         f"  {cmd('cld memory audit')}     Review the store and delete what no longer earns its place\n"
         f"                                (--context '<goal>' to see what it would recall and why,\n"
@@ -1714,6 +1846,10 @@ def _print_explain(scope: _Scope, plan) -> None:
         print(_paint("    on-demand:      run `claude-loadout measure` to quantify the claude.ai "
                      "connectors strict mode blocks", "dim"))
     print()
+    servers = getattr(plan, "servers", ())
+    print(_paint("  mcp servers", "bold"))
+    print(f"    {', '.join(servers) if servers else _paint('none', 'dim')}")
+    print()
     print(_paint("  command", "bold"))
     print(f"    {_paint(' '.join(plan.argv), 'dim')}")
 
@@ -1797,30 +1933,33 @@ def _run(argv: list[str] | None = None) -> int:
     # English. Only claim argv when the second word names a real action; otherwise fall through
     # and let the session have the prompt.
     if argv and argv[0] == "decision" and _is_action(argv, _DECISION_ACTIONS):
-        return _cmd_decision(cwd, argv[1:], _resolve_config_root(os.environ, []))
+        return _cmd_decision(repo_root(cwd), argv[1:], _resolve_config_root(os.environ, []))
     if argv and argv[0] == "debt" and _is_action(argv, _DEBT_ACTIONS):
-        return _cmd_debt(cwd, argv[1:], _resolve_config_root(os.environ, []))
+        return _cmd_debt(repo_root(cwd), argv[1:], _resolve_config_root(os.environ, []))
     if argv and argv[0] == "memory" and _is_action(argv, _MEMORY_ACTIONS):
         sub = argv[1] if len(argv) > 1 else ""
         if sub == "add":
-            return _cmd_write_entry(cwd, argv[2:], "memory", _resolve_config_root(os.environ, []))
+            return _cmd_write_entry(repo_root(cwd), argv[2:], "memory", _resolve_config_root(os.environ, []))
         if sub == "consolidate":
-            return _cmd_consolidate(cwd, _resolve_config_root(os.environ, []))
+            return _cmd_consolidate(repo_root(cwd), _resolve_config_root(os.environ, []))
+        if sub == "link":
+            return _cmd_link(repo_root(cwd), argv[2:], _resolve_config_root(os.environ, []))
         if not sub:                                 # a bare `memory` is the entry point, not an error
-            return _print_memory_status(cwd, load_config(
-                cwd=cwd, config_root_override=_resolve_config_root(os.environ, [])))
+            root = repo_root(cwd)
+            return _print_memory_status(root, load_config(
+                cwd=root, config_root_override=_resolve_config_root(os.environ, [])))
         if sub == "scope":
-            return _cmd_scope(cwd, argv[2:], _resolve_config_root(os.environ, []))
+            return _cmd_scope(repo_root(cwd), argv[2:], _resolve_config_root(os.environ, []))
         if sub in ("enable", "disable"):
-            return _cmd_memory_toggle(cwd, sub == "enable", _resolve_config_root(os.environ, []))
+            return _cmd_memory_toggle(repo_root(cwd), sub == "enable", _resolve_config_root(os.environ, []))
         if sub == "audit":
-            return _cmd_audit(cwd, argv[2:], _resolve_config_root(os.environ, []))
+            return _cmd_audit(repo_root(cwd), argv[2:], _resolve_config_root(os.environ, []))
         if sub == "flag":
-            return _cmd_flag(cwd, argv[2:], _resolve_config_root(os.environ, []))
+            return _cmd_flag(repo_root(cwd), argv[2:], _resolve_config_root(os.environ, []))
         _warn(f"unknown memory command {sub!r}; try enable, add, audit, flag or consolidate")
         return 2                                    # unreachable: _is_action already filtered
     if argv and argv[0] == "recall":                # T2 retrieval: no scoping, no launch
-        return _cmd_recall(cwd, argv[1:], _resolve_config_root(os.environ, []))
+        return _cmd_recall(repo_root(cwd), argv[1:], _resolve_config_root(os.environ, []))
     if argv and argv[0] == "measure":               # opt-in, connects to servers; no scoping
         return _cmd_measure(cwd)
     if argv and argv[0] == "init":                  # bulk-seed repo config; resolves profiles itself
@@ -1842,7 +1981,8 @@ def _run(argv: list[str] | None = None) -> int:
         return _cmd_rules(cwd, override)
     fallback_env = _launch_env(override)            # keep a prompted profile on the fallback launches
     try:
-        result, plan, gate = _scoped_plan(passthrough, cwd, override, scope_skills)
+        result, plan, gate = _scoped_plan(passthrough, cwd, override, scope_skills,
+                                          persist=not explain)   # --explain writes nothing
     except Exception as exc:
         _warn(f"scoping failed ({exc}); launching full session")
         return subprocess.run(["claude", *passthrough], env=fallback_env).returncode

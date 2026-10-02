@@ -52,6 +52,45 @@ def test_plugin_description_read_from_manifest(tmp_path: Path):
     assert plugin.id == "mytool@mkt"
     assert plugin.description == "browser automation and e2e testing"   # manifest, not id-noise
 
+def test_skill_footprint_is_its_listing_line(tmp_path: Path):
+    root = tmp_path / "root"; (root / "skills" / "s").mkdir(parents=True)
+    (root / "skills" / "s" / "SKILL.md").write_text("---\nname: s\ndescription: does a thing\n---\n")
+    skill = next(i for i in claude_code_inventory(root) if i.kind == "skill")
+    assert skill.footprint == len("- s: does a thing")
+
+def test_plugin_footprint_sums_its_skills_commands_and_agents(tmp_path: Path):
+    root = tmp_path / "root"; root.mkdir()
+    (root / "settings.json").write_text('{"enabledPlugins": {"kit@mkt": true}}')
+    install = tmp_path / "install" / "kit"; (install / ".claude-plugin").mkdir(parents=True)
+    (install / ".claude-plugin" / "plugin.json").write_text('{"description": "never shown", "skills": "./custom/"}')
+    (install / "custom" / "plan").mkdir(parents=True)
+    (install / "custom" / "plan" / "SKILL.md").write_text("---\nname: plan\ndescription: plans work\n---\n")
+    (install / "commands").mkdir(); (install / "commands" / "go.md").write_text("---\ndescription: runs it\n---\n")
+    (install / "agents").mkdir(); (install / "agents" / "rev.md").write_text("---\nname: rev\ndescription: reviews\n---\n")
+    (root / "plugins").mkdir()
+    (root / "plugins" / "installed_plugins.json").write_text(
+        '{"plugins": {"kit@mkt": [{"installPath": "%s"}]}}' % install)
+    plugin = next(i for i in claude_code_inventory(root) if i.kind == "plugin")
+    assert plugin.footprint == sum(len(s) for s in
+                                   ("- kit:plan: plans work", "- kit:go: runs it", "- kit:rev: reviews"))
+
+def test_plugin_footprint_handles_a_single_skill_path_and_hooks_only_plugins(tmp_path: Path):
+    root = tmp_path / "root"; root.mkdir()
+    (root / "settings.json").write_text('{"enabledPlugins": {"one@m": true, "hooks@m": true, "gone@m": true}}')
+    one = tmp_path / "one"; (one / ".claude-plugin").mkdir(parents=True)
+    (one / ".claude-plugin" / "plugin.json").write_text('{"skills": "./skills/solo"}')
+    (one / "skills" / "solo").mkdir(parents=True)
+    (one / "skills" / "solo" / "SKILL.md").write_text("---\nname: solo\ndescription: alone\n---\n")
+    hooks = tmp_path / "hooks"; (hooks / "hooks").mkdir(parents=True)   # ships hooks, lists nothing
+    (root / "plugins").mkdir()
+    (root / "plugins" / "installed_plugins.json").write_text(
+        '{"plugins": {"one@m": [{"installPath": "%s"}], "hooks@m": [{"installPath": "%s"}]}}'
+        % (one, hooks))
+    by_id = {i.id: i for i in claude_code_inventory(root) if i.kind == "plugin"}
+    assert by_id["one@m"].footprint == len("- one:solo: alone")
+    assert by_id["hooks@m"].footprint == 0                  # known to list nothing
+    assert by_id["gone@m"].footprint is None                # not installed: unknown
+
 def test_plugin_description_falls_back_to_id_without_manifest(tmp_path: Path):
     root = tmp_path / "root"; root.mkdir()
     (root / "settings.json").write_text('{"enabledPlugins": {"mytool@mkt": true}}')

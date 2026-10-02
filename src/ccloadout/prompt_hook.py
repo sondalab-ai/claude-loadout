@@ -39,7 +39,8 @@ def main() -> int:
         if not isinstance(prompt, str) or len(prompt.split()) < 2:
             return 0                                # too short to rank on; not worth a line
         config_root = Path(os.environ["LOADOUT_CONFIG_ROOT"])
-        repo = Path(payload.get("cwd") or os.environ.get("LOADOUT_REPO") or ".").resolve()
+        from ccloadout.repo import repo_root
+        repo = repo_root(Path(payload.get("cwd") or os.environ.get("LOADOUT_REPO") or "."))
         from ccloadout.debt_hook import LIST_SEP    # one separator for every env-passed list
         resident = set(filter(None, (os.environ.get("LOADOUT_RESIDENT_IDS") or "").split(LIST_SEP)))
 

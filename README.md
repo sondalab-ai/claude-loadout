@@ -27,6 +27,9 @@ Nothing is uninstalled or changed globally; the rest is simply not loaded for th
 cached in `.loadout/` and reused on every later launch until you run `cld update`. If any step fails, you
 get a normal, full session.
 
+Notes and decisions you or a session record (`cld memory add`, `cld decision new`) go to
+`./docs/memory/`; run `cld memory link` once per repository so Claude Code loads them too.
+
 ```bash
 pipx install ccloadout
 cld            # in place of `claude`
@@ -54,7 +57,11 @@ installed. A few details behind the four steps above:
 
 - **The goal** comes from the directory name, marker files like `package.json` or `pyproject.toml`,
   and any project description it can find (a `description` field, or the README's title and opening
-  line). If it can't tell, it asks once and remembers the answer. Text only, no model call.
+  line). If it can't tell, it asks once and remembers the answer. Text only, no model call. A
+  remembered goal that was inferred refreshes on its own when those inputs change (a new
+  description, a rewritten README); one you typed yourself is kept until you change it. A goal
+  cached by a release before 0.11.0 counts as yours unless it matches what the repo says today;
+  `claude-loadout update` re-infers it.
 - **The ranking** runs on a small, fast, local model. No network call, nothing leaves your machine.
 - **The rules** are yours: pin tools to always keep, or write plain-language ones like *"this
   corporate plugin only in work sessions."*
@@ -125,9 +132,11 @@ claude-loadout doctor
 
 It enumerates every Claude profile it finds (`~/.claude`, `~/.claude-perso`, ...), marks the one
 selected by `CLAUDE_CONFIG_DIR` as active, and for each shows which config files exist and how many
-MCP servers / plugins / skills it would inventory. It then reports which embedding model is in use
-(bundled, external, or keyword fallback), whether a rule model is configured, and finishes with the
-alias + `--explain` + `rules` cheat sheet to get going.
+MCP servers / plugins / skills it would inventory. A profile whose end-of-session reminder is off
+(`[memory] stop_prompt`) gets a warning naming the file to edit. It then reports whether Claude
+Code reads this repository's `docs/memory` (see [Where notes live](#where-notes-live)), which
+embedding model is in use (bundled, external, or keyword fallback), whether a rule model is
+configured, and finishes with the alias + `--explain` + `rules` cheat sheet to get going.
 
 ## How much it saves
 
@@ -145,9 +154,13 @@ The plan reports two different kinds of saving, kept separate on purpose:
   the same once you're done authoring.
 
 > [!NOTE]
-> These are **estimates** over the items actually removed, flat per-kind figures
-> (skill ≈ 50, plugin ≈ 600 up front; MCP server ≈ 1200 on-demand), unless `claude-loadout measure`
-> has recorded a real per-server cost. Tune the constants per kind:
+> These are **estimates** over the items actually removed. A skill or plugin is costed from the
+> text Claude Code would list for it: the skill's own `name: description` line, or one such line
+> per skill, command and agent a plugin ships, at about 4 characters per token. A hook that
+> injects text at session start is not counted. An MCP server uses the cost `claude-loadout
+> measure` recorded for it, otherwise a flat ≈ 1200 on-demand. The flat per-kind figures
+> (skill ≈ 50, plugin ≈ 600, MCP ≈ 1200) remain the fallback when nothing can be read; tune
+> them per kind:
 
 ```toml
 # .loadout/config.toml
@@ -192,7 +205,11 @@ files:
   Claude with `--strict-mcp-config`, so only those load. This flag also excludes your claude.ai
   account connectors for that session (see the table below).
 - **Plugins**: dropped plugins are switched off via a `--settings` overlay. Anything a plugin
-  provides (its skills, agents, MCP servers, hooks) goes with it.
+  provides (its skills, agents, MCP servers, hooks) goes with it. Strict mode would also drop the
+  MCP servers of plugins you *keep*, so claude-loadout copies those into the curated config, under
+  the same `plugin_<plugin>_<server>` names Claude Code gives them (tools stay
+  `mcp__plugin_<plugin>_<server>__*`, so permission rules keep matching). `--explain` lists every
+  server the session will get.
 
 Both overlay files live in your temp directory and are deleted when the session ends. Your real
 configuration is never touched, claude-loadout **never** edits `settings.json` or `.claude.json`, and
@@ -203,7 +220,7 @@ it is **not** the nuclear `--bare` mode: your `CLAUDE.md`, hooks, and memory all
 | | Scoped per session? |
 |---|---|
 | MCP servers (`.claude.json` / `.mcp.json`) | **Yes**: only the kept set loads |
-| Plugins (and everything they provide) | **Yes**: dropped plugins are disabled |
+| Plugins (and everything they provide) | **Yes**: dropped plugins are disabled; kept plugins keep their MCP servers |
 | claude.ai connectors (Gmail, Calendar, ...) | **All dropped (all-or-nothing in v1)**: `--strict-mcp-config` loads only the curated overlay, so account connectors don't load at all. A connector that needs account authorization (Gmail, Calendar, ...) can't be re-added even if claude-loadout wanted to: its OAuth lives in your claude.ai account and doesn't transfer to a config claude-loadout can pass to Claude (verified, the re-injected server reports "not authorized"). Connectors that need no auth *are* technically re-injectable, but v1 keeps none either way. Run `claude-loadout measure` to see them listed with their token cost in `--explain`. |
 | Standalone skills (`$CLAUDE_CONFIG_DIR/skills`) | **Yes**: off-topic skills are dropped via `skillOverrides: "off"` (removes the skill and its description from context). On by default; `--no-scope-skills` keeps them all |
 | `CLAUDE.md`, hooks, memory | **No**: always preserved |
@@ -214,7 +231,8 @@ it is **not** the nuclear `--bare` mode: your `CLAUDE.md`, hooks, and memory all
 
 Everything is optional, claude-loadout works with zero configuration. When you do want to tune it,
 settings are TOML and resolved through a chain, where **a later layer replaces an earlier one for
-each key** (layers don't merge; a list value is overwritten wholesale):
+each top-level key** (a list value is overwritten wholesale); the `[memory]` and `[token_costs]`
+tables merge field by field instead:
 
 1. Built-in defaults
 2. User / profile, `$CLAUDE_CONFIG_DIR/loadout/config.toml`
@@ -280,6 +298,9 @@ Four verbs, in the order you meet them:
 | `cld recall "<query>"` | search the store and print entries in full |
 | `cld memory audit` | review what you have, delete what has gone stale |
 
+One more, run once per repository: `cld memory link`, so Claude Code loads what you write
+(see [Where notes live](#where-notes-live)).
+
 ### Where notes live
 
 It reads stores that already exist rather than inventing another one:
@@ -289,7 +310,34 @@ It reads stores that already exist rather than inventing another one:
 - your `debug-decisions` corpus, if you keep one
 
 **No note is ever written to a folder of ours.** Uninstall `claude-loadout` and every note stays
-exactly where it is, in a directory Claude Code already reads. There is nothing to migrate.
+exactly where it is. There is nothing to migrate.
+
+Claude Code itself loads only the second folder, through its `MEMORY.md` index. A note in
+`./docs/memory/` therefore reaches a session without cld only when Claude Code's folder for the
+repository is a symlink to it. `cld memory link` sets that up:
+
+```sh
+cld memory link          # shows the plan, then asks
+cld memory link --yes    # for scripts
+```
+
+It copies anything Claude Code already keeps into `./docs/memory/`, merges the two `MEMORY.md`
+indexes, adds index lines for notes that have none, keeps the original folder as
+`memory.bak-<timestamp>`, and replaces it with the link. It refuses when two files share a name but
+differ, and when Claude Code has no sessions recorded for the repository (so the folder it reads
+can't be confirmed). Until a repository is linked, `memory add` says so after every write, and
+`cld doctor` shows it.
+
+From a git worktree, every store resolves to the main checkout, the way Claude Code keys its own
+memory, so a note written in a worktree is not stranded when the worktree goes. The `memory`,
+`decision`, `debt` and `recall` commands also read the main checkout's `.loadout/config.toml`
+there (a worktree has no `.loadout/` of its own), and an `--anchor` path is resolved against the
+main checkout too. A note is indexed only in a folder that already has a `MEMORY.md`;
+`cld memory link` creates one.
+
+With `[memory] git_tracked = false`, new notes go straight to Claude Code's folder instead, and
+there is nothing to link. Use that for shared or public repositories whose `docs/` you don't want
+notes in.
 
 ### Notes that follow you between projects
 
@@ -326,12 +374,13 @@ smuggle its neighbours in.
 enabled = true
 budget_tokens = 800     # ceiling on what recall may inject
 threshold = 0.24        # relevance cutoff, same scale as tool ranking
-git_tracked = true      # new notes land in ./docs/memory and travel with the repo
+git_tracked = true      # new notes land in ./docs/memory and travel with the repo (link it, see above);
+                        # false writes them to Claude Code's own memory folder instead
 scopes = ["repo", "global"]   # drop "global" to see only this repository's notes
 promote_after = 3       # deliveries after which a note is pinned into recall
 decay_days = 90         # untouched for this long, a note is demoted (never deleted)
 prompt_recall = false   # also re-rank on every prompt (see below)
-stop_prompt = false     # at session end, ask the session to record what it decided
+stop_prompt = false     # at session end, ask the session to record what it decided (doctor warns when off)
 decision_keywords = []  # deliberation stems; empty keeps the built-in en/it/es/de list
 ```
 
@@ -441,9 +490,13 @@ stay findable with `cld recall`.
 
 ### Decisions
 
-`cld decision new|list|show|supersede` writes the same files as the `debug-decisions` skill, in the
-same directory, so both tools see one corpus. `cld decision revert` is deliberately absent:
-executing destructive git operations does not belong in a launcher.
+`cld decision new` writes a decision into the same store as your notes, with a line in its
+`MEMORY.md` once the folder has one, so Claude Code loads decisions wherever it loads notes (see
+[Where notes live](#where-notes-live)). The file keeps a date-prefixed name and a Context /
+Decision / Alternatives / Rationale template. `cld decision list|show|supersede` cover both these
+and an existing `debug-decisions` corpus, which is still read and superseded in place but no longer
+written to. Superseding a decision takes its line out of `MEMORY.md`. `cld decision revert` is
+deliberately absent: executing destructive git operations does not belong in a launcher.
 
 ### Recall on every prompt (optional)
 
@@ -617,9 +670,11 @@ of a rule you author by hand with `claude-loadout rules`, which stays shareable,
 per-machine, hand-authored scoping is for the team.
 
 For each seeded project it ranks the profile's tools against that goal and, after the keep/drop
-review in step 4, freezes that decision into `rules.toml` (only for the kinds launches actually
-prune, MCP servers and plugins).
-`config.toml` gets the resolved `threshold` and `model_name`. Pass **`--yes`** to run
+review in step 4, freezes that decision into `rules.toml` (for every kind launches prune: MCP
+servers, plugins and standalone skills).
+`config.toml` gets the resolved `threshold` and `model_name`; when the file already exists, only
+those two keys are updated, so `[memory]` and anything else you added survive a re-seed (a file
+that can't be edited safely in place is left unchanged, with a warning). Pass **`--yes`** to run
 non-interactively (every eligible project, auto-detected goals, auto keep/drop, active profile) -
 required when there's no terminal, e.g. in a script.
 
@@ -635,7 +690,7 @@ required when there's no terminal, e.g. in a script.
 
 Seeds go stale: you install a new plugin or MCP server, the project's purpose shifts, or you want a
 tighter keep/drop than the first pass gave you. `claude-loadout update` re-runs the decision over a repo
-that `init` already seeded and rewrites its `.loadout/`.
+that `init` already seeded, regenerates its machine-written rules and refreshes its goal.
 
 ```sh
 claude-loadout update            # refresh the repo you're standing in
@@ -661,8 +716,10 @@ claude-loadout update ~/src      # refresh every seeded project under a root (bu
 ## Design guarantees
 
 - **Session-local.** Scoping affects only the session it launches. Your Claude configuration is
-  never modified. (claude-loadout does write two of its own files under your control: authored rules in
-  `loadout/rules.toml`, and a remembered goal in `./.loadout/goal`.)
+  never modified by a launch. (claude-loadout does write its own files under your control: authored
+  rules in `loadout/rules.toml`, a remembered goal in `./.loadout/goal` with its `goal.meta`, and
+  the notes and decisions you ask it to record.) The one command that changes a Claude Code folder is
+  `cld memory link`, and only when you confirm it; it keeps the original as a backup.
 - **Fail-open, always.** A missing config, malformed rules file, unavailable model, or any other
   error degrades to launching the full, unscoped Claude Code, with a warning where it helps. The
   child process's exit code is passed straight back. claude-loadout can slim a session down; it can

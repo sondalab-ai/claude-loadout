@@ -49,8 +49,9 @@ def main() -> int:
             return 0
         line = next((ln.strip() for ln in text.splitlines() if hit in ln), hit)
         from ccloadout.candidates import record_signal
+        from ccloadout.repo import repo_root
         record_signal(Path(os.environ["LOADOUT_CONFIG_ROOT"]),
-                      Path(payload.get("cwd") or os.environ.get("LOADOUT_REPO") or "."),
+                      repo_root(Path(payload.get("cwd") or os.environ.get("LOADOUT_REPO") or ".")),
                       pattern=hit,
                       file=str(tool_input.get("file_path") or ("(shell)" if tool == "Bash" else "")),
                       excerpt=line)

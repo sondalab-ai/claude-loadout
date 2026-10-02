@@ -8,7 +8,11 @@
 > live under `docs/plans/`. This spec is the contract; trade-offs and rejected alternatives
 > are recorded inline.
 
-Date: 2026-08-21 · Status: **Design approved, pre-implementation** · Target harness: Claude Code 2.1.238
+Date: 2026-08-21 · Status: **Delivered** · Target harness: Claude Code 2.1.238
+
+> **Update 2026-10-02.** §3 (scope: user skills, value `"off"` only) is superseded by
+> `docs/specs/2026-10-02-usage-based-scoping-design.md` (Proposed), which extends scoping to bundled,
+> org and repository skills with graded `skillOverrides` values.
 
 ---
 
