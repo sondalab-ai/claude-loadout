@@ -315,3 +315,60 @@ def test_non_tty_init_asks_nothing(tmp_path, monkeypatch, capsys):
     monkeypatch.chdir(tmp_path)
     assert cli.main(["init"]) == 0
     assert "Try: claude-loadout init --yes" in capsys.readouterr().err
+
+
+# --- the header -------------------------------------------------------------------------
+
+def _tty_stdout(monkeypatch):
+    """stdout as a 120-column TTY, colour off, so the header's text is compared byte for byte."""
+    out = _Tty()
+    monkeypatch.setattr("sys.stdout", out)
+    monkeypatch.setenv("COLUMNS", "120")
+    monkeypatch.setenv("NO_COLOR", "1")
+    return out
+
+
+def test_help_on_a_tty_opens_with_the_full_header(monkeypatch):
+    out = _tty_stdout(monkeypatch)
+    cli.main(["--help"])
+    lines = out.getvalue().splitlines()
+    assert lines[0] == sl.HEADER["mark"][0] + "  sonda/lab"
+    assert lines[1].endswith(f"  cld {cli._loadout_version()}")
+    assert lines[2].endswith("  " + cli._TAGLINE)
+    assert "Usage:" in out.getvalue()                       # the help itself is still printed
+
+
+def test_one_shot_command_on_a_tty_opens_with_the_compact_header(tmp_path, monkeypatch):
+    _memory_repo(tmp_path, n=1)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "root"))
+    monkeypatch.chdir(tmp_path)
+    out = _tty_stdout(monkeypatch)
+    cli.main(["debt", "list"])
+    assert out.getvalue().startswith(sl.HEADER["compact"] + " sonda/lab cld\n\n")
+
+
+def test_json_output_has_no_header_even_on_a_tty(tmp_path, monkeypatch):
+    _memory_repo(tmp_path, n=2)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "root"))
+    monkeypatch.chdir(tmp_path)
+    out = _tty_stdout(monkeypatch)
+    cli.main(["memory", "audit", "--json"])
+    assert "sonda" not in out.getvalue()
+    assert out.getvalue().lstrip().startswith("[")
+
+
+@pytest.mark.parametrize("argv", [["--help"], ["debt", "list"]])
+def test_no_header_when_stdout_is_not_a_tty(tmp_path, monkeypatch, capsys, argv):
+    _memory_repo(tmp_path, n=1)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "root"))
+    monkeypatch.chdir(tmp_path)
+    cli.main(argv)
+    out = capsys.readouterr().out
+    assert "sonda/lab" not in out and sl.HEADER["compact"] not in out
+
+
+def test_accessible_mode_has_no_header(monkeypatch):
+    out = _tty_stdout(monkeypatch)
+    monkeypatch.setenv("SONDALAB_ACCESSIBLE", "1")
+    cli.main(["--help"])
+    assert "sonda/lab" not in out.getvalue()
