@@ -136,7 +136,25 @@ MCP servers / plugins / skills it would inventory. A profile whose end-of-sessio
 (`[memory] stop_prompt`) gets a warning naming the file to edit. It then reports whether Claude
 Code reads this repository's `docs/memory` (see [Where notes live](#where-notes-live)), which
 embedding model is in use (bundled, external, or keyword fallback), whether a rule model is
-configured, and finishes with the alias + `--explain` + `rules` cheat sheet to get going.
+configured, and finishes with the alias + `--explain` + `rules` cheat sheet to get going. Each
+check is a line with a glyph (`✓` ok, `!` warn, `✗` failed, `↷` not set up), and a `Summary` line
+counts them.
+
+### Terminal output
+
+Output follows the [Sondalab Term spec](https://github.com/sondalab-ai/sondalab-ui/blob/main/docs/tui-patterns.md):
+results go to stdout, prompts and progress to stderr, and `--json` output never carries colour or
+glyphs. These environment variables change how it prints:
+
+| Variable | Effect |
+|---|---|
+| `NO_COLOR` (or `LOADOUT_NO_COLOR`) | No colour. Glyphs and words stay. |
+| `FORCE_COLOR` | Colour even when the stream is not a terminal (`0` or empty does not count). `NO_COLOR` wins over it. |
+| `COLORTERM=truecolor` or `24bit` | Brand hues instead of the 16 ANSI colours. |
+| `TERM=dumb` | No colour, no motion, ASCII glyphs. |
+| `SONDALAB_ASCII=1` | ASCII glyphs (`+ x ! - |`), also used on a non-UTF-8 locale. |
+| `SONDALAB_REDUCED_MOTION=1`, `CI` | No spinner or progress bar; a long step prints its running line once. |
+| `SONDALAB_ACCESSIBLE=1`, `ACCESSIBLE` | Accessible mode: no motion, and every arrow-key menu becomes a numbered list you answer by typing. |
 
 ## How much it saves
 
