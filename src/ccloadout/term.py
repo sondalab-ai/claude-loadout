@@ -67,9 +67,18 @@ def ascii_on() -> bool:
 
 
 def accessible() -> bool:
-    """Accessible mode: SONDALAB_ACCESSIBLE=1 or ACCESSIBLE set. Plain prompts, no redraw."""
-    return (os.environ.get("SONDALAB_ACCESSIBLE") == "1"
-            or any(name in os.environ for name in sl.ENV["accessible"][1:]))
+    """Accessible mode: SONDALAB_ACCESSIBLE=1 or ACCESSIBLE set. Plain prompts, no redraw.
+
+    Reads ENV["accessible"] through the palette's own switch rule (term._on / _SWITCH, the
+    spec's Robustness > Environment table), so "=1" versus "set" is decided in one place.
+    """
+    return slt._on(os.environ, sl.ENV["accessible"])
+
+
+def no_key_reader() -> bool:
+    """TERM=dumb or CI set: no raw-mode key reader, so menus take the numbered form."""
+    return (any(os.environ.get(n) == "dumb" for n in sl.ENV["term"])
+            or slt._on(os.environ, sl.ENV["ci"]))
 
 
 def motion_on() -> bool:
@@ -129,9 +138,12 @@ def cont(text: str) -> str:
 
 def info(label: str, detail: str = "", *, err: bool = False, dim: bool = False) -> str:
     """A step-grid row with no glyph: a fact, not a check, aligned with the step labels."""
-    width = sl.LAYOUT["labelWidth"]
-    head = cont(label[: width - 1].ljust(width) if detail else label[:width])
-    return head + (paint(detail, "dim", err=err) if dim else detail)
+    plain = slt.step_line("pending", label, detail, ascii=ascii_on())   # the palette's label cut
+    at = sl.LAYOUT["indent"]
+    line = plain[:at] + " " + plain[at + 1:]          # blank the glyph cell: a fact, not a check
+    if dim and detail:
+        line = line[: len(line) - len(detail)] + paint(detail, "dim", err=err)
+    return line
 
 
 def error_block(what: str, why: str = "", fix: str = "") -> list[str]:

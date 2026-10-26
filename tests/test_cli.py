@@ -557,6 +557,23 @@ def test_launch_gate_edit_recomposes_keep(tmp_path, monkeypatch):
     assert "Gmail" in captured["mcp"]["mcpServers"]       # edit re-kept the dropped server
     assert not (tmp_path / ".loadout" / "config.toml").exists()   # 'n' -> not persisted
 
+def test_launch_gate_edit_without_raw_terminal_offers_the_numbered_list(tmp_path, monkeypatch):
+    # Before the Term restyle this path printed "can't draw the editor here" and launched as scoped.
+    root = _root(tmp_path)
+    (tmp_path / "README.md").write_text("# P\n\nA tool that does X.\n")
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
+    monkeypatch.setenv("LOADOUT_THRESHOLD", "0.99")     # everything dropped by default
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "make_model2vec_embed", lambda name: cli.keyword_embed)
+    monkeypatch.setattr(cli, "_interactive", lambda p: True)
+    monkeypatch.setattr(cli, "_can_raw", lambda: False)
+    monkeypatch.setattr(cli, "_read_key", lambda: pytest.fail("no key reader without raw mode"))
+    answers = iter(["e", "all", "", "n"])                 # edit, flip every row on, confirm, don't persist
+    monkeypatch.setattr("builtins.input", lambda *a, **k: next(answers, ""))
+    captured = _capture_mcp_overlay(monkeypatch)
+    assert cli.main([]) == 0
+    assert "Gmail" in captured["mcp"]["mcpServers"]       # the numbered list re-kept it
+
 def test_launch_gate_edit_persists_seed(tmp_path, monkeypatch):
     root = _root(tmp_path)
     (tmp_path / "README.md").write_text("# P\n\nA tool that does X.\n")

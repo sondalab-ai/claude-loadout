@@ -45,7 +45,7 @@ def _yn(flag: bool, *, err: bool = False) -> str:
 
 def _warn(msg: str) -> None:
     """A warning on stderr: the `warn` glyph and one sentence; the command carries on."""
-    print(_t.note("warn", msg[:1].upper() + msg[1:], err=True), file=sys.stderr)
+    print(_t.note("warn", msg, err=True), file=sys.stderr)
 
 def _fail(what: str, why: str = "", fix: str = "") -> None:
     """The three-line error on stderr (what, why, `Try:` fix); the caller returns non-zero."""
@@ -102,7 +102,7 @@ def _build_embed(model_name: str):
     try:
         return make_model2vec_embed(model_name)
     except Exception as exc:                       # import error, download failure, etc.
-        _warn(f"model unavailable ({exc}); using keyword fallback")
+        _warn(f"Model unavailable ({exc}); using keyword fallback")
         return keyword_embed
 
 def _build_compiler(cfg):
@@ -111,7 +111,7 @@ def _build_compiler(cfg):
     try:
         return make_local_instruct(cfg.rule_model_path)
     except Exception as exc:
-        _warn(f"rule model unavailable ({exc}); rule authoring disabled")
+        _warn(f"Rule model unavailable ({exc}); rule authoring disabled")
         return None
 
 def _resolve_goal(cwd: Path, passthrough: list[str],
@@ -163,7 +163,7 @@ def _elicit(item: Item, context: str, compile_fn, save) -> str:
         if pred is not None:
             save(Rule(target=item.id, nl=nl, predicate=pred))
             return evaluate(pred, context)
-        _warn(f"couldn't translate that into a rule for '{item.id}'; choose manually")
+        _warn(f"Couldn't translate that into a rule for '{item.id}'; choose manually")
     pred = _pick_keep_drop_skip(item)              # spec §7 degrade / no rule model
     if pred is None:
         return "undecided"
@@ -262,7 +262,7 @@ def _capture_session(scope, cwd: Path, exit_code: int, head_before: str | None) 
         record_session(mem.config_root, repo_root(cwd), goal=scope.goal, exit_code=exit_code,
                        changed=_changed_since(cwd, head_before))
     except OSError as exc:                          # never fail a session over its own bookkeeping
-        _warn(f"could not record session candidate ({exc})")
+        _warn(f"Could not record session candidate ({exc})")
 
 def _cmd_consolidate(cwd: Path, override: Path | None = None) -> int:
     cfg = load_config(cwd=cwd, config_root_override=override)
@@ -301,7 +301,7 @@ def _cmd_consolidate(cwd: Path, override: Path | None = None) -> int:
                                body="\n".join(f"- {r.get('at')} · exit {r.get('exit_code')}"
                                                for r in rows_for_goal))
         except EntryExists as exc:
-            _warn(f"an entry already exists at {exc}; keeping the candidate")
+            _warn(f"An entry already exists at {exc}; keeping the candidate")
             kept_rows += rows_for_goal
             continue
         _say("done", "Wrote memory entry", str(path))
@@ -336,7 +336,7 @@ def _consolidate_signals(cwd: Path, cfg, signals: list[dict], interactive: bool)
                                description=description, kind="debt",
                                git_tracked=cfg.memory.git_tracked, anchors=anchors)
         except EntryExists as exc:
-            _warn(f"an entry already exists at {exc}; keeping the candidate")
+            _warn(f"An entry already exists at {exc}; keeping the candidate")
             kept.append(row)
             continue
         _say("done", "Wrote debt entry", str(path))
@@ -348,7 +348,7 @@ def _record_delivery(scope, cwd: Path) -> None:
         try:
             record_delivery(mem.config_root, repo_root(cwd), mem.delivered)
         except OSError as exc:                      # a counter is never worth failing a launch for
-            _warn(f"could not record memory usage ({exc})")
+            _warn(f"Could not record memory usage ({exc})")
 
 def _slugify(text: str) -> str:
     words = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-").split("-")
@@ -741,7 +741,7 @@ def _audit_interactive(cwd: Path, cfg, rows, usage, flags, shadowed, root_of) ->
              + _paint("  Unchecked entries are proposed for deletion", "dim", err=True))
     keep = _checkbox_select(title, labels, hint=_AUDIT_HINT, headers=headers, allow_empty=True)
     if keep is None:
-        _warn("audit cancelled; nothing was changed")
+        _warn("Audit cancelled; nothing was changed")
         return 0
     doomed = [rows[i][1] for i in range(len(rows)) if i not in set(keep)]
     if not doomed:
@@ -752,13 +752,13 @@ def _audit_interactive(cwd: Path, cfg, rows, usage, flags, shadowed, root_of) ->
         print(_t.cont(str(entry.path)))
     if not _ask(_t.question(f"Type delete to delete {_plural(len(doomed), 'entry')} "
                             "permanently: ")).strip().lower().startswith("delete"):
-        _warn("nothing was deleted")
+        _warn("Nothing was deleted")
         return 0
     for entry in doomed:
         try:
             forget_entry(entry.path)               # takes its MEMORY.md line with it
         except OSError as exc:
-            _warn(f"could not delete {entry.path} ({exc})")
+            _warn(f"Could not delete {entry.path} ({exc})")
             continue
         clear_flag(cfg.config_root, cwd, entry.id)
     _say("done", f"Deleted {_plural(len(doomed), 'entry')}")
@@ -894,15 +894,17 @@ def _cmd_recall(cwd: Path, args: list[str], config_root_override: Path | None = 
         return 0
     if not query:                                   # no query: name what is there, cheaply
         for e in store.entries:
-            print(f"  {_paint(f'[{e.kind}{_t.sep_plain()}{e.scope}]', 'dim')} {e.name} — "
+            # Session-facing (recall is how a session reads the store): fixed bytes, no ASCII swap.
+            print(f"  {_paint(f'[{e.kind} · {e.scope}]', 'dim')} {e.name} — "
                   f"{_short_desc(e.description, 60)}")
         return 0
     for entry, score in search(store.entries, query, _build_embed(cfg.model_name), limit):
         state = anchor_state(entry, cwd)
-        mark = {"missing": "  ! anchored code is gone",
-                "changed": "  ! anchored code changed since this was written"}.get(state, "")
-        dot = _t.sep_plain()
-        print(_paint(f"{entry.name}  ({entry.kind}{dot}{entry.scope}{dot}{score:.3f})", "bold")
+        # Session-facing: these lines land in model context, so their bytes stay as they were
+        # before the Term restyle, whatever the locale or SONDALAB_ASCII.
+        mark = {"missing": "  ⚠ anchored code is gone",
+                "changed": "  ⚠ anchored code changed since this was written"}.get(state, "")
+        print(_paint(f"{entry.name}  ({entry.kind} · {entry.scope} · {score:.3f})", "bold")
               + _paint(mark, "yellow"))
         print(_paint(f"{entry.path}", "dim"))
         body = strip_frontmatter(entry.path.read_text(errors="ignore")).strip()
@@ -966,7 +968,7 @@ def _scoped_plan(passthrough: list[str], cwd: Path, config_root_override: Path |
 
 def _cmd_rules(cwd: Path, config_root_override: Path | None = None) -> int:
     if not _interactive([]):                        # no TTY -> nothing to elicit; fail-open
-        _warn("rule authoring needs an interactive terminal; nothing to do")
+        _warn("Rule authoring needs an interactive terminal; nothing to do")
         return 0
     cfg = load_config(cwd=cwd, config_root_override=config_root_override)
     items = claude_code_inventory(cfg.config_root, cwd, cfg.global_config_path)
@@ -1043,7 +1045,7 @@ def _resolve_config_root(environ, passthrough: list[str]) -> Path | None:
             continue
         if raw.isdigit() and 1 <= int(raw) <= len(profiles):
             return profiles[int(raw) - 1]
-        _warn(f"invalid choice {raw!r}")
+        _warn(f"Invalid choice {raw!r}")
 
 _CONFIG_HEADER = (
     "# generated by loadout init — local, gitignored; layers over your profile config\n"
@@ -1152,7 +1154,7 @@ def _checkbox_plain(title, labels, preset=None, allow_empty=False, headers=None)
             continue
         picks = _parse_selection(raw, n)
         if picks is None:
-            _warn(f"not a valid choice: {raw!r}")
+            _warn(f"Not a valid choice: {raw!r}")
             continue
         for p in picks:
             selected[p - 1] = not selected[p - 1]
@@ -1198,6 +1200,8 @@ def _checkbox_select(title, labels, read_key=None, out=sys.stderr,
 def _can_raw() -> bool:
     # True only when stdin is a real terminal we can put into raw mode; the picker
     # renders before its first keystroke, so probe up front to avoid a stray frame.
+    if _t.no_key_reader():                         # TERM=dumb or CI: plain numbered menu
+        return False
     try:
         import termios
         termios.tcgetattr(sys.stdin.fileno())
@@ -1237,7 +1241,7 @@ def _select_repos_line(eligible: list[Path], already: int,
         picks = _parse_selection(raw, len(eligible))
         if picks is not None:
             return [eligible[i - 1] for i in sorted(picks)]
-        _warn(f"invalid selection {raw!r}")
+        _warn(f"Invalid selection {raw!r}")
 
 def _pick_profile(profiles: list[Path], default: Path, repo: Path,
                   label: str = "claude-loadout init") -> Path:
@@ -1256,7 +1260,7 @@ def _pick_profile(profiles: list[Path], default: Path, repo: Path,
             return default
         if raw.isdigit() and 1 <= int(raw) <= len(profiles):
             return profiles[int(raw) - 1]
-        _warn(f"invalid choice {raw!r}")
+        _warn(f"Invalid choice {raw!r}")
 
 def _confirm_goal(repo: Path, use_cache: bool = True, label: str = "claude-loadout init") -> str | None:
     # Returns the accepted/overridden goal, or None to skip this repo. update re-infers fresh.
@@ -1464,13 +1468,13 @@ def _cmd_init(cwd: Path, args: list[str], environ) -> int:
             _next("claude-loadout update")
         return 0
     if not sys.stdin.isatty() and not yes:
-        _warn("init asks questions and stdin is not a terminal; nothing seeded")
+        _warn("Init asks questions and stdin is not a terminal; nothing seeded")
         _try("claude-loadout init --yes")
         return 0
     if root_args and not yes:
         selected = _select_repos(eligible, already)   # bulk picker; empty pick / Ctrl-D -> None
         if not selected:
-            _warn("no repos selected; nothing to do")
+            _warn("No repos selected; nothing to do")
             return 0
     else:                                            # single repo, or --yes: no picker
         selected = eligible
@@ -1644,18 +1648,18 @@ def _cmd_update(cwd: Path, args: list[str], environ) -> int:
             return 0
     else:                                            # single: the current repo
         if not _is_seeded(cwd):
-            _warn("this repo isn't claude-loadout-seeded; nothing updated")
+            _warn("This repo isn't claude-loadout-seeded; nothing updated")
             _try("claude-loadout init")
             return 0
         eligible = [cwd]
     if not sys.stdin.isatty() and not yes:
-        _warn("update asks questions and stdin is not a terminal; nothing updated")
+        _warn("Update asks questions and stdin is not a terminal; nothing updated")
         _try("claude-loadout update --yes")
         return 0
     if root_args and not yes:
         selected = _select_repos(eligible, 0, label=_UPDATE_LABEL, action="update")
         if not selected:
-            _warn("no repos selected; nothing to do")
+            _warn("No repos selected; nothing to do")
             return 0
     else:
         selected = eligible
@@ -2030,7 +2034,7 @@ def _launch_gate(scope: _Scope, plan, gate: _EditGate, passthrough: list[str], n
     _scoped(scope)
     seeded = _is_seeded(gate.cwd)
     if not seeded:
-        _warn("this repo isn't seeded, so this scoping is not kept")
+        _warn("This repo isn't seeded, so this scoping is not kept")
         _next("claude-loadout init", err=True)
     if no_gate:                                     # opted out — launch immediately, no pause
         return scope, plan
@@ -2046,7 +2050,7 @@ def _launch_gate(scope: _Scope, plan, gate: _EditGate, passthrough: list[str], n
         if choice != "e":
             return scope, plan
         if not gate.editable:
-            _warn("nothing to edit — every kept tool is pinned by config")
+            _warn("Nothing to edit — every kept tool is pinned by config")
             return scope, plan
         preset = [i.id in gate.kept_ids for i in gate.editable]
         labels = [f"{i.id}  {_paint('(' + i.kind + ')', 'dim', err=True)}" for i in gate.editable]
@@ -2065,7 +2069,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return _run(argv)
     except KeyboardInterrupt:                       # Ctrl-C at any prompt -> clean abort, no traceback
-        _warn("aborted")
+        _warn("Aborted")
         return 130
 
 def _run(argv: list[str] | None = None) -> int:
@@ -2127,7 +2131,7 @@ def _run(argv: list[str] | None = None) -> int:
     try:                                            # ask which profile when it is implicit
         override = _resolve_config_root(os.environ, [] if rules_cmd else passthrough)
     except _Abort:
-        _warn("no profile selected; nothing to do")
+        _warn("No profile selected; nothing to do")
         return 0
     if rules_cmd:
         return _cmd_rules(cwd, override)
@@ -2136,7 +2140,7 @@ def _run(argv: list[str] | None = None) -> int:
         result, plan, gate = _scoped_plan(passthrough, cwd, override, scope_skills,
                                           persist=not explain)   # --explain writes nothing
     except Exception as exc:
-        _warn(f"scoping failed ({exc}); launching full session")
+        _warn(f"Scoping failed ({exc}); launching full session")
         return subprocess.run(["claude", *passthrough], env=fallback_env).returncode
     if plan is None:
         return subprocess.run(["claude", *passthrough], env=fallback_env).returncode

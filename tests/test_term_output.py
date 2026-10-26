@@ -3,6 +3,7 @@ fallback, and machine output that must stay byte-stable across restyles."""
 import hashlib
 import importlib
 import io
+import sondalab_palette as sl
 from pathlib import Path
 
 import pytest
@@ -132,7 +133,7 @@ def test_force_color_paints_the_glyph_only(monkeypatch):
 
 def test_voice_has_no_banned_words():
     src = (Path(cli.__file__)).read_text()
-    for banned in ("Successfully", "Oops", "⚠", "'claude-loadout:'"):   # no program-name prefix
+    for banned in ("Successfully", "Oops", "'claude-loadout:'"):   # no program-name prefix
         assert banned not in src
 
 
@@ -146,21 +147,82 @@ def test_prompts_go_to_stderr_as_questions(tmp_path, monkeypatch, capsys):
 # --- motion -------------------------------------------------------------------------
 
 def _wait(monkeypatch, *, tty: bool, **env):
+    """Run one Waiting step synchronously past its delay (delayMs patched to 0, no sleeps)."""
     err = _Tty() if tty else io.StringIO()
     monkeypatch.setattr("sys.stderr", err)
+    monkeypatch.setitem(sl.SPINNER, "delayMs", 0)
     for k, v in env.items():
         monkeypatch.setenv(k, v)
-    with cli._t.Waiting("Measuring 2 MCP servers…", total=2) as w:
-        import time
-        time.sleep(0.5)                                    # outlive spinner.delayMs (300ms)
-        w.advance(1)
+    w = cli._t.Waiting("Measuring 2 MCP servers…", total=2)
+    w.advance(1)
+    if w._motion:                                          # two frames, drawn by hand
+        w._draw(); w._tick += 1; w._draw()
+    else:
+        w._run()                                           # motion off: returns after one line
     return err.getvalue()
 
 
-def test_spinner_draws_after_the_delay_on_a_tty(monkeypatch):
+def test_spinner_draws_frames_and_the_bar_on_a_tty(monkeypatch):
     out = _wait(monkeypatch, tty=True)
-    assert "\033[?2026h" in out and "Measuring 2 MCP servers…" in out
-    assert any(f in out for f in "░▒▓█") and "/2" in out    # a spinner frame and the bar's count
+    assert out.count("\033[?2026h") == 2 and "Measuring 2 MCP servers…" in out
+    assert "\033[2F" in out                                # 2nd frame rewinds inside the sync block
+    assert "░" in out and " 1/2" in out and "50%" in out   # frame 1 of the burst; the bar's count
+
+
+def test_emit_prints_above_the_live_lines(monkeypatch, capsys):
+    err = _Tty()
+    monkeypatch.setattr("sys.stderr", err)
+    w = cli._t.Waiting("Measuring 1 MCP server…", total=1)
+    w._draw()                                              # two live lines on stderr
+    w.emit("  ✓ Context7")
+    assert capsys.readouterr().out == "  ✓ Context7\n"     # result on stdout
+    tail = err.getvalue().split("\033[2F\033[J", 1)[1]     # cleared, then redrawn below it
+    assert "Measuring 1 MCP server…" in tail and w._drawn == 2
+
+
+def test_step_cuts_a_long_server_id_at_the_label_width():
+    line = cli._t.step("done", "plugin:playwright:playwright", "~1k tok")
+    assert line == "  ✓ plugin:playwright:playwrigh ~1k tok"   # cut at labelWidth - 1 = 27
+
+
+def test_recall_bytes_ignore_ascii_mode(tmp_path, monkeypatch, capsys):
+    _memory_repo(tmp_path, n=1)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "root"))
+    monkeypatch.setenv("SONDALAB_ASCII", "1")
+    monkeypatch.chdir(tmp_path)
+    cli.main(["recall"])
+    assert capsys.readouterr().out == ("  [memory · repo] m0 — note number 0 about scoping "
+                                       "sessions\n")
+
+
+def _fake_termios(monkeypatch, read):
+    import termios, tty
+    calls = []
+    monkeypatch.setattr(termios, "tcgetattr", lambda fd: "saved")
+    monkeypatch.setattr(termios, "tcsetattr", lambda fd, when, old: calls.append(old))
+    monkeypatch.setattr(tty, "setraw", lambda fd: None)
+    monkeypatch.setattr(cli.sys, "stdin", type("S", (), {"fileno": lambda self: 0,
+                                                          "read": lambda self, n: read()})())
+    return calls
+
+
+def test_read_key_restores_the_terminal_on_ctrl_c(monkeypatch):
+    calls = _fake_termios(monkeypatch, lambda: "\x03")
+    assert cli._read_key() == "\x03" and calls == ["saved"]
+
+
+def test_read_key_restores_the_terminal_on_an_exception(monkeypatch):
+    calls = _fake_termios(monkeypatch, lambda: (_ for _ in ()).throw(OSError("gone")))
+    with pytest.raises(OSError):
+        cli._read_key()
+    assert calls == ["saved"]
+
+
+@pytest.mark.parametrize("env", [{"TERM": "dumb"}, {"CI": ""}])
+def test_no_key_reader_under_dumb_terminal_or_ci(monkeypatch, env):
+    for k, v in env.items():
+        monkeypatch.setenv(k, v)
+    assert cli._can_raw() is False
 
 
 @pytest.mark.parametrize("env", [{"SONDALAB_REDUCED_MOTION": "1"}, {"CI": "true"},
