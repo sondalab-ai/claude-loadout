@@ -69,16 +69,15 @@ def ascii_on() -> bool:
 def accessible() -> bool:
     """Accessible mode: SONDALAB_ACCESSIBLE=1 or ACCESSIBLE set. Plain prompts, no redraw.
 
-    Reads ENV["accessible"] through the palette's own switch rule (term._on / _SWITCH, the
-    spec's Robustness > Environment table), so "=1" versus "set" is decided in one place.
+    The "=1" versus "set" rule is the palette's (term.accessible, palette 0.7).
     """
-    return slt._on(os.environ, sl.ENV["accessible"])
+    return slt.accessible(os.environ)
 
 
 def no_key_reader() -> bool:
     """TERM=dumb or CI set: no raw-mode key reader, so menus take the numbered form."""
     return (any(os.environ.get(n) == "dumb" for n in sl.ENV["term"])
-            or slt._on(os.environ, sl.ENV["ci"]))
+            or slt.switch_on("ci", os.environ))
 
 
 def motion_on() -> bool:
