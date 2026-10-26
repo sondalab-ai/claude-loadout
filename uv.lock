@@ -21,7 +21,7 @@ wheels = [
 
 [[package]]
 name = "ccloadout"
-version = "0.11.1"
+version = "0.12.0"
 source = { editable = "." }
 dependencies = [
     { name = "model2vec" },
@@ -44,7 +44,7 @@ requires-dist = [
     { name = "model2vec", specifier = ">=0.3" },
     { name = "numpy", specifier = ">=1.24" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
-    { name = "sondalab-palette", specifier = ">=0.1" },
+    { name = "sondalab-palette", specifier = ">=0.7" },
 ]
 provides-extras = ["dev", "rules"]
 
@@ -612,11 +612,11 @@ wheels = [
 
 [[package]]
 name = "sondalab-palette"
-version = "0.2.0"
+version = "0.7.0"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/54/cb/f133b6642f5698739ec59aa993617c66cb2caf8b4cec934b2369492f5ce0/sondalab_palette-0.2.0.tar.gz", hash = "sha256:2f4202787aa16bc53e0d8d7623c36064f6abf71e393c90082724b40a9ee5c876", size = 1650, upload-time = "2026-08-24T07:38:58.232Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/3c/8d/cf733cda140d6dde9db12b8a2e6f88c1aede417064c0596267a411fb96aa/sondalab_palette-0.7.0.tar.gz", hash = "sha256:35f7e282c8ddb7d40c155e308dbecad8e2d4078cfb23c04aef5653eba281bcfc", size = 7666, upload-time = "2026-10-26T18:45:09.656Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/55/4f/7d8b727525ca45d722710b15f2be44cb093a5652a1f1848d8f508b9e515c/sondalab_palette-0.2.0-py3-none-any.whl", hash = "sha256:c69ff68278d21aabf1f9497834e58d2e4af58ba5fd6e8ee26503de3e5bb2ec7d", size = 2123, upload-time = "2026-08-24T07:38:57.062Z" },
+    { url = "https://files.pythonhosted.org/packages/ef/52/319108f3c11b3c3a719afa6a0b1adb558c237f0d6dd11414b7d571e628ff/sondalab_palette-0.7.0-py3-none-any.whl", hash = "sha256:0163eeae9ab54cb6cd39acd44c15b137a765765db8753768d7d88a47f8ea38e4", size = 8389, upload-time = "2026-10-26T18:45:08.509Z" },
 ]
 
 [[package]]

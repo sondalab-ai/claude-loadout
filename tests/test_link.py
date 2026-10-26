@@ -155,7 +155,7 @@ def test_cli_link_refuses_when_notes_are_untracked(env, tmp_path, monkeypatch, c
     (root / "loadout" / "config.toml").write_text("[memory]\ngit_tracked = false\n")
     _cli_env(monkeypatch, tmp_path, root, repo)
     assert cli.main(["memory", "link", "--yes"]) == 0
-    assert "nothing to link" in capsys.readouterr().out
+    assert "Nothing to link" in capsys.readouterr().out
     assert not harness.exists()
 
 def test_an_agent_writing_a_note_is_never_told_to_link(env, tmp_path, monkeypatch, capsys):

@@ -1,4 +1,4 @@
-import io, json, os, sys
+import io, json, os, re, sys
 from pathlib import Path
 import pytest
 import ccloadout.cli as cli
@@ -55,7 +55,7 @@ def test_keyboard_interrupt_aborts_cleanly(tmp_path, monkeypatch, capsys):
                         lambda *a, **k: (_ for _ in ()).throw(KeyboardInterrupt()))
     rc = cli.main([])                               # Ctrl-C at a prompt -> exit 130, no traceback
     assert rc == 130
-    assert "aborted" in capsys.readouterr().err
+    assert "Aborted" in capsys.readouterr().err
 
 def _drop_rule_root(tmp_path):
     root = _root(tmp_path)
@@ -184,11 +184,11 @@ def test_doctor_words_the_notes_folder_by_whether_it_exists(tmp_path, monkeypatc
     monkeypatch.setattr(cli, "make_model2vec_embed", lambda name: cli.keyword_embed)
     assert cli.main(["doctor"]) == 0
     out = capsys.readouterr().out
-    assert "not created yet" in out and "doesn't read it" not in out   # nothing is going unread
+    assert "Not created yet" in out and "doesn't read it" not in out   # nothing is going unread
     (tmp_path / "docs" / "memory").mkdir(parents=True)
     assert cli.main(["doctor"]) == 0
     out = capsys.readouterr().out
-    assert "Claude Code doesn't read it" in out and "not created yet" not in out
+    assert "Claude Code doesn't read it" in out and "Not created yet" not in out
 
 def test_doctor_warns_per_profile_when_the_reminder_is_off(tmp_path, monkeypatch, capsys):
     for name in (".claude", ".claude-perso"):
@@ -272,7 +272,7 @@ def test_explain_dropped_skill_in_dropping_section(tmp_path, monkeypatch, capsys
     drop_i = next(i for i, l in enumerate(lines) if "dropping (" in l)
     astro_i = next(i for i, l in enumerate(lines) if "astro" in l)
     assert astro_i > drop_i                               # a ranked-out skill lands in dropping
-    assert "✗" in lines[astro_i]                          # real drop marker
+    assert "↷" in lines[astro_i]                          # drop marker: skipped, never the failure glyph
 
 def test_no_scope_skills_force_keeps_skill(tmp_path, monkeypatch, capsys):
     root = _skill_root(tmp_path)
@@ -334,7 +334,7 @@ def test_resolve_config_root_prompts_and_returns_choice(tmp_path, monkeypatch, c
     chosen = cli._resolve_config_root({}, [])
     assert chosen == perso
     err = capsys.readouterr().err
-    assert "pick a Claude profile" in err
+    assert "Which Claude profile?" in err
     assert "claude-loadout config: present" in err and "claude-loadout config: absent" in err
 
 def test_resolve_config_root_reasks_on_empty_then_valid(tmp_path, monkeypatch):
@@ -367,7 +367,7 @@ def test_main_aborts_launch_when_no_profile_selected(tmp_path, monkeypatch, caps
     monkeypatch.setattr(cli.subprocess, "run", lambda *a, **k: launched.__setitem__("ran", True) or _RC(0))
     rc = cli.main([])
     assert rc == 0 and launched["ran"] is False
-    assert "no profile selected" in capsys.readouterr().err
+    assert "No profile selected" in capsys.readouterr().err
 
 def test_main_prompted_profile_reaches_launched_claude(tmp_path, monkeypatch):
     perso = _two_profiles(tmp_path)
@@ -457,7 +457,7 @@ def test_launch_no_gate_env_suppresses_prompt(tmp_path, monkeypatch, capsys):
     rc = cli.main([])
     assert rc == 0
     err = capsys.readouterr().err
-    assert "scoped out" in err and "loadout init" in err   # summary + nudge still shown
+    assert "Scoped out" in err and "loadout init" in err   # summary + nudge still shown
     assert "[enter] launch" not in err                      # but no interactive gate
 
 def test_explain_reports_estimated_savings(tmp_path, monkeypatch, capsys):
@@ -486,7 +486,7 @@ def test_launch_prints_savings_line_to_stderr(tmp_path, monkeypatch, capsys):
     rc = cli.main([])
     assert rc == 0
     err = capsys.readouterr().err
-    assert "scoped out 2 of 2 tools" in err and "trimmed up front" in err
+    assert "Scoped out 2 of 2 tools" in err and "trimmed up front" in err
     assert "on-demand avoided" in err                    # mcp deferred cost shown separately
 
 def test_launch_nudges_when_unseeded(tmp_path, monkeypatch, capsys):
@@ -517,7 +517,7 @@ def test_launch_no_nudge_when_seeded(tmp_path, monkeypatch, capsys):
     rc = cli.main([])
     assert rc == 0
     err = capsys.readouterr().err
-    assert "scoped out" in err                                   # seeded: summary still shown (then a brief pause)
+    assert "Scoped out" in err                                   # seeded: summary still shown (then a brief pause)
     assert "loadout init" not in err                            # seeded -> no nudge
     assert "[enter] launch" not in err                           # seeded -> no gate prompt, fire-and-forget
 
@@ -557,6 +557,23 @@ def test_launch_gate_edit_recomposes_keep(tmp_path, monkeypatch):
     assert "Gmail" in captured["mcp"]["mcpServers"]       # edit re-kept the dropped server
     assert not (tmp_path / ".loadout" / "config.toml").exists()   # 'n' -> not persisted
 
+def test_launch_gate_edit_without_raw_terminal_offers_the_numbered_list(tmp_path, monkeypatch):
+    # Before the Term restyle this path printed "can't draw the editor here" and launched as scoped.
+    root = _root(tmp_path)
+    (tmp_path / "README.md").write_text("# P\n\nA tool that does X.\n")
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
+    monkeypatch.setenv("LOADOUT_THRESHOLD", "0.99")     # everything dropped by default
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "make_model2vec_embed", lambda name: cli.keyword_embed)
+    monkeypatch.setattr(cli, "_interactive", lambda p: True)
+    monkeypatch.setattr(cli, "_can_raw", lambda: False)
+    monkeypatch.setattr(cli, "_read_key", lambda: pytest.fail("no key reader without raw mode"))
+    answers = iter(["e", "all", "", "n"])                 # edit, flip every row on, confirm, don't persist
+    monkeypatch.setattr("builtins.input", lambda *a, **k: next(answers, ""))
+    captured = _capture_mcp_overlay(monkeypatch)
+    assert cli.main([]) == 0
+    assert "Gmail" in captured["mcp"]["mcpServers"]       # the numbered list re-kept it
+
 def test_launch_gate_edit_persists_seed(tmp_path, monkeypatch):
     root = _root(tmp_path)
     (tmp_path / "README.md").write_text("# P\n\nA tool that does X.\n")
@@ -586,8 +603,8 @@ def test_doctor_reports_prunable_budget(tmp_path, monkeypatch, capsys):
     rc = cli.main(["doctor"])
     assert rc == 0
     out = capsys.readouterr().out
-    assert "up front:" in out and "600 tokens" in out    # eager ceiling (plugin), not the deferred mcp
-    assert "on-demand:" in out and "1.2k tokens" in out  # mcp schemas shown as lazy/on-demand
+    assert "Up front" in out and "600 tokens" in out     # eager ceiling (plugin), not the deferred mcp
+    assert "On-demand" in out and "1.2k tokens" in out   # mcp schemas shown as lazy/on-demand
 
 def test_token_costs_config_override_changes_estimate(tmp_path, monkeypatch, capsys):
     _root(tmp_path)
@@ -686,14 +703,13 @@ def test_rules_without_rule_model_skips_nl_prompt(tmp_path, monkeypatch, capsys)
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(cli, "_interactive", lambda p: True)
-    prompts = []
-    monkeypatch.setattr("builtins.input", lambda prompt="": prompts.append(prompt) or "k")
+    monkeypatch.setattr("builtins.input", lambda prompt="": "k")
     rc = cli.main(["rules"])
     assert rc == 0
-    joined = " ".join(prompts)
-    assert "rule for" not in joined                      # NL authoring skipped when no rule model
-    assert "[k]eep always" in joined                     # goes straight to structured choice
-    assert "no rule model configured" in capsys.readouterr().err   # upfront guidance shown
+    err = capsys.readouterr().err                        # prompts are written to stderr
+    assert "rule for" not in err.lower()                 # NL authoring skipped when no rule model
+    assert "[k]eep always" in err                        # goes straight to structured choice
+    assert "No rule model configured" in err             # upfront guidance shown
     assert "always_keep" in (root / "loadout" / "rules.toml").read_text()   # [k]eep authored a rule
 
 def _proj(base, name):
@@ -807,7 +823,8 @@ def test_init_non_tty_without_yes_is_noop(tmp_path, monkeypatch, capsys):
     repos = tmp_path / "repos"; r1 = _proj(repos, "proj1")
     _fake_stdin(monkeypatch, tty=False)
     rc = cli.main(["init", str(repos)])
-    assert rc == 0 and "interactive terminal" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert rc == 0 and "stdin is not a terminal" in err and "init --yes" in err
     assert not (r1 / ".loadout").exists()
 
 def test_init_interactive_selects_subset(tmp_path, monkeypatch):
@@ -920,7 +937,7 @@ def test_render_checklist_draws_group_headers_and_counts_lines():
     n = cli._render_checklist("title", ["a", "b"], [True, False], 0, out, 0,
                               hint="h", headers={0: "plugins", 1: "skills"})
     text = out.getvalue()
-    assert "plugins" in text and "skills" in text         # both group headers drawn
+    assert "PLUGINS" in text and "SKILLS" in text         # both group headers drawn, micro label
     assert n == text.count("\n")                           # returned count matches physical lines (redraw safe)
 
 def test_review_keep_drop_groups_by_kind_and_maps_past_headers(monkeypatch):
@@ -1066,7 +1083,7 @@ def test_update_bulk_reports_unseeded(tmp_path, monkeypatch, capsys):
     rc = cli.main(["update", str(repos), "--yes"])
     assert rc == 0
     out = capsys.readouterr().out
-    assert "updated 1 project" in out
+    assert "Updated 1 project" in out
     assert "proj2 (not seeded — run init)" in out
 
 def test_update_single_refuses_unseeded(tmp_path, monkeypatch, capsys):
@@ -1297,7 +1314,7 @@ def test_debt_add_list_and_resolve(tmp_path, monkeypatch, capsys):
     assert "open" in out and "fail-fast-stub-in-the-rules-compiler" in out
     assert cli.main(["debt", "resolve", "fail-fast-stub-in-the-rules-compiler"]) == 0
     cli.main(["debt", "list"])
-    assert "no open debt" in capsys.readouterr().out
+    assert "No open debt" in capsys.readouterr().out
     cli.main(["debt", "list", "--all"])
     assert "resolved" in capsys.readouterr().out
 
@@ -1311,7 +1328,7 @@ def test_debt_survives_an_unrelated_edit_to_its_anchor(tmp_path, monkeypatch, ca
     capsys.readouterr()
     cli.main(["debt", "list"])
     out = capsys.readouterr().out
-    assert "shim-here" in out and "no open debt" not in out   # only `debt resolve` closes an entry
+    assert "shim-here" in out and "No open debt" not in out   # only `debt resolve` closes an entry
     assert "status: open" in (tmp_path / "docs" / "memory" / "shim-here.md").read_text()
 
 def test_resolved_debt_is_not_injected_but_recall_still_finds_it(tmp_path, monkeypatch, capsys):
@@ -1334,7 +1351,7 @@ def test_memory_add_writes_outside_the_repo_when_not_tracked(tmp_path, monkeypat
     monkeypatch.chdir(tmp_path)
     assert cli.main(["memory", "add", "the ranker threshold was recentred"]) == 0
     assert not (tmp_path / "docs").exists()
-    assert "wrote" in capsys.readouterr().out
+    assert "Wrote memory entry" in capsys.readouterr().out
 
 def test_a_launched_session_is_recorded_as_a_candidate(tmp_path, monkeypatch, capsys):
     from ccloadout.candidates import load_candidates
@@ -1414,9 +1431,10 @@ def test_doctor_reports_store_health(tmp_path, monkeypatch, capsys):
     capsys.readouterr()
     cli.main(["doctor"])
     out = capsys.readouterr().out
-    assert "entries:          3" in out and "1 debt, 2 memory" in out
-    assert "open debt:    " in out and "1" in out
-    assert "stale anchors:" in out and "1 gone" in out
+    assert re.search(r"\n    Entries +3 \(1 debt, 2 memory\)\n", out)        # a fact: no glyph
+    assert re.search(r"\n  ! Open debt +1\n", out)                         # checks: warn glyph
+    assert re.search(r"\n  ! Stale anchors +1 gone", out)
+    assert "Summary  " in out and "warn" in out
 
 def test_doctor_says_memory_is_off_when_it_is(tmp_path, monkeypatch, capsys):
     _root(tmp_path)
@@ -1425,7 +1443,7 @@ def test_doctor_says_memory_is_off_when_it_is(tmp_path, monkeypatch, capsys):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(cli, "make_model2vec_embed", lambda name: cli.keyword_embed)
     cli.main(["doctor"])
-    assert "off — enable with" in capsys.readouterr().out
+    assert re.search(r"\n  ↷ Memory recall +off\n", capsys.readouterr().out)
 
 # --- memory audit -------------------------------------------------------------
 
@@ -1653,7 +1671,7 @@ def test_repeated_writes_of_one_marker_are_a_single_candidate(tmp_path, monkeypa
         record_signal(root, tmp_path, pattern="TODO(loadout)", file="a.py", excerpt="# TODO x")
     monkeypatch.setattr(cli, "_interactive", lambda passthrough: False)
     cli.main(["memory", "consolidate"])
-    assert capsys.readouterr().out.count("debt marker in a.py") == 1
+    assert capsys.readouterr().out.count("Debt marker in a.py") == 1
 
 def test_memory_off_composes_a_byte_identical_plan(tmp_path, monkeypatch):
     # Acceptance criterion 1, asserted on the composed plan rather than on the suite staying green.

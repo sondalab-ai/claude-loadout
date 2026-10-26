@@ -31,36 +31,37 @@ _LAUNCH_PAUSE_S = 1.5   # seeded launch: hold the scoping summary on screen befo
 class _Abort(Exception):
     """User declined to pick a profile at the selection prompt."""
 
-# Color codes resolve through the shared Sondalab palette: on a non-truecolor
-# terminal the named-ANSI floor is byte-identical to the previous static codes;
-# on COLORTERM=truecolor they upgrade to the brand hues. dim/bold stay styles.
-import sondalab_palette as _sl
-_STYLE_SGR = {"dim": "2", "bold": "1"}
-_COLOR_ROLE = {"green": "ok", "red": "err", "yellow": "warn", "cyan": "accent"}
+# Output follows the Sondalab Term spec through ccloadout.term (colour by color_mode + ROLES,
+# glyphs, step lines, error blocks, prompts). _paint/_sgr keep their names for every caller.
+from ccloadout import term as _t
+_paint = _t.paint
 
 def _sgr(code: str) -> str:
-    if code in _STYLE_SGR:
-        return _STYLE_SGR[code]
-    ansi, rgb = _sl.ROLES[_COLOR_ROLE[code]]
-    return f"38;2;{rgb[0]};{rgb[1]};{rgb[2]}" if _sl.supports_truecolor() else str(ansi)
-
-def _supports_color(err: bool) -> bool:
-    # Looked up lazily (not cached at import) so pytest's capsys stream swap is honoured.
-    if os.environ.get("NO_COLOR") or os.environ.get("LOADOUT_NO_COLOR"):
-        return False
-    stream = sys.stderr if err else sys.stdout
-    return stream.isatty()
-
-def _paint(text: str, *codes: str, err: bool = False) -> str:
-    if not _supports_color(err):
-        return text
-    return f"\033[{';'.join(_sgr(c) for c in codes)}m{text}\033[0m"
+    """The SGR for a style or role, upgraded to truecolor when COLORTERM allows it (cld opts in)."""
+    return _t.sgr(code, _t.truecolor_ok())
 
 def _yn(flag: bool, *, err: bool = False) -> str:
     return _paint("present", "green", err=err) if flag else _paint("absent", "dim", err=err)
 
 def _warn(msg: str) -> None:
-    print(f"{_paint('claude-loadout:', 'yellow', err=True)} {msg}", file=sys.stderr)
+    """A warning on stderr: the `warn` glyph and one sentence; the command carries on."""
+    print(_t.note("warn", msg, err=True), file=sys.stderr)
+
+def _fail(what: str, why: str = "", fix: str = "") -> None:
+    """The three-line error on stderr (what, why, `Try:` fix); the caller returns non-zero."""
+    print("\n".join(_t.error_block(what, why, fix)), file=sys.stderr)
+
+def _say(name: str, label: str, detail: str = "", *, dim: bool = False) -> None:
+    """One step line on stdout: a result, with the glyph naming its outcome."""
+    print(_t.step(name, label, detail, dim=dim))
+
+def _next(command: str, *, err: bool = False) -> None:
+    """A `Next:` continuation line naming the follow-up command."""
+    print(_t.cont(f"{_paint('Next:', 'dim', err=err)} {command}"), file=sys.stderr if err else sys.stdout)
+
+def _try(command: str) -> None:
+    """A `Try:` continuation line on stderr, under a warning that has a fix."""
+    print(_t.cont(f"{_paint('Try:', 'prompt', err=True)} {command}"), file=sys.stderr)
 
 _IRREGULAR = {"entry": "entries"}
 
@@ -77,17 +78,31 @@ def _cleanup(tmp_paths) -> None:
 def _interactive(passthrough: list[str]) -> bool:
     return sys.stdin.isatty() and "-p" not in passthrough and "--print" not in passthrough
 
+def _prompt(text: str) -> str:
+    """Write a prompt to stderr (results own stdout), then read one line; EOFError propagates."""
+    sys.stderr.write(text)
+    sys.stderr.flush()
+    try:
+        return input()
+    except EOFError:                                 # end the prompt line before what follows
+        sys.stderr.write("\n")
+        raise
+
 def _ask(prompt: str) -> str:                       # EOF on piped stdin -> treat as skip
     try:
-        return input(prompt)
+        return _prompt(prompt)
     except EOFError:
         return ""
+
+def _confirm(question: str) -> bool:
+    """`? <question> [y/N]`: default no, Enter takes it; an answer starting with y is yes."""
+    return _ask(f"{_t.question(question)} [y/N] ").strip().lower().startswith("y")
 
 def _build_embed(model_name: str):
     try:
         return make_model2vec_embed(model_name)
     except Exception as exc:                       # import error, download failure, etc.
-        _warn(f"model unavailable ({exc}); using keyword fallback")
+        _warn(f"Model unavailable ({exc}); using keyword fallback")
         return keyword_embed
 
 def _build_compiler(cfg):
@@ -96,14 +111,14 @@ def _build_compiler(cfg):
     try:
         return make_local_instruct(cfg.rule_model_path)
     except Exception as exc:
-        _warn(f"rule model unavailable ({exc}); rule authoring disabled")
+        _warn(f"Rule model unavailable ({exc}); rule authoring disabled")
         return None
 
 def _resolve_goal(cwd: Path, passthrough: list[str],
                   persist: bool = True) -> tuple[str, str, float]:
     goal = detect_goal(cwd, persist=persist)         # returns (text, source, confidence)
     if goal.confidence < 0.15 and _interactive(passthrough):
-        entered = _ask(f"claude-loadout: session goal? [{goal.goal}] ").strip()
+        entered = _ask(f"{_t.question('Session goal?')} [{goal.goal}] ").strip()
         if entered:
             write_goal_cache(cwd, entered, origin="user")   # preflight ruling: persist, don't re-ask
             return entered, "prompt", 1.0
@@ -116,23 +131,24 @@ def _rules_intro(compile_fn, scope: str) -> None:
     dim = lambda s: _paint(s, "dim", err=True)
     p("")
     if compile_fn:
-        p(f"{_paint('claude-loadout:', 'yellow', err=True)} for each tool, describe in plain "
-          "language when to keep or drop it.")
+        p(_t.note("active", "For each tool, describe in plain language when to keep or drop it",
+                  err=True))
         p(dim('    e.g.  "keep only when the goal is frontend"'))
         p(dim('          "drop unless it mentions email"'))
         p(dim('          "always keep this"'))
-        p(dim("    press enter to skip; if a description can't be translated "
-              "you'll get keep/drop/skip choices."))
+        p(dim("    Enter skips; a description that can't be translated falls back to "
+              "keep, drop or skip"))
     else:
-        p(f"{_paint('claude-loadout:', 'yellow', err=True)} no rule model configured — "
-          "natural-language rules are unavailable.")
-        p(dim("    [k]eep always / [d]rop always write a permanent rule; "
-              "[s]kip (enter) decides nothing and asks again next time."))
-    p(dim(f"    rules you author here apply {scope}."))
+        p(_t.note("warn", "No rule model configured; natural-language rules are unavailable",
+                  err=True))
+        p(dim("    [k]eep always and [d]rop always write a permanent rule; "
+              "[s]kip (Enter) decides nothing and asks again next time"))
+    p(dim(f"    Rules authored here apply {scope}"))
     p("")
 
 def _pick_keep_drop_skip(item: Item) -> Predicate | None:
-    choice = _ask(f"  '{item.id}': [k]eep always / [d]rop always / [s]kip (decide later)? ").strip().lower()
+    choice = _ask(_t.question(f"'{item.id}': [k]eep always, [d]rop always or [s]kip "
+                              "(decide later)? ")).strip().lower()
     return {"k": Predicate("always_keep", (), "any"),
             "d": Predicate("always_drop", (), "any")}.get(choice)
 
@@ -140,14 +156,14 @@ def _elicit(item: Item, context: str, compile_fn, save) -> str:
     # `save(Rule)` persists an authored rule to the chosen scope (profile or a repo's local file).
     nl = ""
     if compile_fn:                                 # natural-language authoring path
-        nl = _ask(f"claude-loadout: rule for '{item.id}' ({item.kind})? [enter=skip] ").strip()
+        nl = _ask(_t.question(f"Rule for '{item.id}' ({item.kind})? Enter skips ")).strip()
         if not nl:
             return "undecided"
         pred = compile_rule(nl, item, compile_fn)
         if pred is not None:
             save(Rule(target=item.id, nl=nl, predicate=pred))
             return evaluate(pred, context)
-        _warn(f"couldn't translate that into a rule for '{item.id}'; choose manually")
+        _warn(f"Couldn't translate that into a rule for '{item.id}'; choose manually")
     pred = _pick_keep_drop_skip(item)              # spec §7 degrade / no rule model
     if pred is None:
         return "undecided"
@@ -246,13 +262,14 @@ def _capture_session(scope, cwd: Path, exit_code: int, head_before: str | None) 
         record_session(mem.config_root, repo_root(cwd), goal=scope.goal, exit_code=exit_code,
                        changed=_changed_since(cwd, head_before))
     except OSError as exc:                          # never fail a session over its own bookkeeping
-        _warn(f"could not record session candidate ({exc})")
+        _warn(f"Could not record session candidate ({exc})")
 
 def _cmd_consolidate(cwd: Path, override: Path | None = None) -> int:
     cfg = load_config(cwd=cwd, config_root_override=override)
     rows = load_candidates(cfg.config_root, cwd)
     if not rows:
-        print(_paint("no candidates recorded for this repository", "dim"))
+        print(f"No session candidates for this repository{_t.sep()}"
+              "sessions record them while memory recall is on")
         return 0
     signals = [r for r in rows if r.get("kind") == "debt-signal"]
     sessions = [r for r in rows if r.get("kind") != "debt-signal"]
@@ -263,20 +280,20 @@ def _cmd_consolidate(cwd: Path, override: Path | None = None) -> int:
     kept_rows: list[dict] = _consolidate_signals(cwd, cfg, signals, interactive)
     for goal, rows_for_goal in groups.items():
         files = sorted({f for r in rows_for_goal for f in (r.get("changed") or [])})
-        print(_paint(f"  {_plural(len(rows_for_goal), 'session')} · {goal}", "bold"))
+        print(f"  {_paint(_plural(len(rows_for_goal), 'session'), 'bold')}{_t.sep()}{goal}")
         if files:
-            print(_paint(f"    touched: {', '.join(files[:6])}"
-                         + (" …" if len(files) > 6 else ""), "dim"))
+            print(_t.cont(_paint(f"touched: {', '.join(files[:6])}"
+                                 + (" " + _t.ellipsis() if len(files) > 6 else ""), "dim")))
         if not interactive:                         # no TTY: report, promote nothing
             kept_rows += rows_for_goal
             continue
-        answer = _ask("    [k]eep as a memory / [d]iscard / [s]kip? ").strip().lower()
+        answer = _ask(_t.question("[k]eep as a memory, [d]iscard or [s]kip? ")).strip().lower()
         if answer.startswith("d"):
             continue                                # dropped: the rows go, no entry is written
         if not answer.startswith("k"):
             kept_rows += rows_for_goal
             continue
-        description = _ask("    one line describing what to remember: ").strip() or goal
+        description = _ask(_t.question("One line describing what to remember: ")).strip() or goal
         try:
             path = write_entry(cfg.config_root, cwd, name=_slugify(description),
                                description=description, kind="memory",
@@ -284,10 +301,10 @@ def _cmd_consolidate(cwd: Path, override: Path | None = None) -> int:
                                body="\n".join(f"- {r.get('at')} · exit {r.get('exit_code')}"
                                                for r in rows_for_goal))
         except EntryExists as exc:
-            _warn(f"an entry already exists at {exc}; keeping the candidate")
+            _warn(f"An entry already exists at {exc}; keeping the candidate")
             kept_rows += rows_for_goal
             continue
-        print(f"    {_paint('wrote', 'green')} {path}")
+        _say("done", "Wrote memory entry", str(path))
     if interactive:
         drop_rows(cfg.config_root, cwd, kept_rows)
     return 0
@@ -301,28 +318,28 @@ def _consolidate_signals(cwd: Path, cfg, signals: list[dict], interactive: bool)
         seen.setdefault((row.get("file"), row.get("excerpt")), row)
     for row in seen.values():
         where = row.get("file") or "?"
-        print(_paint(f"  debt marker in {where}", "bold"))
-        print(_paint(f"    {_short_desc(str(row.get('excerpt') or ''), 90)}", "dim"))
+        print(_paint(f"  Debt marker in {where}", "bold"))
+        print(_t.cont(_paint(_short_desc(str(row.get('excerpt') or ''), 90), "dim")))
         if not interactive:
             kept.append(row)
             continue
-        answer = _ask("    [k]eep as open debt / [d]iscard / [s]kip? ").strip().lower()
+        answer = _ask(_t.question("[k]eep as open debt, [d]iscard or [s]kip? ")).strip().lower()
         if answer.startswith("d"):
             continue
         if not answer.startswith("k"):
             kept.append(row)
             continue
-        description = _ask("    one line describing the debt: ").strip() or str(row.get("excerpt"))
+        description = _ask(_t.question("One line describing the debt: ")).strip() or str(row.get("excerpt"))
         anchors = [where] if row.get("file") else []
         try:
             path = write_entry(cfg.config_root, cwd, name=_slugify(description),
                                description=description, kind="debt",
                                git_tracked=cfg.memory.git_tracked, anchors=anchors)
         except EntryExists as exc:
-            _warn(f"an entry already exists at {exc}; keeping the candidate")
+            _warn(f"An entry already exists at {exc}; keeping the candidate")
             kept.append(row)
             continue
-        print(f"    {_paint('wrote', 'green')} {path}")
+        _say("done", "Wrote debt entry", str(path))
     return kept
 
 def _record_delivery(scope, cwd: Path) -> None:
@@ -331,7 +348,7 @@ def _record_delivery(scope, cwd: Path) -> None:
         try:
             record_delivery(mem.config_root, repo_root(cwd), mem.delivered)
         except OSError as exc:                      # a counter is never worth failing a launch for
-            _warn(f"could not record memory usage ({exc})")
+            _warn(f"Could not record memory usage ({exc})")
 
 def _slugify(text: str) -> str:
     words = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-").split("-")
@@ -351,7 +368,8 @@ def _cmd_write_entry(cwd: Path, args: list[str], kind: str, override: Path | Non
     scope = "global" if "--global" in args else "repo"
     description = " ".join(a for a in args if a != "--global").strip()
     if not description:
-        _warn(f"{kind} add needs a description")
+        _fail(f"Missing the {kind} text", f"{kind} add needs a description of the note",
+              f"claude-loadout {kind} add <text>")
         return 2
     cfg = load_config(cwd=cwd, config_root_override=override)
     try:
@@ -359,10 +377,11 @@ def _cmd_write_entry(cwd: Path, args: list[str], kind: str, override: Path | Non
                            description=description, kind=kind,
                            git_tracked=cfg.memory.git_tracked, anchors=anchors, scope=scope)
     except EntryExists as exc:
-        _warn(f"an entry already exists at {exc}; pick another --name")
+        _fail(f"Could not write the {kind} entry", f"an entry already exists at {exc}",
+              f"claude-loadout {kind} add --name <another-name> <text>")
         return 1
-    where = " (every project)" if scope == "global" else ""
-    print(f"{_paint('wrote', 'green')} {path}{_paint(where, 'dim')}")
+    where = "  (every project)" if scope == "global" else ""
+    _say("done", f"Wrote {kind} entry", f"{path}{where}")
     if scope == "repo":
         _link_hint(cfg, cwd)
     return 0
@@ -374,8 +393,8 @@ def _link_hint(cfg, root: Path) -> None:
     if not _interactive([]):
         return
     if cfg.memory.git_tracked and not is_linked(cfg.config_root, root):
-        _warn("Claude Code doesn't read docs/memory in this repo yet. "
-              "Run `claude-loadout memory link` to fix that.")
+        _warn("Claude Code doesn't read docs/memory in this repo yet")
+        _next("claude-loadout memory link", err=True)
 
 def _cmd_link(root: Path, args: list[str], override: Path | None = None) -> int:
     """`memory link`: merge Claude Code's memory folder into docs/memory and symlink it there.
@@ -386,65 +405,74 @@ def _cmd_link(root: Path, args: list[str], override: Path | None = None) -> int:
     """
     cfg = load_config(cwd=root, config_root_override=override)
     if not cfg.memory.git_tracked:
-        print("notes here go to Claude Code's own memory folder ([memory] git_tracked = false), "
-              "which it already reads; there is nothing to link")
+        _say("skipped", "Nothing to link", "")
+        print(_t.cont(_paint("Notes here go to Claude Code's own memory folder ([memory] "
+                             "git_tracked = false), which it already reads", "dim")))
         return 0
     plan = plan_link(cfg.config_root, root)
     if plan.state == "unknown-project":
-        _warn(f"Claude Code keeps no sessions under {plan.harness.parent}, so the folder it reads "
-              f"for {root} can't be confirmed; start one session here first (if you usually "
-              f"reach this repo through a symlinked path, run this from that path)")
+        _fail(f"Could not confirm the folder Claude Code reads for {root}",
+              f"Claude Code keeps no sessions under {plan.harness.parent} yet; start one here "
+              "first, from the symlinked path if that is how you reach this repo",
+              "claude, then claude-loadout memory link")
         return 1
     if plan.state == "elsewhere":
-        _warn(f"{plan.harness} is a symlink to {plan.harness.resolve()}; leaving it alone")
+        _fail(f"Left {plan.harness} alone",
+              f"it is a symlink to {plan.harness.resolve()}", f"ls -l {plan.harness}")
         return 1
     print(_paint("claude-loadout memory link", "bold"))
     print(f"  Claude Code reads:  {plan.harness}")
     print(f"  notes live in:      {plan.store}")
     if plan.copies:
-        names = ", ".join(p.name for p in plan.copies[:6]) + (" …" if len(plan.copies) > 6 else "")
+        names = (", ".join(p.name for p in plan.copies[:6])
+                 + (" " + _t.ellipsis() if len(plan.copies) > 6 else ""))
         print(f"  copy {_plural(len(plan.copies), 'file')} into docs/memory: {_paint(names, 'dim')}")
     if plan.added:
         print(f"  add {_plural(len(plan.added), 'line')} to MEMORY.md, so those notes reach sessions")
     if plan.backup:
         print(f"  keep the original folder as {plan.backup}")
     if plan.state in ("merge", "missing"):
-        print(f"  then link {plan.harness.name} → {plan.store}")
+        arrow = "->" if _t.ascii_on() else "→"
+        print(f"  then link {plan.harness.name} {arrow} {plan.store}")
     if plan.conflicts:
-        _warn("these exist on both sides with different content; reconcile them by hand, then "
-              "run this again: " + ", ".join(plan.conflicts))
+        _fail("Could not link: files differ on both sides",
+              "reconcile by hand, then link again: " + ", ".join(plan.conflicts),
+              f"diff {plan.harness / plan.conflicts[0]} {plan.store / plan.conflicts[0]}")
         return 1
     if not plan.changes:
-        print(_paint("  already linked; nothing to do", "dim"))
+        _say("done", "Already linked", "nothing changed", dim=True)
         return 0
     if "--yes" not in args:
         if not _interactive([]):
-            _warn("nothing changed; run again with --yes to link")
+            _fail("Nothing changed", "linking needs a yes, and stdin is not a terminal",
+                  "claude-loadout memory link --yes")
             return 1
-        if not _ask("  link now? [y/N] ").strip().lower().startswith("y"):
-            print(_paint("  nothing changed", "dim"))
+        if not _confirm("Link now?"):
+            _say("skipped", "Nothing changed")
             return 0
     apply_link(plan)
-    print(f"{_paint('linked', 'green')} — Claude Code now loads {plan.store / 'MEMORY.md'}")
+    _say("done", "Linked docs/memory", f"Claude Code now loads {plan.store / 'MEMORY.md'}")
     return 0
 
 def _cmd_scope(cwd: Path, args: list[str], override: Path | None = None) -> int:
     if len(args) < 2 or args[1] not in ("repo", "global"):
-        _warn("memory scope needs a name and either 'repo' or 'global'")
+        _fail("Missing the scope", "memory scope needs an entry name and either repo or global",
+              "claude-loadout memory scope <name> repo|global")
         return 2
     cfg = load_config(cwd=cwd, config_root_override=override)
     match = next((e for e in read_store(cwd, cfg.config_root).entries
                   if e.name == args[0] or e.name.startswith(args[0])), None)
     if match is None:
-        _warn(f"no entry named {args[0]!r}")
+        _fail(f"No entry named {args[0]!r}", "no note in this repository's store has that name "
+              "or prefix", "claude-loadout recall")
         return 1
     try:
         set_meta(match.path, "scope", args[1])
     except (NoStatus, OSError) as exc:
-        _warn(f"could not change the scope of {match.name}: {exc}")
+        _fail(f"Could not change the scope of {match.name}", str(exc), f"ls -l {match.path}")
         return 1
     reach = "every project" if args[1] == "global" else "this repository only"
-    print(f"{_paint(args[1], 'green')} — {match.name} now reaches {reach}")
+    _say("done", f"Scoped to {args[1]}", f"{match.name} now reaches {reach}")
     return 0
 
 def _cmd_debt(cwd: Path, args: list[str], override: Path | None = None) -> int:
@@ -455,30 +483,33 @@ def _cmd_debt(cwd: Path, args: list[str], override: Path | None = None) -> int:
     entries = [e for e in read_store(cwd, cfg.config_root).entries if e.kind == "debt"]
     if action == "resolve":
         if not rest:
-            _warn("debt resolve needs the name of an entry")
+            _fail("Missing the entry name", "debt resolve needs the name of an entry",
+                  "claude-loadout debt list")
             return 2
         match = next((e for e in entries if e.name == rest[0]), None)
         if match is None:
-            _warn(f"no debt entry named {rest[0]!r}")
+            _fail(f"No debt entry named {rest[0]!r}", "no open or resolved debt entry has that exact name",
+                  "claude-loadout debt list --all")
             return 1
         try:
             set_status(match.path, "resolved")
         except (NoStatus, OSError) as exc:          # hand-written notes carry no status key
-            _warn(f"could not resolve {match.name}: {exc}")
+            _fail(f"Could not resolve {match.name}", str(exc), f"edit {match.path}")
             return 1
-        print(f"{_paint('resolved', 'green')} {match.name}")
+        _say("done", "Resolved debt", match.name)
         return 0
     if action != "list":
-        _warn(f"unknown debt command {action!r}; try add, list or resolve")
+        _fail(f"Unknown debt command {action!r}", "debt takes add, list or resolve",
+              "claude-loadout debt list")
         return 2
     show_all = "--all" in rest
     shown = [e for e in entries if show_all or e.status != "resolved"]
     if not shown:
-        print(_paint("no open debt recorded for this repository", "dim"))
+        print(f"No open debt for this repository{_t.sep()}add one with claude-loadout debt add <text>")
         return 0
     for e in shown:
         state = _paint("resolved", "dim") if e.status == "resolved" else _paint("open", "yellow")
-        mark = "" if anchor_state(e, cwd) != "missing" else _paint("  ⚠ anchor gone", "yellow")
+        mark = "" if anchor_state(e, cwd) != "missing" else f"  {_t.glyph('warn')} anchor gone"
         print(f"  {state}  {e.name} — {_short_desc(e.description, 60)}{mark}")
     return 0
 
@@ -505,7 +536,9 @@ def _session_hooks(cfg, cwd: Path, mem) -> tuple[dict | None, dict | None]:
             env["LOADOUT_DECISION_KEYWORDS"] = _LIST_SEP.join(cfg.memory.decision_keywords)
     return (hooks or None), (env if hooks else None)
 
-_AUDIT_HINT = "↑/↓ move · space keep/drop · a all/none · enter apply · q cancel"
+_MOVE = None                                        # hint key placeholder: the arrows, ↑↓ or up/dn
+_AUDIT_HINT = ((_MOVE, "move"), ("space", "keep/drop"), ("a", "all/none"), ("enter", "apply"),
+               ("q", "cancel"), ("ctrl-c", "quit"))
 _LIST_SEP = "\x1f"                                  # env-passed lists: see debt_hook.LIST_SEP
 _MEMORY_ACTIONS = frozenset({"enable", "disable", "add", "audit", "flag", "consolidate", "scope",
                             "link"})
@@ -580,7 +613,7 @@ def _print_memory_status(cwd: Path, cfg) -> int:
     steps = _memory_next_steps(state, on)
     if steps:
         print()
-        print(_paint("  next", "bold"))
+        print("  " + _t.micro("next"))
         width = max(len(cmd) for cmd, _ in steps)
         for command, why in steps:
             print(f"    {_paint(command.ljust(width), 'cyan')}  {_paint(why, 'dim')}")
@@ -588,19 +621,17 @@ def _print_memory_status(cwd: Path, cfg) -> int:
 
 def _cmd_memory_toggle(cwd: Path, enabled: bool, override: Path | None) -> int:
     path = set_memory_enabled(cwd, enabled)
-    word = "enabled" if enabled else "disabled"
-    print(f"{_paint(word, 'green' if enabled else 'dim')} memory recall for this repository "
-          + _paint(f"({path})", "dim"))
+    word = "Enabled" if enabled else "Disabled"
+    _say("done", f"{word} memory recall", str(path))
     if enabled:
         cfg = load_config(cwd=cwd, config_root_override=override)
         state = _memory_state(cwd, cfg)
         if not state["entries"]:
-            print(_paint("  the store is empty — notes arrive with `claude-loadout memory add`, "
-                         "or from sessions you consolidate", "dim"))
+            print(_t.cont(_paint("The store is empty; notes arrive with `claude-loadout memory "
+                                 "add`, or from sessions you consolidate", "dim")))
         else:
-            print(_paint(f"  {_plural(len(state['entries']), 'entry')} ready; "
-                         "`claude-loadout memory audit --context \'<goal>\'` shows what a "
-                         "session would get", "dim"))
+            print(_t.cont(_paint(f"{_plural(len(state['entries']), 'entry')} ready", "dim")))
+            _next("claude-loadout memory audit --context '<goal>'")
     return 0
 
 def _memory_intro_once(mem) -> None:
@@ -614,12 +645,11 @@ def _memory_intro_once(mem) -> None:
     p = lambda s: print(s, file=sys.stderr)
     dim = lambda s: _paint(s, "dim", err=True)
     p("")
-    p(f"{_paint('claude-loadout:', 'yellow', err=True)} "
-      f"{_plural(mem.shown, 'note')} from earlier sessions went into this one "
-      f"(~{_savings.human_tokens(mem.injected)} tokens).")
-    p(dim("    the session can search the rest itself with `claude-loadout recall`"))
-    p(dim("    review or delete them:  claude-loadout memory audit"))
-    p(dim("    turn it off here:       claude-loadout memory disable"))
+    p(_t.note("done", f"{_plural(mem.shown, 'note')} from earlier sessions went into this one "
+                      f"(~{_savings.human_tokens(mem.injected)} tokens)", err=True))
+    p(dim("    The session can search the rest itself with `claude-loadout recall`"))
+    p(dim("    Review or delete them:  claude-loadout memory audit"))
+    p(dim("    Turn it off here:       claude-loadout memory disable"))
     p("")
     try:
         marker.parent.mkdir(parents=True, exist_ok=True)
@@ -648,7 +678,8 @@ def _entry_signals(entry, cwd: Path | None, usage, flags, shadowed_ids: set) -> 
         bits.append(_paint("resolved", "dim", err=True))
     rec = usage.get(entry.id)
     if rec:
-        bits.append(_paint(f"{_plural(rec.uses, 'use')} · last {rec.last_used}", "dim", err=True))
+        bits.append(_paint(f"{_plural(rec.uses, 'use')}{_t.sep_plain()}last {rec.last_used}",
+                           "dim", err=True))
     else:
         bits.append(_paint("never delivered", "dim", err=True))
     return "  ".join(bits)
@@ -672,7 +703,7 @@ def _cmd_audit(cwd: Path, args: list[str], override: Path | None = None) -> int:
     rows, usage, flags, shadowed, local = _audit_rows(cwd, cfg, all_repos)
     root_of = lambda e: cwd if e.path.resolve() in local else None
     if not rows:
-        print(_paint("no memory entries to audit", "dim"))
+        print(f"No memory entries to audit{_t.sep()}add one with claude-loadout memory add <text>")
         return 0
     if contexts:
         return _audit_context(cwd, cfg, [e for _, e in rows], contexts[0], usage, flags, as_json)
@@ -689,7 +720,7 @@ def _cmd_audit(cwd: Path, args: list[str], override: Path | None = None) -> int:
         return 0
     if not _interactive([]):
         for project, e in rows:
-            print(f"  {_paint(f'[{e.kind} · {project}]', 'dim')} {e.name} — "
+            print(f"  {_paint(f'[{e.kind}{_t.sep_plain()}{project}]', 'dim')} {e.name} — "
                   f"{_short_desc(e.description, 50)}")
             signals = _entry_signals(e, root_of(e), usage, flags, shadowed)
             if signals:
@@ -706,30 +737,31 @@ def _audit_interactive(cwd: Path, cfg, rows, usage, flags, shadowed, root_of) ->
         signals = _entry_signals(entry, root_of(entry), usage, flags, shadowed)
         labels.append(f"{_short_desc(entry.name, 34):<34} {_short_desc(entry.description, 44)}"
                       + (f"   {signals}" if signals else ""))
-    title = (_paint("claude-loadout — memory audit", "bold", err=True) + "\n"
-             + _paint("  unchecked entries are proposed for deletion", "dim", err=True))
+    title = (_paint("claude-loadout memory audit", "bold", err=True) + "\n"
+             + _paint("  Unchecked entries are proposed for deletion", "dim", err=True))
     keep = _checkbox_select(title, labels, hint=_AUDIT_HINT, headers=headers, allow_empty=True)
     if keep is None:
-        _warn("audit cancelled; nothing was changed")
+        _warn("Audit cancelled; nothing was changed")
         return 0
     doomed = [rows[i][1] for i in range(len(rows)) if i not in set(keep)]
     if not doomed:
-        print(_paint("nothing to delete", "dim"))
+        _say("skipped", "Nothing to delete")
         return 0
-    print(_paint(f"  about to delete {_plural(len(doomed), 'entry')}:", "bold"))
+    print(_t.note("warn", f"About to delete {_plural(len(doomed), 'entry')}"))
     for entry in doomed:
-        print(f"    {_paint('✗', 'red')} {entry.path}")
-    if not _ask("  type 'delete' to confirm: ").strip().lower().startswith("delete"):
-        _warn("nothing was deleted")
+        print(_t.cont(str(entry.path)))
+    if not _ask(_t.question(f"Type delete to delete {_plural(len(doomed), 'entry')} "
+                            "permanently: ")).strip().lower().startswith("delete"):
+        _warn("Nothing was deleted")
         return 0
     for entry in doomed:
         try:
             forget_entry(entry.path)               # takes its MEMORY.md line with it
         except OSError as exc:
-            _warn(f"could not delete {entry.path} ({exc})")
+            _warn(f"Could not delete {entry.path} ({exc})")
             continue
         clear_flag(cfg.config_root, cwd, entry.id)
-    print(f"  {_paint('deleted', 'green')} {_plural(len(doomed), 'entry')}")
+    _say("done", f"Deleted {_plural(len(doomed), 'entry')}")
     return 0
 
 def _audit_context(cwd: Path, cfg, entries, context: str, usage, flags, as_json: bool) -> int:
@@ -745,15 +777,16 @@ def _audit_context(cwd: Path, cfg, entries, context: str, usage, flags, as_json:
                            "admitted": v.admitted} for v in verdicts], indent=1))
         return 0
     print(_paint(f"  what a session on {context!r} would recall", "bold"))
-    print(_paint(f"  threshold {cfg.memory.threshold} · budget {cfg.memory.budget_tokens} tokens",
-                 "dim"))
+    print(_paint(f"  threshold {cfg.memory.threshold}{_t.sep_plain()}budget "
+                 f"{cfg.memory.budget_tokens} tokens", "dim"))
     print()
     cut_drawn = False
     for v in verdicts:
         if not v.admitted and not cut_drawn:
-            print(_paint("    ── below the line ──", "dim"))
+            rule = _t.box("horizontal") * 2
+            print(_paint(f"    {rule} below the line {rule}", "dim"))
             cut_drawn = True
-        mark = _paint("✓", "green") if v.admitted else _paint("·", "dim")
+        mark = _t.glyph("done") if v.admitted else _t.glyph("skipped")
         why = _paint("  " + ", ".join(v.reasons), "dim") if v.reasons else ""
         moved = "" if abs(v.score - v.base) < 1e-9 else _paint(f" (from {v.base:.3f})", "dim")
         print(f"    {mark} {v.score:.3f}{moved}  "
@@ -766,23 +799,26 @@ def _cmd_flag(cwd: Path, args: list[str], override: Path | None = None) -> int:
     clearing = "--clear" in args
     names = [a for a in args if not a.startswith("--")]
     if not names:
-        _warn("memory flag needs the name of an entry")
+        _fail("Missing the entry name", "memory flag needs the name of an entry",
+              "claude-loadout memory flag <name> --reason <why>")
         return 2
     cfg = load_config(cwd=cwd, config_root_override=override)
     match = next((e for e in read_store(cwd, cfg.config_root).entries
                   if e.name == names[0] or e.name.startswith(names[0])), None)
     if match is None:
-        _warn(f"no entry named {names[0]!r}")
+        _fail(f"No entry named {names[0]!r}", "no note in this repository's store has that name "
+              "or prefix", "claude-loadout recall")
         return 1
     if clearing:
         clear_flag(cfg.config_root, cwd, match.id)
-        print(f"{_paint('cleared', 'green')} {match.name}")
+        _say("done", "Cleared flag", match.name)
         return 0
     if not reasons:
-        _warn("flagging needs --reason; a flag without one cannot be judged later")
+        _fail("Missing --reason", "a flag without a reason cannot be judged later",
+              f"claude-loadout memory flag {match.name} --reason <why>")
         return 2
     set_flag(cfg.config_root, cwd, match.id, reasons[0])
-    print(f"{_paint('flagged', 'yellow')} {match.name} — {reasons[0]}")
+    _say("warn", "Flagged entry", f"{match.name} — {reasons[0]}")
     return 0
 
 def _cmd_decision(cwd: Path, args: list[str], override: Path | None = None) -> int:
@@ -793,40 +829,48 @@ def _cmd_decision(cwd: Path, args: list[str], override: Path | None = None) -> i
         rest, tag_args = _pop_flag(list(rest), "--tags")
         title = " ".join(rest).strip()
         if not title:
-            _warn("decision new needs a title")
+            _fail("Missing the title", "decision new needs a title",
+                  "claude-loadout decision new <title>")
             return 2
         tags = [t for arg in tag_args for t in arg.split(",") if t]
         path = write_decision(cfg.config_root, cwd, title, tags, cfg.memory.git_tracked)
-        print(f"{_paint('wrote', 'green')} {path}")
+        _say("done", "Wrote decision", str(path))
         _link_hint(cfg, cwd)
         return 0
     if action == "show":
         match = next((e for e in decisions if rest and e.name.startswith(rest[0])), None)
         if match is None:
-            _warn("decision show needs the id of an existing decision")
+            _fail("No matching decision", "decision show needs the id of an existing decision",
+                  "claude-loadout decision list")
             return 1
         print(strip_frontmatter(match.path.read_text(errors="ignore")).strip())
         return 0
     if action == "supersede":
         if len(rest) < 2:
-            _warn("decision supersede needs an id and the title of the new decision")
+            _fail("Missing an argument",
+                  "decision supersede needs an id and the title of the new decision",
+                  "claude-loadout decision supersede <id> <title>")
             return 2
         old = next((e for e in decisions if e.name.startswith(rest[0])), None)
         if old is None:
-            _warn(f"no decision matching {rest[0]!r}")
+            _fail(f"No decision matching {rest[0]!r}", "no decision id starts with that",
+                  "claude-loadout decision list")
             return 1
         path = write_decision(cfg.config_root, cwd, " ".join(rest[1:]), [], cfg.memory.git_tracked)
         if "/" in old.id:                           # `decision:<slug>/<id>`: a legacy corpus file
             supersede(old.path, path.stem)
         else:
             supersede_entry(old.path, path)
-        print(f"{_paint('wrote', 'green')} {path}\n{_paint('superseded', 'dim')} {old.name}")
+        _say("done", "Wrote decision", str(path))
+        _say("done", "Superseded", old.name)
         return 0
     if action != "list":
-        _warn(f"unknown decision command {action!r}; try new, list, show or supersede")
+        _fail(f"Unknown decision command {action!r}", "decision takes new, list, show or supersede",
+              "claude-loadout decision list")
         return 2
     if not decisions:
-        print(_paint("no decisions recorded for this repository", "dim"))
+        print(f"No decisions for this repository{_t.sep()}"
+              "add one with claude-loadout decision new <title>")
         return 0
     for e in decisions:
         state = _paint("active", "green") if e.status == "active" else _paint(e.status or "?", "dim")
@@ -838,20 +882,26 @@ def _cmd_recall(cwd: Path, args: list[str], config_root_override: Path | None = 
     try:
         limit = max(1, int(limits[0])) if limits else 3
     except ValueError:
-        _warn(f"--limit needs a number, not {limits[0]!r}")
+        _fail("Invalid --limit", f"--limit needs a number, not {limits[0]!r}",
+              "claude-loadout recall --limit 3 <query>")
         return 2
     query = " ".join(args).strip()
     cfg = load_config(cwd=cwd, config_root_override=config_root_override)
     store = read_store(cwd, cfg.config_root)
     if not store.entries:
-        print(_paint("no memory entries found for this repository", "dim"))
+        print(f"No memory entries for this repository{_t.sep()}"
+              "add one with claude-loadout memory add <text>")
         return 0
     if not query:                                   # no query: name what is there, cheaply
         for e in store.entries:
-            print(f"  {_paint(f'[{e.kind} · {e.scope}]', 'dim')} {e.name} — {_short_desc(e.description, 60)}")
+            # Session-facing (recall is how a session reads the store): fixed bytes, no ASCII swap.
+            print(f"  {_paint(f'[{e.kind} · {e.scope}]', 'dim')} {e.name} — "
+                  f"{_short_desc(e.description, 60)}")
         return 0
     for entry, score in search(store.entries, query, _build_embed(cfg.model_name), limit):
         state = anchor_state(entry, cwd)
+        # Session-facing: these lines land in model context, so their bytes stay as they were
+        # before the Term restyle, whatever the locale or SONDALAB_ASCII.
         mark = {"missing": "  ⚠ anchored code is gone",
                 "changed": "  ⚠ anchored code changed since this was written"}.get(state, "")
         print(_paint(f"{entry.name}  ({entry.kind} · {entry.scope} · {score:.3f})", "bold")
@@ -918,7 +968,7 @@ def _scoped_plan(passthrough: list[str], cwd: Path, config_root_override: Path |
 
 def _cmd_rules(cwd: Path, config_root_override: Path | None = None) -> int:
     if not _interactive([]):                        # no TTY -> nothing to elicit; fail-open
-        _warn("rule authoring needs an interactive terminal; nothing to do")
+        _warn("Rule authoring needs an interactive terminal; nothing to do")
         return 0
     cfg = load_config(cwd=cwd, config_root_override=config_root_override)
     items = claude_code_inventory(cfg.config_root, cwd, cfg.global_config_path)
@@ -927,7 +977,7 @@ def _cmd_rules(cwd: Path, config_root_override: Path | None = None) -> int:
     context, _src, _conf = _resolve_goal(cwd, [])   # goal string for conditional-rule evaluation
     pending = [i for i in items if not has_rule(i, rules)]
     if not pending:
-        print(f"{_paint('claude-loadout:', 'green')} every tool already has a rule")
+        _say("done", "All tools have a rule")
         return 0
     _rules_intro(compile_fn, "to every repo in this profile")
     save = lambda r: save_rule(cfg.config_root, r)   # profile-scoped: the deliberate global path
@@ -936,16 +986,17 @@ def _cmd_rules(cwd: Path, config_root_override: Path | None = None) -> int:
         if _elicit(item, context, compile_fn, save) != "undecided":
             authored += 1
     print()
-    print(f"{_paint('claude-loadout:', 'green')} authored {_plural(authored, 'rule')}")
+    _say("done", f"Authored {_plural(authored, 'rule')}")
     cache = _measure.load_costs(cfg.config_root)
     b = _savings.budget(items, cfg.token_costs, cache)
-    print(f"{_paint('claude-loadout:', 'green')} up to ~{_savings.human_tokens(b.eager)} tokens trimmed up "
-          "front per session (skill + plugin context) — run `claude-loadout --explain` for this session")
+    print(_t.cont(f"Up to ~{_savings.human_tokens(b.eager)} tokens trimmed up front per session "
+                  "(skill + plugin context)"))
     conns = _measure.connector_costs(cache, {i.id for i in items if i.kind == "mcp"})
     on_demand = b.deferred + sum(conns.values())
     if on_demand:
-        print(f"{_paint('claude-loadout:', 'green')} plus ~{_savings.human_tokens(on_demand)} tokens of "
-              "MCP/connector schemas that load on demand — avoided only if those tools are used")
+        print(_t.cont(f"Plus ~{_savings.human_tokens(on_demand)} tokens of MCP/connector schemas "
+                      "that load on demand, avoided only if those tools are used"))
+    _next("claude-loadout --explain")
     return 0
 
 def _discover_profiles(active_root: Path) -> list[Path]:
@@ -978,25 +1029,23 @@ def _resolve_config_root(environ, passthrough: list[str]) -> Path | None:
     if len(profiles) <= 1:
         return None
     print("", file=sys.stderr)
-    print(f"{_paint('claude-loadout:', 'yellow', err=True)} CLAUDE_CONFIG_DIR not set — "
-          "pick a Claude profile:", file=sys.stderr)
-    print("", file=sys.stderr)
+    print(_t.question("Which Claude profile? CLAUDE_CONFIG_DIR is not set. "
+                      "Type a number, then Enter"), file=sys.stderr)
     for idx, prof in enumerate(profiles, 1):
         has_cfg = (prof / "loadout" / "config.toml").is_file()
-        num = _paint(f"{idx})", "bold", err=True)
-        print(f"  {num} {prof}  {_paint(f'(claude-loadout config: {_yn(has_cfg, err=True)})', 'dim', err=True)}",
+        num = _paint(f"{idx:>{len(str(len(profiles)))}}", "bold", err=True)
+        print(f"  {num}  {prof}  {_paint(f'(claude-loadout config: {_yn(has_cfg, err=True)})', 'dim', err=True)}",
               file=sys.stderr)
-    print("", file=sys.stderr)
     while True:                                          # no default (spec B): Enter re-asks
         try:
-            raw = input(f"profile [1-{len(profiles)}]: ").strip()
+            raw = _prompt("> ").strip()
         except EOFError:                                 # Ctrl-D / exhausted stdin -> abort
             raise _Abort
         if not raw:
             continue
         if raw.isdigit() and 1 <= int(raw) <= len(profiles):
             return profiles[int(raw) - 1]
-        _warn(f"invalid choice {raw!r}")
+        _warn(f"Invalid choice {raw!r}")
 
 _CONFIG_HEADER = (
     "# generated by loadout init — local, gitignored; layers over your profile config\n"
@@ -1031,7 +1080,8 @@ def _parse_selection(raw: str, n: int) -> set[int] | None:
             return None
     return picks or None
 
-_CHECK_HINT = "↑/↓ move · space toggle · a all/none · enter confirm · q cancel"
+_CHECK_HINT = ((_MOVE, "move"), ("space", "toggle"), ("a", "all/none"), ("enter", "confirm"),
+               ("q", "cancel"), ("ctrl-c", "quit"))
 
 def _read_key():                                    # one keypress -> normalized token
     import termios, tty
@@ -1049,20 +1099,65 @@ def _read_key():                                    # one keypress -> normalized
 
 def _render_checklist(title, labels, selected, cursor, out, redraw_lines, hint=_CHECK_HINT,
                       headers=None):
-    if redraw_lines:                                # rewind over the previous frame
-        out.write(f"\033[{redraw_lines}F")
+    rewind = f"\033[{redraw_lines}F" if redraw_lines else ""   # back over the previous frame
     lines = [*title.split("\n"), ""]                # title may carry a legend line under it
     for i, lab in enumerate(labels):
         if headers and i in headers:                # group header before the first item of a kind
-            lines.append(_paint(f" {headers[i]}", "dim", err=True))
+            lines.append("   " + _t.micro(headers[i], err=True))
         box = "[x]" if selected[i] else "[ ]"
-        pointer = _paint(">", "cyan", "bold", err=True) if i == cursor else " "
-        lines.append(f" {pointer} {box} {lab}")
+        seam = _paint(_t.box("seam"), "prompt", err=True) if i == cursor else " "
+        lines.append(f"{seam}  {box} {lab}")
     lines.append("")
-    lines.append(_paint(f"  {hint}", "dim", err=True))
-    out.write("".join(f"\033[K{l}\n" for l in lines))
+    lines.append("  " + _hint_line(hint))
+    out.write(_t.SYNC_ON + rewind + "".join(f"\033[K{l}\n" for l in lines) + _t.SYNC_OFF)
     out.flush()
     return len(lines)
+
+def _hint_line(hint) -> str:
+    """The key-hint footer from (key, verb) pairs; a plain string is drawn dim as given."""
+    if isinstance(hint, str):
+        return _paint(hint, "dim", err=True)
+    return _t.hints((_t.arrows() if key is _MOVE else key, verb) for key, verb in hint)
+
+def _checkbox_plain(title, labels, preset=None, allow_empty=False, headers=None) -> list[int] | None:
+    """The numbered fallback for _checkbox_select: accessible mode, or no raw terminal.
+
+    No redraw and no key reader. The list prints with each state as a word; typed numbers or
+    ranges toggle, `all` flips every row, Enter alone confirms, `q` or EOF cancels. Same return
+    contract as _checkbox_select.
+    """
+    n = len(labels)
+    selected = list(preset) if preset is not None else [True] * n
+    width = len(str(n))
+    err = lambda s: print(s, file=sys.stderr)
+    while True:
+        err("")
+        err(title)
+        for i, lab in enumerate(labels):
+            if headers and i in headers:
+                err("  " + _t.micro(headers[i], err=True))
+            state = "[x] on " if selected[i] else "[ ] off"
+            err(f"  {i + 1:>{width}}  {state}  {lab}")
+        err(_t.question("Toggle which? Type numbers, ranges or all, then Enter. "
+                        "Enter alone confirms, q cancels"))
+        try:
+            raw = _prompt("> ").strip().lower()
+        except EOFError:
+            return None
+        if not raw:
+            chosen = [i for i, s in enumerate(selected) if s]
+            return chosen if allow_empty else (chosen or None)
+        if raw in ("q", "quit"):
+            return None
+        if raw == "all":
+            selected = [not all(selected)] * n
+            continue
+        picks = _parse_selection(raw, n)
+        if picks is None:
+            _warn(f"Not a valid choice: {raw!r}")
+            continue
+        for p in picks:
+            selected[p - 1] = not selected[p - 1]
 
 def _checkbox_select(title, labels, read_key=None, out=sys.stderr,
                      preset=None, allow_empty=False, hint=_CHECK_HINT,
@@ -1073,6 +1168,8 @@ def _checkbox_select(title, labels, read_key=None, out=sys.stderr,
     # empty pick (keep-nothing is a valid keep/drop outcome) instead of reading it as cancel.
     # headers: {item_index -> label} draws a dim group header before that item (render-only —
     # cursor and selection index over items, never headers).
+    if read_key is None and (_t.accessible() or not _can_raw()):
+        return _checkbox_plain(title, labels, preset, allow_empty, headers)
     read_key = read_key or _read_key
     n = len(labels)
     selected = list(preset) if preset is not None else [True] * n
@@ -1103,6 +1200,8 @@ def _checkbox_select(title, labels, read_key=None, out=sys.stderr,
 def _can_raw() -> bool:
     # True only when stdin is a real terminal we can put into raw mode; the picker
     # renders before its first keystroke, so probe up front to avoid a stray frame.
+    if _t.no_key_reader():                         # TERM=dumb or CI: plain numbered menu
+        return False
     try:
         import termios
         termios.tcgetattr(sys.stdin.fileno())
@@ -1111,64 +1210,68 @@ def _can_raw() -> bool:
         return False
 
 def _select_repos(eligible: list[Path], already: int,
-                  label: str = "claude-loadout init:", action: str = "seed") -> list[Path] | None:
+                  label: str = "claude-loadout init", action: str = "seed") -> list[Path] | None:
     import shutil
     rows = shutil.get_terminal_size((80, 24)).lines
-    if not _can_raw() or len(eligible) + 4 > rows:  # no raw tty / frame taller than the window
+    if _t.accessible() or not _can_raw() or len(eligible) + 4 > rows:   # plain numbered prompt
         return _select_repos_line(eligible, already, label, action)
     head = _plural(len(eligible), "project") + f" eligible to {action}"
     if already:
         head += f" ({already} already configured, skipped)"
-    title = f"{_paint(label, 'yellow', err=True)} {head}"
+    title = f"{_paint(label, 'bold', err=True)}{_t.sep(err=True)}{head}"
     picks = _checkbox_select(title, [str(p) for p in eligible])
     return [eligible[i] for i in picks] if picks else None
 
 def _select_repos_line(eligible: list[Path], already: int,
-                       label: str = "claude-loadout init:", action: str = "seed") -> list[Path] | None:
+                       label: str = "claude-loadout init", action: str = "seed") -> list[Path] | None:
     print("", file=sys.stderr)
     head = _plural(len(eligible), "project") + " eligible"
     if already:
         head += f" ({already} already configured, skipped)"
-    print(f"{_paint(label, 'yellow', err=True)} {head}", file=sys.stderr)
-    print("", file=sys.stderr)
+    print(f"{_paint(label, 'bold', err=True)}{_t.sep(err=True)}{head}", file=sys.stderr)
+    print(_t.question(f"Which projects to {action}? Type numbers, ranges or all, then Enter. "
+                      "Enter alone cancels"), file=sys.stderr)
+    width = len(str(len(eligible)))
     for idx, repo in enumerate(eligible, 1):
-        print(f"  {_paint(f'{idx})', 'bold', err=True)} {repo}", file=sys.stderr)
-    print("", file=sys.stderr)
+        print(f"  {_paint(f'{idx:>{width}}', 'bold', err=True)}  {repo}", file=sys.stderr)
     while True:
-        raw = _ask(f"select projects to {action} [1-{len(eligible)}, ranges, 'all'; enter to cancel]: ")
+        raw = _ask("> ")
         if not raw.strip():
             return None
         picks = _parse_selection(raw, len(eligible))
         if picks is not None:
             return [eligible[i - 1] for i in sorted(picks)]
-        _warn(f"invalid selection {raw!r}")
+        _warn(f"Invalid selection {raw!r}")
 
 def _pick_profile(profiles: list[Path], default: Path, repo: Path,
-                  label: str = "claude-loadout init:") -> Path:
+                  label: str = "claude-loadout init") -> Path:
     print("", file=sys.stderr)
-    print(f"{_paint(label, 'yellow', err=True)} profile for "
+    print(f"{_paint(label, 'bold', err=True)}{_t.sep(err=True)}"
           f"{_paint(str(repo), 'cyan', err=True)}", file=sys.stderr)
+    print(_t.question("Which profile? Type a number, then Enter. Enter alone takes the default"),
+          file=sys.stderr)
+    width = len(str(len(profiles)))
     for idx, prof in enumerate(profiles, 1):
         mark = _paint(" (default)", "dim", err=True) if prof == default else ""
-        print(f"  {_paint(f'{idx})', 'bold', err=True)} {prof}{mark}", file=sys.stderr)
+        print(f"  {_paint(f'{idx:>{width}}', 'bold', err=True)}  {prof}{mark}", file=sys.stderr)
     while True:
-        raw = _ask(f"profile [1-{len(profiles)}, enter for default]: ").strip()
+        raw = _ask("> ").strip()
         if not raw:
             return default
         if raw.isdigit() and 1 <= int(raw) <= len(profiles):
             return profiles[int(raw) - 1]
-        _warn(f"invalid choice {raw!r}")
+        _warn(f"Invalid choice {raw!r}")
 
-def _confirm_goal(repo: Path, use_cache: bool = True, label: str = "claude-loadout init:") -> str | None:
+def _confirm_goal(repo: Path, use_cache: bool = True, label: str = "claude-loadout init") -> str | None:
     # Returns the accepted/overridden goal, or None to skip this repo. update re-infers fresh.
     g = detect_goal(repo, use_cache=use_cache)
     print("", file=sys.stderr)
-    print(f"{_paint(label, 'yellow', err=True)} {_paint(str(repo), 'cyan', err=True)}", file=sys.stderr)
-    print(f"  {_paint('goal', 'dim', err=True)}   {g.goal}", file=sys.stderr)
-    print(f"         {_paint(f'from {g.source} · confidence {g.confidence:.2f}', 'dim', err=True)}",
-          file=sys.stderr)
-    raw = _ask(f"  {_paint('enter', 'bold', err=True)} accept · type to override · "
-               f"{_paint('s', 'bold', err=True)} skip repo: ").strip()
+    print(f"{_paint(label, 'bold', err=True)}{_t.sep(err=True)}"
+          f"{_paint(str(repo), 'cyan', err=True)}", file=sys.stderr)
+    print(_t.info("Goal", g.goal, err=True), file=sys.stderr)
+    print(_t.info("", f"from {g.source}{_t.sep_plain()}confidence {g.confidence:.2f}",
+                  err=True, dim=True), file=sys.stderr)
+    raw = _ask(_t.question("Use this goal? Enter accepts, type to override, s skips the repo: ")).strip()
     if raw.lower() == "s":
         return None
     return raw or g.goal
@@ -1229,7 +1332,7 @@ def _short_desc(text: str, width: int) -> str:
     return s if len(s) <= width else s[: width - 1].rstrip() + "…"
 
 def _review_keep_drop(repo: Path, prunable: list[Item], kept_ids: set[str],
-                      label: str = "claude-loadout init:"):
+                      label: str = "claude-loadout init"):
     # Let the user adjust the auto keep/drop before it is frozen. Rows are grouped by kind with a
     # dim one-line description; a legend spells out what a ticked/unticked box means. Returns the
     # kept-id set, or None to skip the repo. Falls back to the auto decision when a raw tty isn't
@@ -1244,7 +1347,7 @@ def _review_keep_drop(repo: Path, prunable: list[Item], kept_ids: set[str],
         if i.kind not in seen:
             headers[idx] = _KIND_HEADER.get(i.kind, i.kind); seen.add(i.kind)
     frame = len(ordered) + len(headers) + 5         # title + legend + blank + rows + headers + blank + hint
-    if not _can_raw() or frame > size.lines:
+    if not _t.accessible() and (not _can_raw() or frame > size.lines):
         return set(kept_ids)                        # can't draw the picker; accept auto silently
     id_w = min(max(len(_display_name(i)) for i in ordered), 30)
     desc_w = size.columns - id_w - 12               # room left after the box, name column, and gaps
@@ -1257,11 +1360,12 @@ def _review_keep_drop(repo: Path, prunable: list[Item], kept_ids: set[str],
         labels.append(f"{_display_name(i):<{id_w}}{tail}")
     preset = [i.id in kept_ids for i in ordered]
     count = _paint(f"({_plural(len(ordered), 'tool')})", "dim", err=True)
-    title = (f"{_paint(label, 'yellow', err=True)} keep/drop · "
+    title = (f"{_paint(label, 'bold', err=True)}{_t.sep(err=True)}keep/drop{_t.sep(err=True)}"
              f"{_paint(repo.name, 'cyan', err=True)}  {count}\n"
-             f"  {_paint('[x] keep — loads here', 'green', err=True)}   ·   "
+             f"  {_paint('[x] keep — loads here', 'green', err=True)}{_t.sep(err=True)}"
              f"{_paint('[ ] drop — pruned this session', 'dim', err=True)}")
-    hint = "↑/↓ move · space keep/drop · a all/none · enter save · q skip repo"
+    hint = ((_MOVE, "move"), ("space", "keep/drop"), ("a", "all/none"), ("enter", "save"),
+            ("q", "skip repo"), ("ctrl-c", "quit"))
     picks = _checkbox_select(title, labels, preset=preset, allow_empty=True, hint=hint, headers=headers)
     if picks is None:                               # q / Esc -> skip this repo entirely
         return None
@@ -1356,18 +1460,21 @@ def _cmd_init(cwd: Path, args: list[str], environ) -> int:
         already_list = [cwd] if configured(cwd) else []
     already = len(already_list)
     if not eligible:
-        print(f"{_paint('claude-loadout:', 'green')} nothing to seed"
-              f"{f' ({already} already configured — run `claude-loadout update` to refresh)' if already else ' (no project folders found)'}")
+        _say("skipped", "Nothing to seed",
+             f"{already} already configured" if already else "no project folders found")
         for repo in already_list:
-            print(f"  {_paint('–', 'dim')} {repo} {_paint('(already configured)', 'dim')}")
+            print(_t.cont(f"{repo} {_paint('(already configured)', 'dim')}"))
+        if already:
+            _next("claude-loadout update")
         return 0
     if not sys.stdin.isatty() and not yes:
-        _warn("init needs an interactive terminal (or pass --yes); nothing to do")
+        _warn("Init asks questions and stdin is not a terminal; nothing seeded")
+        _try("claude-loadout init --yes")
         return 0
     if root_args and not yes:
         selected = _select_repos(eligible, already)   # bulk picker; empty pick / Ctrl-D -> None
         if not selected:
-            _warn("no repos selected; nothing to do")
+            _warn("No repos selected; nothing to do")
             return 0
     else:                                            # single repo, or --yes: no picker
         selected = eligible
@@ -1414,44 +1521,42 @@ def _offer_memory(repos: list[Path], yes: bool) -> None:
     if not repos or yes or not _interactive([]):
         return
     print()
-    print(_paint("  memory recall", "bold"))
-    print(_paint("    Puts the notes relevant to a session into its context, inside a token "
-                 "budget.", "dim"))
-    print(_paint("    Off unless you say otherwise; reversible with "
-                 "`claude-loadout memory disable`.", "dim"))
-    if not _ask(f"    enable it for {_plural(len(repos), 'repo')}? [y/N] ").strip().lower()\
-            .startswith("y"):
-        print(_paint("    left off — turn it on later with `claude-loadout memory enable`", "dim"))
+    print(_paint("  Memory recall", "bold"))
+    print(_t.cont(_paint("Puts the notes relevant to a session into its context, inside a token "
+                         "budget", "dim")))
+    print(_t.cont(_paint("Off unless you say otherwise; reversible with "
+                         "`claude-loadout memory disable`", "dim")))
+    if not _confirm(f"Enable memory recall for {_plural(len(repos), 'repo')}?"):
+        _say("skipped", "Left memory recall off")
+        _next("claude-loadout memory enable")
         return
     for repo in repos:
         set_memory_enabled(repo, True)
-    print(f"    {_paint('enabled', 'green')} for {_plural(len(repos), 'repo')}")
+    _say("done", "Enabled memory recall", f"for {_plural(len(repos), 'repo')}")
 
 def _report_repo(repo: Path, kept: list[Item], dropped: list[Item]) -> None:
     # Verbose per-repo receipt: the count line, then the full kept/dropped id lists.
-    print(f"  {_paint('✓', 'green')} {repo}  "
-          f"{_paint(f'({len(kept)} kept / {len(dropped)} dropped)', 'dim')}")
-    for label, items, mark, color in (("kept", kept, "✓", "green"),
-                                       ("dropped", dropped, "✗", "red")):
+    print(_t.note("done", f"{repo}  {_paint(f'({len(kept)} kept / {len(dropped)} dropped)', 'dim')}"))
+    for items, mark in ((kept, "done"), (dropped, "skipped")):
         for i in items:
-            print(f"      {_paint(mark, color)} {i.id} {_paint(f'({i.kind})', 'dim')}")
+            print(_t.cont(f"  {_t.glyph(mark)} {i.id} {_paint(f'({i.kind})', 'dim')}"))
     if not kept and not dropped:
-        print(f"      {_paint('(no prunable tools)', 'dim')}")
+        print(_t.cont(f"  {_paint('(no prunable tools)', 'dim')}"))
 
 def _print_init_summary(seeded: int, skipped: list[tuple[Path, str]],
                         already_list: list[Path]) -> None:
     print()
-    tail = f"seeded {_plural(seeded, 'project')}"
+    parts = [f"Seeded {_plural(seeded, 'project')}"]
     if skipped:
-        tail += f", {_plural(len(skipped), 'project')} skipped"
+        parts.append(f"{_plural(len(skipped), 'project')} skipped")
     if already_list:
-        tail += f", {len(already_list)} already configured"
-    print(f"{_paint('claude-loadout:', 'green')} {tail}")
+        parts.append(f"{len(already_list)} already configured")
+    print(_t.sep().join(parts))
     notes = skipped + [(r, "already configured") for r in already_list]
     for repo, reason in notes:                       # name every project that didn't get seeded
-        print(f"  {_paint('–', 'dim')} {repo} {_paint(f'({reason})', 'dim')}")
+        print(_t.note("skipped", f"{repo} {_paint(f'({reason})', 'dim')}"))
 
-_UPDATE_LABEL = "claude-loadout update:"
+_UPDATE_LABEL = "claude-loadout update"
 
 def _is_seeded(repo: Path) -> bool:
     # init always writes config.toml under a local gitignore; its presence marks a repo that
@@ -1513,15 +1618,15 @@ def _update_repo(repo: Path, profile: Path, goal: str, yes: bool):
 def _print_update_summary(updated: int, skipped: list[tuple[Path, str]],
                           unseeded: list[Path]) -> None:
     print()
-    tail = f"updated {_plural(updated, 'project')}"
+    parts = [f"Updated {_plural(updated, 'project')}"]
     if skipped:
-        tail += f", {_plural(len(skipped), 'project')} skipped"
+        parts.append(f"{_plural(len(skipped), 'project')} skipped")
     if unseeded:
-        tail += f", {len(unseeded)} not seeded"
-    print(f"{_paint('claude-loadout:', 'green')} {tail}")
+        parts.append(f"{len(unseeded)} not seeded")
+    print(_t.sep().join(parts))
     notes = skipped + [(r, "not seeded — run init") for r in unseeded]
     for repo, reason in notes:
-        print(f"  {_paint('–', 'dim')} {repo} {_paint(f'({reason})', 'dim')}")
+        print(_t.note("skipped", f"{repo} {_paint(f'({reason})', 'dim')}"))
 
 def _cmd_update(cwd: Path, args: list[str], environ) -> int:
     yes = "--yes" in args
@@ -1536,21 +1641,25 @@ def _cmd_update(cwd: Path, args: list[str], environ) -> int:
         eligible = [r for r in projects if _is_seeded(r)]
         unseeded = [r for r in projects if not _is_seeded(r)]
         if not eligible:
-            print(f"{_paint('claude-loadout:', 'green')} nothing to update"
-                  f"{f' ({len(unseeded)} not seeded — run init)' if unseeded else ' (no seeded projects found)'}")
+            _say("skipped", "Nothing to update",
+                 f"{len(unseeded)} not seeded" if unseeded else "no seeded projects found")
+            if unseeded:
+                _next("claude-loadout init " + root_args[0])
             return 0
     else:                                            # single: the current repo
         if not _is_seeded(cwd):
-            _warn("this repo isn't claude-loadout-seeded; run `claude-loadout init` first")
+            _warn("This repo isn't claude-loadout-seeded; nothing updated")
+            _try("claude-loadout init")
             return 0
         eligible = [cwd]
     if not sys.stdin.isatty() and not yes:
-        _warn("update needs an interactive terminal (or pass --yes); nothing to do")
+        _warn("Update asks questions and stdin is not a terminal; nothing updated")
+        _try("claude-loadout update --yes")
         return 0
     if root_args and not yes:
         selected = _select_repos(eligible, 0, label=_UPDATE_LABEL, action="update")
         if not selected:
-            _warn("no repos selected; nothing to do")
+            _warn("No repos selected; nothing to do")
             return 0
     else:
         selected = eligible
@@ -1582,75 +1691,101 @@ def _cmd_update(cwd: Path, args: list[str], environ) -> int:
     _print_update_summary(updated, skipped, unseeded)
     return 0
 
+class _Tally:
+    """Doctor's check counts for the Summary line: ok, fixed, warn, failed."""
+    def __init__(self):
+        self.counts = {"done": 0, "fixed": 0, "warn": 0, "failed": 0}
+
+    def check(self, name: str, label: str, detail: str = "", *, dim: bool = False) -> None:
+        """Print one check as a step line and count it; skipped and pending are not counted."""
+        if name in self.counts:
+            self.counts[name] += 1
+        _say(name, label, detail, dim=dim)
+
+    def summary(self) -> str:
+        """`Summary  N ok · N fixed · N warn · N failed`, each count in its role, zero in dim."""
+        roles = (("done", "ok", "ok"), ("fixed", "fixed", "ok"),
+                 ("warn", "warn", "warn"), ("failed", "failed", "err"))
+        parts = [_paint(f"{self.counts[k]} {word}", role if self.counts[k] else "dim")
+                 for k, word, role in roles]
+        return "Summary  " + _t.sep().join(parts)
+
 def _profile_report(root: Path, cwd: Path, active: bool,
                     global_config_path: Path | None = None,
-                    token_costs: dict[str, int] | None = None) -> None:
+                    token_costs: dict[str, int] | None = None, tally: _Tally | None = None) -> None:
+    tally = tally or _Tally()
     tag = f" {_paint('(active)', 'green', 'bold')}" if active else ""
     print(f"  {_paint(str(root), 'cyan')}{tag}")
     user_cfg = root / "loadout" / "config.toml"
-    print(f"    user config:  {_yn(user_cfg.is_file())}")
+    if user_cfg.is_file():
+        tally.check("done", "User config", "present")
+    else:
+        tally.check("skipped", "User config", "absent", dim=True)
     try:                                            # what a launch here with this profile would use
         reminder = load_config(cwd=cwd, config_root_override=root).memory.stop_prompt
     except Exception:                               # fail-open: doctor must never crash
         reminder = None
     if reminder is False:
-        print(f"    reminder:     {_paint('off', 'yellow')} "
-              + _paint(f"— sessions are not asked to record decisions; set [memory] "
-                       f"stop_prompt = true in {user_cfg}", "dim"))
+        tally.check("warn", "Decision reminder", "off")
+        print(_t.cont(_paint(f"Sessions are not asked to record decisions; set [memory] "
+                             f"stop_prompt = true in {user_cfg}", "dim")))
     try:
         items = claude_code_inventory(root, cwd, global_config_path)
     except Exception as exc:                        # fail-open: doctor must never crash
-        print(f"    inventory:    {_paint(f'unavailable ({exc})', 'red')}")
+        tally.check("failed", "Inventory", f"unavailable ({exc})")
         return
     counts = {k: sum(1 for i in items if i.kind == k) for k in ("mcp", "plugin", "skill")}
-    print(f"    inventory:    {counts['mcp']} mcp, {_plural(counts['plugin'], 'plugin')}, "
-          f"{_plural(counts['skill'], 'skill')}")
+    tally.check("done", "Inventory", f"{counts['mcp']} mcp, {_plural(counts['plugin'], 'plugin')}, "
+                                     f"{_plural(counts['skill'], 'skill')}")
     cache = _measure.load_costs(root)
     b = _savings.budget(items, token_costs, cache)
-    print(f"    up front:     up to ~{_savings.human_tokens(b.eager)} tokens "
-          f"{_paint('(skill + plugin context; actual depends on the goal)', 'dim')}")
+    print(_t.info("Up front", f"up to ~{_savings.human_tokens(b.eager)} tokens ")
+          + _paint("(skill + plugin context; actual depends on the goal)", "dim"))
     conns = _measure.connector_costs(cache, {i.id for i in items if i.kind == "mcp"})
     on_demand = b.deferred + sum(conns.values())
     if on_demand:
         detail = f"{_plural(len(conns), 'connector')} + MCP schemas" if conns else "MCP schemas"
-        print(f"    on-demand:    ~{_savings.human_tokens(on_demand)} tokens, {detail} "
-              f"{_paint('(load lazily; avoided only if used)', 'dim')}")
+        print(_t.info("On-demand", f"~{_savings.human_tokens(on_demand)} tokens, {detail} ")
+              + _paint("(load lazily; avoided only if used)", "dim"))
 
-def _memory_report(cfg, cwd: Path) -> None:
+def _memory_report(cfg, cwd: Path, tally: _Tally | None = None) -> None:
+    tally = tally or _Tally()
     print(_paint("  memory", "bold"))
     if not cfg.memory.enabled:
-        print(_paint("    off — enable with [memory] enabled = true in loadout/config.toml", "dim"))
+        tally.check("skipped", "Memory recall", "off", dim=True)
+        print(_t.cont(_paint("Enable with [memory] enabled = true in loadout/config.toml", "dim")))
         print()
         return
     store = read_store(cwd, cfg.config_root)
     kinds = {k: sum(1 for e in store.entries if e.kind == k)
              for k in sorted({e.kind for e in store.entries})}
-    print(f"    entries:          {len(store.entries)}"
-          + (f" ({', '.join(f'{n} {k}' for k, n in kinds.items())})" if kinds else ""))
+    print(_t.info("Entries", f"{len(store.entries)}"
+                  + (f" ({', '.join(f'{n} {k}' for k, n in kinds.items())})" if kinds else "")))
     open_debt = [e for e in store.entries if e.kind == "debt" and e.status != "resolved"]
     if open_debt:
-        print(f"    open debt:        {_paint(str(len(open_debt)), 'yellow')} "
-              + _paint("— claude-loadout debt list", "dim"))
+        tally.check("warn", "Open debt", str(len(open_debt)))
+        _next("claude-loadout debt list")
     states = [anchor_state(e, cwd) for e in store.entries]
     if states.count("missing") or states.count("changed"):
-        print(f"    stale anchors:    {_paint(str(states.count('missing')), 'yellow')} gone, "
-              f"{states.count('changed')} changed")
+        tally.check("warn", "Stale anchors",
+                    f"{states.count('missing')} gone, {states.count('changed')} changed")
     for kept, dropped in store.shadowed:            # same slug in two stores: one is invisible
-        print(f"    {_paint('shadowed', 'yellow')}  {dropped.path} "
-              + _paint(f"(hidden by {kept.path})", "dim"))
+        tally.check("warn", "Shadowed entry", str(dropped.path))
+        print(_t.cont(_paint(f"hidden by {kept.path}", "dim")))
     usage = load_usage(cfg.config_root, cwd)
     if usage:
         earning = sum(1 for rec in usage.values() if rec.uses >= cfg.memory.promote_after)
-        print(f"    delivered:        {len(usage)} entries, {earning} promoted "
+        print(_t.info("Delivered", f"{len(usage)} entries, {earning} promoted ")
               + _paint(f"(>= {cfg.memory.promote_after} deliveries)", "dim"))
     pending = load_candidates(cfg.config_root, cwd)
     if pending:
-        print(f"    candidates:       {len(pending)} "
-              + _paint("— claude-loadout memory consolidate", "dim"))
+        tally.check("pending", "Candidates", f"{len(pending)} waiting for review")
+        _next("claude-loadout memory consolidate")
     print()
 
 def _cmd_doctor(cwd: Path) -> int:
     cfg = load_config(cwd=cwd)
+    tally = _Tally()
     print(_paint("claude-loadout doctor", "bold"))
     print()
     profiles = _discover_profiles(cfg.config_root)
@@ -1659,31 +1794,41 @@ def _cmd_doctor(cwd: Path) -> int:
     for root in profiles:
         active = root == cfg.config_root
         _profile_report(root, cwd, active,
-                        cfg.global_config_path if active else None, cfg.token_costs)
+                        cfg.global_config_path if active else None, cfg.token_costs, tally)
         print()
-    _memory_report(cfg, cwd)
+    _memory_report(cfg, cwd, tally)
     repo_cfg = cwd / ".loadout" / "config.toml"
     print(_paint("  environment", "bold"))
-    print(f"    repo config:      {_paint(str(repo_cfg), 'cyan')} ({_yn(repo_cfg.is_file())})")
+    if repo_cfg.is_file():
+        tally.check("done", "Repo config", str(repo_cfg))
+    else:
+        tally.check("skipped", "Repo config", f"{repo_cfg} (absent)", dim=True)
     if cfg.memory.git_tracked:                      # untracked notes already go where Claude Code reads
         root = repo_root(cwd)
         notes = root / "docs" / "memory"
         if is_linked(cfg.config_root, root):
-            state = _paint("Claude Code reads it", "green")
-        elif not notes.exists():                    # nothing unread yet; say where the next note goes
-            state = _paint("not created yet; new notes would go here, where Claude Code doesn't "
-                           "read them — claude-loadout memory link", "yellow")
+            tally.check("done", "Notes folder", f"{notes} (Claude Code reads it)")
         else:
-            state = _paint("Claude Code doesn't read it — claude-loadout memory link", "yellow")
-        print(f"    notes folder:     {notes} ({state})")
+            tally.check("warn", "Notes folder", str(notes))
+            if not notes.exists():                  # nothing unread yet; say where the next note goes
+                print(_t.cont(_paint("Not created yet; new notes would go here, where Claude "
+                                     "Code doesn't read them", "dim")))
+            else:
+                print(_t.cont(_paint("Claude Code doesn't read it", "dim")))
+            _next("claude-loadout memory link")
     resolved = resolve_model_source(cfg.model_name)
     embed = _build_embed(cfg.model_name)           # warns + falls back on failure
     model_state = ("keyword fallback" if embed is keyword_embed
                    else "bundled copy" if resolved == str(bundled_model_path()) else "external")
-    print(f"    embedding model:  {cfg.model_name} {_paint(f'({model_state})', 'dim')}")
-    rule_state = cfg.rule_model_path or _paint(
-        "not configured — rule authoring uses keep/drop/skip prompts", "dim")
-    print(f"    rule model:       {rule_state}")
+    tally.check("warn" if embed is keyword_embed else "done", "Embedding model",
+                f"{cfg.model_name} ({model_state})")
+    if cfg.rule_model_path:
+        tally.check("done", "Rule model", str(cfg.rule_model_path))
+    else:
+        tally.check("skipped", "Rule model", "not configured", dim=True)
+        print(_t.cont(_paint("Rule authoring uses keep/drop/skip prompts", "dim")))
+    print("\n" * _t.blank_before_summary(), end="")
+    print(tally.summary())
     print()
     print(_paint("  Next steps", "bold"))
     print("    1. Point your launch command at claude-loadout (short alias: cld),")
@@ -1707,7 +1852,7 @@ def _cmd_doctor(cwd: Path) -> int:
 def _cmd_measure(cwd: Path) -> int:
     cfg = load_config(cwd=cwd)
     print(_paint("claude-loadout measure", "bold"))
-    print(_paint("  connecting to each MCP server to tokenize its real tool set …", "dim"))
+    print(_paint("  Connects to each MCP server and tokenizes its real tool set", "dim"))
     print()
     try:
         servers = _measure.discover()
@@ -1715,36 +1860,34 @@ def _cmd_measure(cwd: Path) -> int:
         _warn(str(exc))
         return 0
     if not servers:
-        print("  no MCP servers found")
+        _say("skipped", "No MCP servers found")
         return 0
-    width = max(len(s.id) for s in servers)
-    n_total = len(servers)
-    live = sys.stdout.isatty()                          # transient progress only on a real terminal
-    results, total = [], 0
-    for i, s in enumerate(servers, 1):
-        if live:                                        # overwrite-in-place status while we connect
-            sys.stdout.write(f"\r  [{i}/{n_total}] connecting {s.id} …\033[K")
-            sys.stdout.flush()
-        r = _measure.measure_server(s)
-        results.append(r)
-        prefix = "\r\033[K" if live else ""             # clear the status line, then print the result
-        if r.tokens is None:
-            print(f"{prefix}  {s.id:<{width}}  {_paint('unmeasured', 'yellow')} {_paint(f'({r.reason})', 'dim')}")
-        else:
-            total += r.tokens
-            print(f"{prefix}  {s.id:<{width}}  "
-                  f"{_paint('~' + _savings.human_tokens(r.tokens) + ' tok', 'green')} "
-                  f"{_paint('(measured, ' + r.method + ')', 'dim')}")
+    results, total, start = [], 0, time.monotonic()
+    # Progress goes to stderr (spinner + bar after 300ms, or one running line with motion off);
+    # each server's result goes to stdout as it lands.
+    with _t.Waiting(f"Measuring {_plural(len(servers), 'MCP server')}{_t.ellipsis()}",
+                    total=len(servers)) as waiting:
+        for i, s in enumerate(servers, 1):
+            r = _measure.measure_server(s)
+            results.append(r)
+            if r.tokens is None:
+                waiting.emit(_t.step("warn", s.id, f"unmeasured ({r.reason})"))
+            else:
+                total += r.tokens
+                waiting.emit(_t.step("done", s.id, f"~{_savings.human_tokens(r.tokens)} tok "
+                                                   f"(measured, {r.method})"))
+            waiting.advance(i)
     _measure.save_costs(cfg.config_root, results)
     n = sum(1 for r in results if r.tokens is not None)
     print()
-    print(f"{_paint('claude-loadout:', 'green')} measured {_plural(n, 'server')}, "
-          f"~{_savings.human_tokens(total)} tokens total")
-    print(_paint(f"  cached to {_measure.costs_path(cfg.config_root)}", "dim"))
-    print(_paint("  these are a diagnostic view; a measured cost feeds savings only for MCP "
-                 "servers in your .claude.json/.mcp.json (matched by bare name).", "dim"))
-    print(_paint("  claude.ai connectors are shown here but can't be kept under strict mode; a "
-                 "plugin's own servers load exactly when the plugin is kept.", "dim"))
+    _say("done", f"Measured {_plural(n, 'server')}",
+         f"~{_savings.human_tokens(total)} tokens total{_t.sep_plain()}{_t.elapsed(start)}")
+    print(_t.cont(_paint(f"Cached to {_measure.costs_path(cfg.config_root)}", "dim")))
+    print(_t.cont(_paint("A diagnostic view; a measured cost feeds savings only for MCP "
+                         "servers in your .claude.json/.mcp.json (matched by bare name)", "dim")))
+    print(_t.cont(_paint("claude.ai connectors are shown here but can't be kept under strict "
+                         "mode; a plugin's own servers load exactly when the plugin is kept",
+                         "dim")))
     return 0
 
 def _loadout_version() -> str:
@@ -1790,13 +1933,13 @@ def _print_explain(scope: _Scope, plan) -> None:
     print()
     lbl = lambda s: _paint(f"  {s:<11}", "dim")
     print(f"{lbl('goal')}{scope.goal!r}   "
-          f"{_paint(f'({scope.source} · confidence {scope.confidence:.2f})', 'dim')}")
+          f"{_paint(f'({scope.source}{_t.sep_plain()}confidence {scope.confidence:.2f})', 'dim')}")
     print(f"{lbl('threshold')}{scope.threshold}")
     print()
     kept_prunable = [i for i in scope.kept if i.kind in _savings.PRUNABLE]
     print(_paint(f"  keeping ({len(kept_prunable)})", "bold"))
     for i in kept_prunable:
-        print(f"    {_paint('✓', 'green')} {i.id}")
+        print(f"    {_t.glyph('done')} {i.id}")
     if not kept_prunable:
         print(_paint("    (nothing)", "dim"))
     print()
@@ -1805,7 +1948,7 @@ def _print_explain(scope: _Scope, plan) -> None:
     width = max((len(i.id) for i, _ in dropped), default=0)
     for item, s in dropped:
         reason = f"{s:.3f}" if isinstance(s, float) else str(s)
-        print(f"    {_paint('✗', 'red')} {item.id:<{width}}  {_paint(reason, 'dim')}")
+        print(f"    {_t.glyph('skipped')} {item.id:<{width}}  {_paint(reason, 'dim')}")
     if not dropped:
         print(_paint("    (nothing)", "dim"))
     print()
@@ -1814,7 +1957,7 @@ def _print_explain(scope: _Scope, plan) -> None:
         print(_paint("  connectors dropped (all-or-nothing, strict mode)", "bold"))
         w = max(len(c) for c, _ in scope.connectors)
         for cid, tok in scope.connectors:
-            print(f"    {_paint('✗', 'red')} {cid:<{w}}  {_paint('~' + _savings.human_tokens(tok), 'dim')}")
+            print(f"    {_t.glyph('skipped')} {cid:<{w}}  {_paint('~' + _savings.human_tokens(tok), 'dim')}")
         print()
     if scope.memory is not None:
         m = scope.memory
@@ -1862,51 +2005,56 @@ def _print_explain(scope: _Scope, plan) -> None:
 def _savings_line(scope: _Scope) -> str:
     s = scope.savings
     on_demand = s.deferred + sum(t for _, t in scope.connectors)
-    core = f"scoped out {s.dropped} of {s.total} tools"
+    core = f"Scoped out {s.dropped} of {s.total} tools"
     if scope.connectors:
         core += f" + {len(scope.connectors)} connectors"
     parts = [core, f"~{_savings.human_tokens(s.eager)} trimmed up front"]
     if on_demand:                                   # MCP schemas load lazily — cost only if used
         parts.append(f"~{_savings.human_tokens(on_demand)} on-demand avoided")
-    return " · ".join(parts)
+    return _t.sep(err=True).join(parts)
+
+def _scoped(scope: _Scope) -> None:
+    """The scoping summary on stderr, as a done line, before claude takes the screen."""
+    print(_t.note("done", _savings_line(scope), err=True), file=sys.stderr)
 
 def _maybe_persist_edit(gate: _EditGate, selected_ids: set) -> None:
     # Offer to freeze the edited keep/drop as a repo seed so future launches respect it.
-    ans = _ask("  save these choices to this repo? [y/N] ").strip().lower()
+    ans = _ask(f"{_t.question('Save these choices to this repo?')} [y/N] ").strip().lower()
     if ans not in ("y", "yes"):
         return
     _seed_repo(gate.cwd, gate.cfg, gate.items, gate.pinned_ids | selected_ids, gate.goal)
-    _warn("saved — this repo is now seeded (`claude-loadout update` refreshes it)")
+    print(_t.note("done", "Saved; this repo is now seeded", err=True), file=sys.stderr)
+    _next("claude-loadout update", err=True)
 
 def _launch_gate(scope: _Scope, plan, gate: _EditGate, passthrough: list[str], no_gate: bool = False):
     # Interactive pre-launch review: read the summary, optionally edit keep/drop, then launch.
     # Returns the (possibly re-composed) (scope, plan) to run. Non-interactive -> pass through.
     if gate is None or not (_interactive(passthrough) and (scope.savings.dropped or scope.connectors)):
         return scope, plan
-    _warn(_savings_line(scope))
+    _scoped(scope)
     seeded = _is_seeded(gate.cwd)
     if not seeded:
-        _warn("this repo isn't seeded — run `claude-loadout init` to persist scoping for it")
+        _warn("This repo isn't seeded, so this scoping is not kept")
+        _next("claude-loadout init", err=True)
     if no_gate:                                     # opted out — launch immediately, no pause
         return scope, plan
     if seeded:                                      # settled config — brief readable pause, then launch
         time.sleep(_LAUNCH_PAUSE_S)
         return scope, plan
     while True:
-        choice = _ask("  [enter] launch · [e] edit keep/drop · [q] cancel? ").strip().lower()
+        dot = _t.sep(err=True)
+        choice = _ask(_t.question(f"Launch now? [enter] launch{dot}[e] edit keep/drop{dot}"
+                                  "[q] cancel ")).strip().lower()
         if choice == "q":
             raise KeyboardInterrupt                 # clean abort, exit 130
         if choice != "e":
             return scope, plan
         if not gate.editable:
-            _warn("nothing to edit — every kept tool is pinned by config")
-            return scope, plan
-        if not _can_raw():                          # no raw terminal -> can't draw the checkbox
-            _warn("can't draw the editor here; launching as scoped")
+            _warn("Nothing to edit — every kept tool is pinned by config")
             return scope, plan
         preset = [i.id in gate.kept_ids for i in gate.editable]
         labels = [f"{i.id}  {_paint('(' + i.kind + ')', 'dim', err=True)}" for i in gate.editable]
-        picks = _checkbox_select(_paint("keep/drop for this launch", "yellow", err=True),
+        picks = _checkbox_select(_paint("Keep/drop for this launch", "bold", err=True),
                                  labels, preset=preset, allow_empty=True)
         if picks is None:                           # q in the checkbox -> back to the gate prompt
             continue
@@ -1914,14 +2062,14 @@ def _launch_gate(scope: _Scope, plan, gate: _EditGate, passthrough: list[str], n
         _cleanup(plan.tmp_paths)                    # discard the superseded plan's temp files
         scope, plan = gate.replan(selected)
         _maybe_persist_edit(gate, selected)
-        _warn(_savings_line(scope))
+        _scoped(scope)
         return scope, plan
 
 def main(argv: list[str] | None = None) -> int:
     try:
         return _run(argv)
     except KeyboardInterrupt:                       # Ctrl-C at any prompt -> clean abort, no traceback
-        _warn("aborted")
+        _warn("Aborted")
         return 130
 
 def _run(argv: list[str] | None = None) -> int:
@@ -1962,7 +2110,9 @@ def _run(argv: list[str] | None = None) -> int:
             return _cmd_audit(repo_root(cwd), argv[2:], _resolve_config_root(os.environ, []))
         if sub == "flag":
             return _cmd_flag(repo_root(cwd), argv[2:], _resolve_config_root(os.environ, []))
-        _warn(f"unknown memory command {sub!r}; try enable, add, audit, flag or consolidate")
+        _fail(f"Unknown memory command {sub!r}",
+              "memory takes enable, disable, add, audit, flag, consolidate, scope or link",
+              "claude-loadout memory")
         return 2                                    # unreachable: _is_action already filtered
     if argv and argv[0] == "recall":                # T2 retrieval: no scoping, no launch
         return _cmd_recall(repo_root(cwd), argv[1:], _resolve_config_root(os.environ, []))
@@ -1981,7 +2131,7 @@ def _run(argv: list[str] | None = None) -> int:
     try:                                            # ask which profile when it is implicit
         override = _resolve_config_root(os.environ, [] if rules_cmd else passthrough)
     except _Abort:
-        _warn("no profile selected; nothing to do")
+        _warn("No profile selected; nothing to do")
         return 0
     if rules_cmd:
         return _cmd_rules(cwd, override)
@@ -1990,7 +2140,7 @@ def _run(argv: list[str] | None = None) -> int:
         result, plan, gate = _scoped_plan(passthrough, cwd, override, scope_skills,
                                           persist=not explain)   # --explain writes nothing
     except Exception as exc:
-        _warn(f"scoping failed ({exc}); launching full session")
+        _warn(f"Scoping failed ({exc}); launching full session")
         return subprocess.run(["claude", *passthrough], env=fallback_env).returncode
     if plan is None:
         return subprocess.run(["claude", *passthrough], env=fallback_env).returncode
