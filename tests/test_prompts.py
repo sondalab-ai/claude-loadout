@@ -4,6 +4,7 @@ Unrecognised input is never read as a choice: it re-asks, at most promptRetries 
 then fails with "no valid answer". End of input fails at once. An irreversible delete needs the
 exact name of what it deletes. Without a TTY, a command that would ask stops non-zero.
 """
+import sys
 from pathlib import Path
 
 import pytest
@@ -278,7 +279,7 @@ def test_launch_path_fix_names_loadout_debug(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(cli, "make_model2vec_embed", lambda name: cli.keyword_embed)
     assert cli.main(["-p", "hi there"]) == 1
     err = capsys.readouterr().err.splitlines()
-    assert err[-1] == "    Try: claude-loadout -p 'hi there' --loadout-debug"
+    assert err[-1] == "    Try: claude-loadout -p ... --loadout-debug"
 
 
 def test_loadout_debug_env_shows_the_traceback(tmp_path, monkeypatch, capsys):
@@ -293,3 +294,86 @@ def test_ctrl_c_is_not_an_unexpected_error(tmp_path, monkeypatch, capsys):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(cli, "_cmd_doctor", lambda cwd: (_ for _ in ()).throw(KeyboardInterrupt()))
     assert cli.main(["doctor"]) == 130
+
+
+def _launch_argv(tmp_path, monkeypatch):
+    """Record the argv of the `claude` launch; scoping runs with the keyword embedder."""
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(_root(tmp_path)))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "make_model2vec_embed", lambda name: cli.keyword_embed)
+    seen = {}
+    monkeypatch.setattr(cli.subprocess, "run",
+                        lambda argv, **k: (seen.setdefault("argv", argv), _RC(0))[1])
+    return seen
+
+
+@pytest.mark.parametrize("word", ["init", "doctor"])
+def test_debug_before_a_command_word_is_a_launch(tmp_path, monkeypatch, word):
+    # `cld --debug init` is claude's --debug with the prompt "init", not cld's init.
+    seen = _launch_argv(tmp_path, monkeypatch)
+    monkeypatch.setattr(cli, f"_cmd_{word}", lambda *a, **k: pytest.fail("not a subcommand"))
+    assert cli.main(["--debug", word, "-p"]) == 0
+    assert "--debug" in seen["argv"] and word in seen["argv"]
+
+
+def test_debug_after_a_subcommand_is_clds(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "_cmd_doctor", _boom)
+    assert cli.main(["doctor", "--debug"]) == 1
+    assert "Traceback" in capsys.readouterr().err
+
+
+def test_debug_inside_query_text_is_kept(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    seen = []
+    monkeypatch.setattr(cli, "_cmd_recall", lambda cwd, args, override: seen.append(args) or 0)
+    assert cli.main(["recall", "fix", "--debug", "flag"]) == 0
+    assert seen == [["fix", "--debug", "flag"]]
+
+
+def test_fix_line_never_echoes_prompt_text(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(_root(tmp_path)))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "_launch_gate", _boom)
+    monkeypatch.setattr(cli, "make_model2vec_embed", lambda name: cli.keyword_embed)
+    assert cli.main(["-p", "my secret prompt"]) == 1
+    err = capsys.readouterr().err
+    assert "secret" not in err
+    assert err.splitlines()[-1] == "    Try: claude-loadout -p ... --loadout-debug"
+
+
+def test_fix_line_for_a_subcommand_elides_free_text(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "_cmd_write_entry", _boom)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(_root(tmp_path)))
+    assert cli.main(["memory", "add", "--global", "private note"]) == 1
+    assert capsys.readouterr().err.splitlines()[-1] == \
+        "    Try: claude-loadout memory add --global ... --debug"
+
+
+def test_system_exit_passes_through_main(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "_cmd_doctor", lambda cwd: sys.exit(3))
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["doctor"])
+    assert exc.value.code == 3
+
+
+def test_broken_pipe_is_a_quiet_exit(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "_cmd_doctor", lambda cwd: (_ for _ in ()).throw(BrokenPipeError()))
+    assert cli.main(["doctor"]) == 141
+    assert capsys.readouterr().err == ""
+
+
+@pytest.mark.parametrize("cmd", ["init", "update"])
+def test_non_tty_with_yes_runs_and_exits_zero(tmp_path, monkeypatch, cmd):
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(_root(tmp_path)))
+    monkeypatch.setattr(cli, "make_model2vec_embed", lambda name: cli.keyword_embed)
+    repos = tmp_path / "repos"; r1 = _proj(repos, "proj1")
+    if cmd == "update":
+        (r1 / ".loadout").mkdir(); (r1 / ".loadout" / "config.toml").write_text("")
+    _fake_stdin(monkeypatch, tty=False)
+    monkeypatch.setattr("builtins.input", lambda *a: pytest.fail("no prompt with --yes"))
+    assert cli.main([cmd, str(repos), "--yes"]) == 0
+    assert (r1 / ".loadout" / "rules.toml").exists()

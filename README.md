@@ -158,10 +158,12 @@ glyphs. These environment variables change how it prints:
 | `SONDALAB_ACCESSIBLE=1`, `ACCESSIBLE` | Accessible mode: no motion, every arrow-key menu becomes a numbered list you answer by typing, and every state glyph carries its word. |
 | `LOADOUT_DEBUG=1` | Show the Python traceback of an unexpected error. |
 
-An unexpected error prints three lines (what failed, why, and the command to re-run) instead of a
-traceback. On a cld subcommand, add `--debug` to see the traceback (`cld doctor --debug`). On a
-launch, `--debug` belongs to `claude` and is passed through, so use `--loadout-debug` or
-`LOADOUT_DEBUG=1` there.
+An unexpected error prints three lines (what failed, why, and the command to re-run, with any
+prompt or note text elided as `...`) instead of a traceback. On a cld subcommand, add `--debug`
+after the command to see the traceback (`cld doctor --debug`). Anywhere else `--debug` is
+`claude`'s and is passed through: `cld --debug doctor` launches `claude --debug doctor`, and
+`cld recall fix --debug flag` searches for that text. Use `--loadout-debug` or `LOADOUT_DEBUG=1`
+on a launch.
 
 ## How much it saves
 

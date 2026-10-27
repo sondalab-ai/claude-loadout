@@ -2196,18 +2196,45 @@ def _is_subcommand(argv: list[str]) -> bool:
             or (head == "debt" and _is_action(argv, _DEBT_ACTIONS))
             or (head == "memory" and _is_action(argv, _MEMORY_ACTIONS)))
 
+def _command_words(argv: list[str]) -> int:
+    """How many leading words name the cld subcommand: 2 for memory/debt/decision with an action,
+    1 for any other subcommand, 0 on the launch path."""
+    if not _is_subcommand(argv):
+        return 0
+    return 2 if argv[0] in ("memory", "debt", "decision") and len(argv) > 1 else 1
+
 def _debug_switch(argv: list[str]) -> tuple[list[str], bool, str]:
     """Take cld's debug switch out of argv: (argv, on, the flag an error's fix line names).
 
-    `--loadout-debug` or LOADOUT_DEBUG work everywhere. A bare `--debug` is cld's only on a
-    subcommand: on the launch path it is claude's own flag and passes through untouched.
+    `--loadout-debug` or LOADOUT_DEBUG work everywhere. Whether argv is a subcommand is decided
+    on argv as typed, so `cld --debug init` stays a launch of `claude --debug init`. On a
+    subcommand a bare `--debug` is cld's only in a flag position: in the run of flags right
+    after the command words, or in the trailing run of flags. Elsewhere it is free text
+    (`cld recall fix --debug flag` keeps it in the query). On the launch path it is claude's.
     """
     on = bool(os.environ.get("LOADOUT_DEBUG")) or "--loadout-debug" in argv
     argv = [a for a in argv if a != "--loadout-debug"]
-    bare = [a for a in argv if a != "--debug"]
-    if _is_subcommand(bare):
-        return bare, on or len(bare) != len(argv), "--debug"
-    return argv, on, "--loadout-debug"
+    words = _command_words(argv)
+    if not words:
+        return argv, on, "--loadout-debug"
+    rest = argv[words:]
+    lead = next((i for i, a in enumerate(rest) if not a.startswith("-")), len(rest))
+    tail = next((i for i in range(len(rest), 0, -1) if not rest[i - 1].startswith("-")), 0)
+    tail = max(tail, lead)                          # all flags: the two runs are one
+    flagged = set(range(lead)) | set(range(tail, len(rest)))
+    kept = [a for i, a in enumerate(rest) if not (a == "--debug" and i in flagged)]
+    return argv[:words] + kept, on or len(kept) != len(rest), "--debug"
+
+def _rerun_command(argv: list[str], debug_flag: str) -> str:
+    """The fix line's command: cld's command words and flags, free text elided as `...`.
+
+    Prompt text and note text never reach the error block; `...` marks where they were.
+    """
+    words = _command_words(argv)
+    flags = [a for a in argv[words:] if a.startswith("-")]
+    elided = ["..."] if len(flags) < len(argv) - words else []
+    return shlex.join(["claude-loadout", *argv[:words], *flags]) + "".join(
+        f" {x}" for x in elided) + f" {debug_flag}"
 
 def main(argv: list[str] | None = None) -> int:
     _t.enable_vt()                                  # Windows: no VT means plain text throughout
@@ -2217,6 +2244,12 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:                       # Ctrl-C at any prompt -> clean abort, no traceback
         _warn("Aborted")
         return 130
+    except BrokenPipeError:                         # `cld ... | head`: the reader left; stop quietly
+        try:                                        # so the exit-time flush of stdout cannot fail too
+            os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        except (OSError, ValueError, AttributeError):
+            pass
+        return 141                                  # 128 + SIGPIPE, as a shell reports it
     except _slt.TermError as exc:                   # no valid answer, or a flag missing off a TTY
         print(_t.term_error(exc), file=sys.stderr)
         return 2
@@ -2225,7 +2258,7 @@ def main(argv: list[str] | None = None) -> int:
             traceback.print_exc()
             return 1
         _fail("Unexpected error in claude-loadout", f"{type(exc).__name__}: {exc}",
-              shlex.join(["claude-loadout", *argv, debug_flag]))
+              _rerun_command(argv, debug_flag))
         return 1
 
 def _run(argv: list[str] | None = None) -> int:
