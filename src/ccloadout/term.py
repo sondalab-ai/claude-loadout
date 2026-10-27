@@ -1,7 +1,9 @@
 """Terminal output on the Sondalab Term spec (docs/tui-patterns.md in sondalab-ui).
 
-Colour, glyphs, step lines, error blocks, prompts, menu hints and the waiting spinner. Every
-number and glyph comes from `sondalab_palette`; nothing here re-derives a token.
+Thin bindings over `sondalab_palette.term` (0.9): colour, glyphs, step and report lines, the
+error block, the summary, key hints and prose wrapping all come from the palette, called with
+cld's environment (LOADOUT_NO_COLOR folded into NO_COLOR, plain text when VT is unavailable).
+The waiting spinner stays here: the palette has no runner by design.
 """
 from __future__ import annotations
 
@@ -13,24 +15,46 @@ import time
 import sondalab_palette as sl
 from sondalab_palette import term as slt
 
-# `bold` and `dim` are text styles, not palette roles; `dim` stays SGR 2 (faint), the code
-# cld has always written, so a non-truecolor terminal sees the same bytes it did before.
-_STYLE_SGR = {"dim": "2", "bold": "1"}
+# `bold` is a text style, not a palette role. `dim` is the palette's `dim` role (bright black on
+# the ANSI floor), never SGR 2 faint.
+_BOLD = "\033[1m"
 # The colour names cli.py has always used, kept as aliases of the palette roles.
 _ALIAS = {"green": "ok", "red": "err", "yellow": "warn", "cyan": "accent"}
 SYNC_ON, SYNC_OFF = "\033[?2026h", "\033[?2026l"     # DEC 2026 synchronized output
 
+_vt = True                                           # False once enable_vt() fails: plain text
+
+
+def enable_vt() -> bool:
+    """Turn on VT processing for stdout and stderr (Windows); False means plain text from now on.
+
+    Both streams are tried. When either fails, every later call writes no escape sequences, no
+    motion and ASCII glyphs (TP Windows). A no-op returning True off Windows.
+    """
+    global _vt
+    out_ok = slt.enable_vt(sys.stdout)
+    err_ok = slt.enable_vt(sys.stderr)
+    _vt = out_ok and err_ok
+    return _vt
+
+
+def vt_ok() -> bool:
+    """Whether escape sequences may be written (enable_vt() has not failed)."""
+    return _vt
+
 
 def _env() -> dict:
-    """os.environ with cld's own LOADOUT_NO_COLOR folded into NO_COLOR."""
+    """os.environ with LOADOUT_NO_COLOR folded into NO_COLOR, and plain text forced without VT."""
     env = dict(os.environ)
     if env.get("LOADOUT_NO_COLOR") and not env.get("NO_COLOR"):
         env["NO_COLOR"] = "1"
+    if not _vt:
+        env.update(NO_COLOR="1", SONDALAB_ASCII="1", SONDALAB_REDUCED_MOTION="1")
     return env
 
 
 def color_mode(err: bool = False) -> str:
-    """'none', 'ansi16' or 'truecolor' for stdout (or stderr), by the spec's D7 order.
+    """'none', 'ansi16' or 'truecolor' for stdout (or stderr), by the spec's colour order.
 
     NO_COLOR, then FORCE_COLOR, then the stream's TTY state and TERM=dumb. cld opts in to
     truecolor, so COLORTERM=truecolor|24bit upgrades the roles to the brand hues. Read on every
@@ -40,37 +64,27 @@ def color_mode(err: bool = False) -> str:
     return slt.color_mode(_env(), isatty=stream.isatty(), truecolor=True)
 
 
-def truecolor_ok() -> bool:
-    """Whether COLORTERM allows truecolor, colour assumed on (cld opts in to truecolor)."""
-    return slt.color_mode(_env(), flag=True, truecolor=True) == "truecolor"
-
-
-def sgr(code: str, truecolor: bool = False) -> str:
-    """The SGR parameter for a style (`bold`, `dim`) or a role (or its legacy colour alias)."""
-    if code in _STYLE_SGR:
-        return _STYLE_SGR[code]
-    ansi, (r, g, b) = sl.ROLES[_ALIAS.get(code, code)]
-    return f"38;2;{r};{g};{b}" if truecolor else str(ansi)
-
-
 def paint(text: str, *codes: str, err: bool = False) -> str:
-    """Wrap `text` in the SGR for `codes` when colour is on for that stream; else return it."""
+    """`text` in a palette role (or its legacy alias), optionally `bold`, when colour is on.
+
+    The role goes through the palette's painter; at most one role is used. `bold` wraps the
+    result in SGR 1. With colour off for that stream, `text` comes back unchanged.
+    """
     mode = color_mode(err)
     if mode == "none" or not text:
         return text
-    return f"\033[{';'.join(sgr(c, mode == 'truecolor') for c in codes)}m{text}\033[0m"
+    roles = [_ALIAS.get(c, c) for c in codes if c != "bold"]
+    out = slt.paint(text, roles[0], mode) if roles else text
+    return f"{_BOLD}{out}\033[0m" if "bold" in codes else out
 
 
 def ascii_on() -> bool:
     """True when every glyph takes its ASCII form (non-UTF-8 locale, TERM=dumb, SONDALAB_ASCII=1)."""
-    return slt.ascii_mode(os.environ)
+    return slt.ascii_mode(_env())
 
 
 def accessible() -> bool:
-    """Accessible mode: SONDALAB_ACCESSIBLE=1 or ACCESSIBLE set. Plain prompts, no redraw.
-
-    The "=1" versus "set" rule is the palette's (term.accessible, palette 0.7).
-    """
+    """Accessible mode: SONDALAB_ACCESSIBLE=1 or ACCESSIBLE set. Plain prompts, no redraw."""
     return slt.accessible(os.environ)
 
 
@@ -78,31 +92,37 @@ def header(name: str, version: str, description: str, *, compact: bool = False,
            machine: bool = False) -> str:
     """The Sondalab header for stdout, or "" when nothing should print.
 
-    "" for machine output (--json), accessible mode and a stdout that is not a TTY, so piped and
-    captured output stays byte-identical. Otherwise the palette's header with cld's env
-    (LOADOUT_NO_COLOR folded in), which still falls back to the lockup on TERM=dumb, in ASCII
-    mode or on a terminal too narrow for the mark.
+    The palette returns "" for machine output, accessible mode and a stdout that is not a TTY,
+    and the lockup on TERM=dumb, in ASCII mode or on a terminal too narrow for the mark.
     """
-    if machine or accessible() or not sys.stdout.isatty():
-        return ""
-    return slt.header(name, version, description, compact=compact, env=_env(), isatty=True)
+    return slt.header(name, version, description, compact=compact, machine=machine, env=_env())
+
+
+def lockup(name: str, version: str) -> str:
+    """The one-line `sonda/lab <name> <version>` for --version, slash painted for stdout."""
+    return slt.lockup(name, version, color_mode())
 
 
 def no_key_reader() -> bool:
-    """TERM=dumb or CI set: no raw-mode key reader, so menus take the numbered form."""
-    return (any(os.environ.get(n) == "dumb" for n in sl.ENV["term"])
+    """TERM=dumb, CI set or no VT: no raw-mode key reader, so menus take the numbered form."""
+    return (not _vt or any(os.environ.get(n) == "dumb" for n in sl.ENV["term"])
             or slt.switch_on("ci", os.environ))
 
 
 def motion_on() -> bool:
     """Whether the spinner and progress bar may draw on stderr."""
-    return slt.motion_enabled(os.environ, isatty=sys.stderr.isatty())
+    return slt.motion_enabled(_env(), isatty=sys.stderr.isatty())
 
 
 def glyph(name: str, err: bool = False) -> str:
     """A GLYPHS entry in its Unicode or ASCII form, painted with its role."""
     uni, asc, role = sl.GLYPHS[name]
     return paint(asc if ascii_on() else uni, role, err=err)
+
+
+def mark(name: str, word: str, err: bool = False) -> str:
+    """A state glyph; in accessible mode followed by its word, so state is never glyph-only."""
+    return f"{glyph(name, err)} {word}" if accessible() else glyph(name, err)
 
 
 def box(name: str) -> str:
@@ -122,18 +142,11 @@ def ellipsis() -> str:
 
 
 def step(name: str, label: str, detail: str = "", *, err: bool = False, dim: bool = False) -> str:
-    """One step-list line: indent, painted glyph, label padded to labelWidth, then the detail.
+    """One step-list line from the palette's step_line(); with `dim`, the detail in dim.
 
-    Layout comes from step_line() on plain text, then only the glyph (and, with `dim`, the
-    detail) is painted, so escape bytes never count toward the label width.
+    The detail is painted after layout, so escape bytes never count toward the label width.
     """
-    plain = slt.step_line(name, label, detail, ascii=ascii_on())
-    at = sl.LAYOUT["indent"]
-    if name in sl.GLYPHS:
-        mark = glyph(name, err)
-    else:                                            # a spinner frame
-        mark = paint(plain[at], sl.SPINNER["role"], err=err)
-    line = plain[:at] + mark + plain[at + 1:]
+    line = slt.step_line(name, label, detail, ascii=ascii_on(), mode=color_mode(err))
     if dim and detail:
         line = line[: len(line) - len(detail)] + paint(detail, "dim", err=err)
     return line
@@ -149,24 +162,42 @@ def cont(text: str) -> str:
     return " " * (sl.LAYOUT["indent"] + 2) + text
 
 
-def info(label: str, detail: str = "", *, err: bool = False, dim: bool = False) -> str:
-    """A step-grid row with no glyph: a fact, not a check, aligned with the step labels."""
-    plain = slt.step_line("pending", label, detail, ascii=ascii_on())   # the palette's label cut
-    at = sl.LAYOUT["indent"]
-    line = plain[:at] + " " + plain[at + 1:]          # blank the glyph cell: a fact, not a check
-    if dim and detail:
-        line = line[: len(line) - len(detail)] + paint(detail, "dim", err=err)
+def kv(key: str, value: str = "", *, err: bool = False, dim: bool = False) -> str:
+    """A report key-value line (palette kv_line): a fact, no glyph; with `dim`, the value dim."""
+    line = slt.kv_line(key, value)
+    if dim and value:
+        line = line[: len(line) - len(value)] + paint(value, "dim", err=err)
     return line
 
 
-def error_block(what: str, why: str = "", fix: str = "") -> list[str]:
-    """The three-line error, for stderr: `failed` + what, why in dim, `Try:` + the fix."""
-    lines = [note("failed", what, err=True)]
-    if why:
-        lines.append(cont(paint(why, "dim", err=True)))
-    if fix:
-        lines.append(cont(f"{paint('Try:', 'prompt', err=True)} {fix}"))
-    return lines
+def heading(text: str, err: bool = False) -> str:
+    """A section heading (and a table header): the micro label, dim uppercase, column 0."""
+    return slt.heading(text, mode=color_mode(err))
+
+
+def summary(ok: int, fixed: int, warn: int, failed: int) -> str:
+    """The Summary line for stdout: four counts, each in its role, zero in dim."""
+    return slt.summary(ok, fixed, warn, failed, mode=color_mode(), ascii=ascii_on())
+
+
+def error_block(what: str, why: str = "", fix: str = "") -> str:
+    """The three-line error for stderr: `failed` + what, why in dim (wrapped), `Try:` + fix."""
+    return slt.error_block(what, why, fix, env=_env(), ascii=ascii_on(), mode=color_mode(True))
+
+
+def term_error(exc: slt.TermError) -> str:
+    """A palette TermError (MissingFlag, NoValidAnswer) as the error block for stderr."""
+    return exc.block(env=_env(), ascii=ascii_on(), mode=color_mode(True))
+
+
+def next_line(command: str, *, err: bool = False) -> str:
+    """`Next:` in dim, then the follow-up command, on a continuation line."""
+    return slt.next_line(command, mode=color_mode(err))
+
+
+def warn(msg: str) -> None:
+    """A warning on stderr: the `warn` glyph and one sentence; the caller carries on."""
+    print(note("warn", msg, err=True), file=sys.stderr)
 
 
 def question(text: str) -> str:
@@ -175,20 +206,31 @@ def question(text: str) -> str:
 
 
 def hints(pairs) -> str:
-    """The key-hint footer: keys in accent, verbs in dim, pairs joined by the separator."""
-    return sep(err=True).join(f"{paint(k, 'accent', err=True)} {paint(v, 'dim', err=True)}"
-                              for k, v in pairs)
+    """The key-hint footer for stderr (palette key_hints): keys accent, verbs dim."""
+    return slt.key_hints(pairs, ascii=ascii_on(), mode=color_mode(True))
 
 
 def arrows() -> str:
     """The movement keys for a hint: `↑↓`, or `up/dn` in ASCII."""
-    up, down = sl.KEYS["up"], sl.KEYS["down"]
-    return f"{up[1]}/{down[1]}" if ascii_on() else f"{up[0]}{down[0]}"
+    return slt.arrows(ascii=ascii_on())
 
 
-def micro(text: str, err: bool = False) -> str:
-    """A table or group header: dim uppercase (the micro label)."""
-    return paint(text.upper(), "dim", err=err)
+def width() -> int:
+    """The prose width: the terminal's, capped at LAYOUT maxWidth (COLUMNS honoured)."""
+    return slt.width(_env())
+
+
+def prose(text: str, indent: int = 4, *, dim: bool = False, err: bool = False) -> str:
+    """`text` wrapped at width() from column `indent`; with `dim`, each line painted after wrap."""
+    lines = slt.wrap(text, _env(), indent=indent).split("\n")
+    if dim:
+        lines = [ln[:indent] + paint(ln[indent:], "dim", err=err) for ln in lines]
+    return "\n".join(lines)
+
+
+def sync(frame: str) -> str:
+    """`frame` wrapped in synchronized output (DEC 2026); bare when VT is unavailable."""
+    return SYNC_ON + frame + SYNC_OFF if _vt else frame
 
 
 class Waiting:
@@ -197,12 +239,13 @@ class Waiting:
     With motion on, the glyph column cycles the burst spinner every intervalMs and, when
     `total` is given, a bar is drawn on the continuation line. With motion off, a step that
     outlives delayMs prints its running line once with the `active` glyph. `emit()` writes a
-    result line to stdout above the live lines. The caller prints the final step line after
-    the `with` block; nothing animated is left on screen.
+    result line above the live lines. `shown` says whether anything was drawn, so the caller
+    knows to print the final step line after the `with` block; nothing animated stays on screen.
     """
 
     def __init__(self, label: str, total: int | None = None):
         self.label, self.total, self.done = label, total, 0
+        self.shown = False
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._drawn = 0                               # live lines currently on stderr
@@ -226,12 +269,12 @@ class Waiting:
         with self._lock:
             self.done = done
 
-    def emit(self, line: str) -> None:
-        """Print a result line on stdout, keeping the live lines below it."""
+    def emit(self, line: str, *, err: bool = False) -> None:
+        """Print a result line (stdout, or stderr with `err`), keeping the live lines below it."""
         with self._lock:
             drawn = self._drawn
             self._clear()
-            print(line, flush=True)
+            print(line, file=sys.stderr if err else sys.stdout, flush=True)
             if drawn:
                 self._draw()
 
@@ -241,6 +284,7 @@ class Waiting:
         if not self._motion:
             with self._lock:
                 print(step("active", self.label, err=True), file=sys.stderr, flush=True)
+                self.shown = True
             return
         while not self._stop.is_set():
             with self._lock:
@@ -254,10 +298,10 @@ class Waiting:
         if self.total:
             lines.append(_bar_line(self.done, self.total))
         rewind = f"\033[{self._drawn}F" if self._drawn else ""
-        sys.stderr.write(SYNC_ON + rewind + "".join(f"\r\033[K{ln}\n" for ln in lines)
-                         + SYNC_OFF)
+        sys.stderr.write(sync(rewind + "".join(f"\r\033[K{ln}\n" for ln in lines)))
         sys.stderr.flush()
         self._drawn = len(lines)
+        self.shown = True
 
     def _clear(self) -> None:
         if self._drawn:

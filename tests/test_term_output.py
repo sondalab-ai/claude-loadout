@@ -262,7 +262,7 @@ def test_menu_marks_the_cursor_row_with_the_seam():
 def test_menu_hint_paints_keys_accent_and_verbs_dim(monkeypatch):
     monkeypatch.setenv("FORCE_COLOR", "1")
     footer = cli._hint_line(((cli._MOVE, "move"),))
-    assert footer.startswith("\033[36m↑↓\033[0m \033[2mmove\033[0m")
+    assert footer.startswith("\033[36m↑↓\033[0m \033[90mmove\033[0m")
 
 
 def test_accessible_mode_uses_the_numbered_fallback(monkeypatch, capsys):

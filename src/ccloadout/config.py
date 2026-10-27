@@ -1,17 +1,16 @@
 from __future__ import annotations
-import os, sys, tomllib
+import os, tomllib
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Mapping
 from ccloadout.savings import DEFAULT_TOKEN_COSTS
+from ccloadout.term import warn as _warn
 
 DEFAULT_THRESHOLD = 0.24   # potion-base-8M; re-centered from 0.20 when plugin items gained real
                            # manifest descriptions (richer text shifts scores up) — holds the prior
                            # keep-rate constant rather than pruning less. See inventory._plugin_description.
 DEFAULT_MODEL = "minishlab/potion-base-8M"
 
-def _warn(msg: str) -> None:                       # local, avoids importing cli (cycle)
-    print(f"claude-loadout: {msg}", file=sys.stderr)
 
 @dataclass(frozen=True)
 class MemoryConfig:
@@ -54,7 +53,7 @@ def _read_toml(path: Path) -> dict:
     except OSError:                                 # absent file is the normal case
         return {}
     except tomllib.TOMLDecodeError as exc:         # spec §7: parse error -> keep all + warn
-        _warn(f"config parse error in {path} ({exc}); using defaults")
+        _warn(f"Config parse error in {path} ({exc}); using defaults")
         return {}
 
 def _resolve_paths(environ: Mapping[str, str]) -> tuple[Path, Path]:

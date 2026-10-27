@@ -34,22 +34,17 @@ class _Abort(Exception):
 # Output follows the Sondalab Term spec through ccloadout.term (colour by color_mode + ROLES,
 # glyphs, step lines, error blocks, prompts). _paint/_sgr keep their names for every caller.
 from ccloadout import term as _t
+from sondalab_palette import term as _slt
 _paint = _t.paint
-
-def _sgr(code: str) -> str:
-    """The SGR for a style or role, upgraded to truecolor when COLORTERM allows it (cld opts in)."""
-    return _t.sgr(code, _t.truecolor_ok())
 
 def _yn(flag: bool, *, err: bool = False) -> str:
     return _paint("present", "green", err=err) if flag else _paint("absent", "dim", err=err)
 
-def _warn(msg: str) -> None:
-    """A warning on stderr: the `warn` glyph and one sentence; the command carries on."""
-    print(_t.note("warn", msg, err=True), file=sys.stderr)
+_warn = _t.warn
 
 def _fail(what: str, why: str = "", fix: str = "") -> None:
     """The three-line error on stderr (what, why, `Try:` fix); the caller returns non-zero."""
-    print("\n".join(_t.error_block(what, why, fix)), file=sys.stderr)
+    print(_t.error_block(what, why, fix), file=sys.stderr)
 
 def _say(name: str, label: str, detail: str = "", *, dim: bool = False) -> None:
     """One step line on stdout: a result, with the glyph naming its outcome."""
@@ -57,7 +52,7 @@ def _say(name: str, label: str, detail: str = "", *, dim: bool = False) -> None:
 
 def _next(command: str, *, err: bool = False) -> None:
     """A `Next:` continuation line naming the follow-up command."""
-    print(_t.cont(f"{_paint('Next:', 'dim', err=err)} {command}"), file=sys.stderr if err else sys.stdout)
+    print(_t.next_line(command, err=err), file=sys.stderr if err else sys.stdout)
 
 def _try(command: str) -> None:
     """A `Try:` continuation line on stderr, under a warning that has a fix."""
@@ -613,7 +608,7 @@ def _print_memory_status(cwd: Path, cfg) -> int:
     steps = _memory_next_steps(state, on)
     if steps:
         print()
-        print("  " + _t.micro("next"))
+        print("  " + _t.heading("next"))
         width = max(len(cmd) for cmd, _ in steps)
         for command, why in steps:
             print(f"    {_paint(command.ljust(width), 'cyan')}  {_paint(why, 'dim')}")
@@ -1103,13 +1098,13 @@ def _render_checklist(title, labels, selected, cursor, out, redraw_lines, hint=_
     lines = [*title.split("\n"), ""]                # title may carry a legend line under it
     for i, lab in enumerate(labels):
         if headers and i in headers:                # group header before the first item of a kind
-            lines.append("   " + _t.micro(headers[i], err=True))
+            lines.append("   " + _t.heading(headers[i], err=True))
         box = "[x]" if selected[i] else "[ ]"
         seam = _paint(_t.box("seam"), "prompt", err=True) if i == cursor else " "
         lines.append(f"{seam}  {box} {lab}")
     lines.append("")
     lines.append("  " + _hint_line(hint))
-    out.write(_t.SYNC_ON + rewind + "".join(f"\033[K{l}\n" for l in lines) + _t.SYNC_OFF)
+    out.write(_t.sync(rewind + "".join(f"\033[K{l}\n" for l in lines)))
     out.flush()
     return len(lines)
 
@@ -1135,7 +1130,7 @@ def _checkbox_plain(title, labels, preset=None, allow_empty=False, headers=None)
         err(title)
         for i, lab in enumerate(labels):
             if headers and i in headers:
-                err("  " + _t.micro(headers[i], err=True))
+                err("  " + _t.heading(headers[i], err=True))
             state = "[x] on " if selected[i] else "[ ] off"
             err(f"  {i + 1:>{width}}  {state}  {lab}")
         err(_t.question("Toggle which? Type numbers, ranges or all, then Enter. "
@@ -1268,8 +1263,8 @@ def _confirm_goal(repo: Path, use_cache: bool = True, label: str = "claude-loado
     print("", file=sys.stderr)
     print(f"{_paint(label, 'bold', err=True)}{_t.sep(err=True)}"
           f"{_paint(str(repo), 'cyan', err=True)}", file=sys.stderr)
-    print(_t.info("Goal", g.goal, err=True), file=sys.stderr)
-    print(_t.info("", f"from {g.source}{_t.sep_plain()}confidence {g.confidence:.2f}",
+    print(_t.kv("Goal", g.goal, err=True), file=sys.stderr)
+    print(_t.kv("", f"from {g.source}{_t.sep_plain()}confidence {g.confidence:.2f}",
                   err=True, dim=True), file=sys.stderr)
     raw = _ask(_t.question("Use this goal? Enter accepts, type to override, s skips the repo: ")).strip()
     if raw.lower() == "s":
@@ -1704,11 +1699,8 @@ class _Tally:
 
     def summary(self) -> str:
         """`Summary  N ok · N fixed · N warn · N failed`, each count in its role, zero in dim."""
-        roles = (("done", "ok", "ok"), ("fixed", "fixed", "ok"),
-                 ("warn", "warn", "warn"), ("failed", "failed", "err"))
-        parts = [_paint(f"{self.counts[k]} {word}", role if self.counts[k] else "dim")
-                 for k, word, role in roles]
-        return "Summary  " + _t.sep().join(parts)
+        c = self.counts
+        return _t.summary(c["done"], c["fixed"], c["warn"], c["failed"])
 
 def _profile_report(root: Path, cwd: Path, active: bool,
                     global_config_path: Path | None = None,
@@ -1739,13 +1731,13 @@ def _profile_report(root: Path, cwd: Path, active: bool,
                                      f"{_plural(counts['skill'], 'skill')}")
     cache = _measure.load_costs(root)
     b = _savings.budget(items, token_costs, cache)
-    print(_t.info("Up front", f"up to ~{_savings.human_tokens(b.eager)} tokens ")
+    print(_t.kv("Up front", f"up to ~{_savings.human_tokens(b.eager)} tokens ")
           + _paint("(skill + plugin context; actual depends on the goal)", "dim"))
     conns = _measure.connector_costs(cache, {i.id for i in items if i.kind == "mcp"})
     on_demand = b.deferred + sum(conns.values())
     if on_demand:
         detail = f"{_plural(len(conns), 'connector')} + MCP schemas" if conns else "MCP schemas"
-        print(_t.info("On-demand", f"~{_savings.human_tokens(on_demand)} tokens, {detail} ")
+        print(_t.kv("On-demand", f"~{_savings.human_tokens(on_demand)} tokens, {detail} ")
               + _paint("(load lazily; avoided only if used)", "dim"))
 
 def _memory_report(cfg, cwd: Path, tally: _Tally | None = None) -> None:
@@ -1759,7 +1751,7 @@ def _memory_report(cfg, cwd: Path, tally: _Tally | None = None) -> None:
     store = read_store(cwd, cfg.config_root)
     kinds = {k: sum(1 for e in store.entries if e.kind == k)
              for k in sorted({e.kind for e in store.entries})}
-    print(_t.info("Entries", f"{len(store.entries)}"
+    print(_t.kv("Entries", f"{len(store.entries)}"
                   + (f" ({', '.join(f'{n} {k}' for k, n in kinds.items())})" if kinds else "")))
     open_debt = [e for e in store.entries if e.kind == "debt" and e.status != "resolved"]
     if open_debt:
@@ -1775,7 +1767,7 @@ def _memory_report(cfg, cwd: Path, tally: _Tally | None = None) -> None:
     usage = load_usage(cfg.config_root, cwd)
     if usage:
         earning = sum(1 for rec in usage.values() if rec.uses >= cfg.memory.promote_after)
-        print(_t.info("Delivered", f"{len(usage)} entries, {earning} promoted ")
+        print(_t.kv("Delivered", f"{len(usage)} entries, {earning} promoted ")
               + _paint(f"(>= {cfg.memory.promote_after} deliveries)", "dim"))
     pending = load_candidates(cfg.config_root, cwd)
     if pending:
@@ -2076,6 +2068,7 @@ def _launch_gate(scope: _Scope, plan, gate: _EditGate, passthrough: list[str], n
         return scope, plan
 
 def main(argv: list[str] | None = None) -> int:
+    _t.enable_vt()                                  # Windows: no VT means plain text throughout
     try:
         return _run(argv)
     except KeyboardInterrupt:                       # Ctrl-C at any prompt -> clean abort, no traceback
@@ -2090,7 +2083,7 @@ def _run(argv: list[str] | None = None) -> int:
         _print_help()
         return 0
     if argv and argv[0] in ("--version", "-V"):
-        print(f"claude-loadout {_loadout_version()}")
+        print(_t.lockup("cld", _loadout_version()))
         return 0
     if argv and argv[0] == "doctor":                # doctor enumerates every profile itself
         _header(compact=True)

@@ -37,4 +37,4 @@ All tests must pass. Bug fixes get a regression test. New behavior gets a test.
 
 - PyPI publish uses **Trusted Publishing (OIDC)** — no API token is stored in the repo.
 - The default branch is `master` (not `main`).
-- The terminal color palette comes from the shared `sondalab-palette` package (repo `sondalab-ai/sondalab-ui`); the named-ANSI floor must stay byte-identical to legacy codes so non-truecolor terminals see no change. Do not hand-edit color roles here — change them upstream in `sondalab-ui`.
+- The terminal color palette comes from the shared `sondalab-palette` package (repo `sondalab-ai/sondalab-ui`); the named-ANSI floor of the colour roles (`ok`, `warn`, `err`, `accent`) stays byte-identical to the legacy codes. `dim` is the palette's `dim` role (`terminal.dim`, bright black, SGR 90), never SGR 2 faint (owner decision, palette 0.9). Terminal output goes through `ccloadout/term.py`, which binds `sondalab_palette.term` (docs/tui-patterns.md in sondalab-ui). Do not hand-edit color roles here — change them upstream in `sondalab-ui`.

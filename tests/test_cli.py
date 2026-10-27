@@ -696,7 +696,7 @@ def test_version_prints_without_prompting(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr("builtins.input", lambda *a, **k: pytest.fail("--version must not prompt"))
     rc = cli.main(["--version"])
     assert rc == 0
-    assert capsys.readouterr().out.startswith("claude-loadout ")
+    assert capsys.readouterr().out == f"sonda/lab cld {cli._loadout_version()}\n"   # the lockup
 
 def test_rules_without_rule_model_skips_nl_prompt(tmp_path, monkeypatch, capsys):
     root = _root(tmp_path)                                # no rule_model_path -> compile_fn is None

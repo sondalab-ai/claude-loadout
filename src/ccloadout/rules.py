@@ -1,12 +1,11 @@
 from __future__ import annotations
-import sys, tomllib
+import tomllib
 from dataclasses import dataclass
 from fnmatch import fnmatch
 from pathlib import Path
 from ccloadout.inventory import Item
+from ccloadout.term import warn as _warn
 
-def _warn(msg: str) -> None:                       # local, avoids importing cli (cycle)
-    print(f"claude-loadout: {msg}", file=sys.stderr)
 
 @dataclass(frozen=True)
 class Predicate:
@@ -76,14 +75,14 @@ def _parse(path: Path) -> list[Rule]:
     except OSError:                                 # absent file is the normal case
         return []
     except tomllib.TOMLDecodeError as exc:          # spec §7: parse error -> keep all + warn
-        _warn(f"rules parse error in {path} ({exc}); ignoring rules file")
+        _warn(f"Rules parse error in {path} ({exc}); ignoring rules file")
         return []
     out = []
     for r in data.get("rule", []):
         try:
             target = r["target"]
         except KeyError:
-            _warn(f"skipping rule without target in {path}")
+            _warn(f"Skipped a rule without target in {path}")
             continue
         p = r.get("predicate", {})
         out.append(Rule(target=target, nl=r.get("nl", ""),
