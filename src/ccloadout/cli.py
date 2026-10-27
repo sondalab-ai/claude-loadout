@@ -26,6 +26,14 @@ from ccloadout.compiler import compile_rule, make_local_instruct
 from ccloadout import savings as _savings
 from ccloadout import measure as _measure
 
+# Session-facing text: recall output and memory entry bodies land in model context, so their
+# bytes stay fixed in every locale (TP "Text for machines and sessions"). No ASCII fallback, no
+# colour switch reaches these; human-facing output uses term's glyphs instead.
+_SESSION_SEP = " · "                                # between kind, scope and score
+_SESSION_DASH = " — "                               # between a name and its description
+_SESSION_WARN = "⚠"                                 # U+26A0 on anchored-code lines; sessions match on it
+_SESSION_ELLIPSIS = "…"                             # a cut description
+
 _LAUNCH_PAUSE_S = 1.5   # seeded launch: hold the scoping summary on screen before claude's TUI takes over
 
 # Output follows the Sondalab Term spec through ccloadout.term (colour by color_mode + ROLES,
@@ -348,7 +356,7 @@ def _cmd_consolidate(cwd: Path, override: Path | None = None) -> int:
             path = write_entry(cfg.config_root, cwd, name=_slugify(description),
                                description=description, kind="memory",
                                git_tracked=cfg.memory.git_tracked,
-                               body="\n".join(f"- {r.get('at')} · exit {r.get('exit_code')}"
+                               body="\n".join(f"- {r.get('at')}{_SESSION_SEP}exit {r.get('exit_code')}"
                                                for r in rows_for_goal))
         except EntryExists as exc:
             _warn(f"An entry already exists at {exc}; keeping the candidate")
@@ -981,16 +989,18 @@ def _cmd_recall(cwd: Path, args: list[str], config_root_override: Path | None = 
     if not query:                                   # no query: name what is there, cheaply
         for e in store.entries:
             # Session-facing (recall is how a session reads the store): fixed bytes, no ASCII swap.
-            print(f"  {_paint(f'[{e.kind} · {e.scope}]', 'dim')} {e.name} — "
-                  f"{_short_desc(e.description, 60, ellipsis='…')}")
+            print(f"  {_paint(f'[{e.kind}{_SESSION_SEP}{e.scope}]', 'dim')} {e.name}{_SESSION_DASH}"
+                  f"{_short_desc(e.description, 60, ellipsis=_SESSION_ELLIPSIS)}")
         return 0
     for entry, score in search(store.entries, query, _build_embed(cfg.model_name), limit):
         state = anchor_state(entry, cwd)
         # Session-facing: these lines land in model context, so their bytes stay as they were
         # before the Term restyle, whatever the locale or SONDALAB_ASCII.
-        mark = {"missing": "  ⚠ anchored code is gone",
-                "changed": "  ⚠ anchored code changed since this was written"}.get(state, "")
-        print(_paint(f"{entry.name}  ({entry.kind} · {entry.scope} · {score:.3f})", "bold")
+        mark = {"missing": f"  {_SESSION_WARN} anchored code is gone",
+                "changed": f"  {_SESSION_WARN} anchored code changed since this was written"
+                }.get(state, "")
+        print(_paint(f"{entry.name}  ({entry.kind}{_SESSION_SEP}{entry.scope}{_SESSION_SEP}"
+                     f"{score:.3f})", "bold")
               + _paint(mark, "yellow"))
         print(_paint(f"{entry.path}", "dim"))
         body = strip_frontmatter(entry.path.read_text(errors="ignore")).strip()
@@ -1175,7 +1185,9 @@ def _read_key():
 
     Reads the descriptor directly: sys.stdin's buffer would hide the rest of an escape
     sequence from select(). A lone ESC returns after _ESC_WAIT, not on the next keypress;
-    end of input reads as "esc", so every menu loop ends.
+    end of input reads as "esc", so every menu loop ends. Alt+key arrives as ESC + key and
+    reads as "esc" too. A multibyte (non-ASCII) character is read one byte at a time and
+    decodes to U+FFFD, which no menu maps, so it is ignored.
     """
     import select as _select, termios, tty
     fd = sys.stdin.fileno()
@@ -1430,7 +1442,8 @@ def _display_name(item) -> str:
 def _short_desc(text: str, width: int, ellipsis: str | None = None) -> str:
     """`text` on one line, cut to `width` with an ellipsis (`…`, or `...` in ASCII mode).
 
-    Session-facing callers pass `ellipsis="…"`: their bytes stay the same in every locale.
+    Session-facing callers pass `ellipsis=_SESSION_ELLIPSIS`: their bytes stay the same in
+    every locale.
     """
     s = " ".join((text or "").split())              # collapse newlines/runs of whitespace
     if width <= 0 or not s:
