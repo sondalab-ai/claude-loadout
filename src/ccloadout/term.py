@@ -74,6 +74,20 @@ def accessible() -> bool:
     return slt.accessible(os.environ)
 
 
+def header(name: str, version: str, description: str, *, compact: bool = False,
+           machine: bool = False) -> str:
+    """The Sondalab header for stdout, or "" when nothing should print.
+
+    "" for machine output (--json), accessible mode and a stdout that is not a TTY, so piped and
+    captured output stays byte-identical. Otherwise the palette's header with cld's env
+    (LOADOUT_NO_COLOR folded in), which still falls back to the lockup on TERM=dumb, in ASCII
+    mode or on a terminal too narrow for the mark.
+    """
+    if machine or accessible() or not sys.stdout.isatty():
+        return ""
+    return slt.header(name, version, description, compact=compact, env=_env(), isatty=True)
+
+
 def no_key_reader() -> bool:
     """TERM=dumb or CI set: no raw-mode key reader, so menus take the numbered form."""
     return (any(os.environ.get(n) == "dumb" for n in sl.ENV["term"])

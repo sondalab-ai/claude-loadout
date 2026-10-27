@@ -1896,6 +1896,16 @@ def _loadout_version() -> str:
     except PackageNotFoundError:                     # running from a source tree, uninstalled
         return "unknown"
 
+_TAGLINE = "Goal-aware launcher for Claude Code."
+
+def _header(compact: bool = False, machine: bool = False) -> None:
+    """Print the Sondalab header on stdout before a command's own output.
+
+    Full for an interactive session, a bare launch and --help; `compact` before a one-shot
+    result; nothing for --json (`machine`), accessible mode or a stdout that is not a TTY.
+    """
+    print(_t.header("cld", _loadout_version(), _TAGLINE, compact=compact, machine=machine), end="")
+
 def _print_help() -> None:
     cmd = lambda s: _paint(s, "cyan")
     print(
@@ -2076,22 +2086,28 @@ def _run(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     cwd = Path.cwd()
     if argv and argv[0] in ("--help", "-h", "help"):  # loadout's own help; no profile prompt/scoping
+        _header()
         _print_help()
         return 0
     if argv and argv[0] in ("--version", "-V"):
         print(f"claude-loadout {_loadout_version()}")
         return 0
     if argv and argv[0] == "doctor":                # doctor enumerates every profile itself
+        _header(compact=True)
         return _cmd_doctor(cwd)
     # `cld <words…>` used to pass a bare prompt through to claude, and these verbs are ordinary
     # English. Only claim argv when the second word names a real action; otherwise fall through
     # and let the session have the prompt.
     if argv and argv[0] == "decision" and _is_action(argv, _DECISION_ACTIONS):
+        _header(compact=True)
         return _cmd_decision(repo_root(cwd), argv[1:], _resolve_config_root(os.environ, []))
     if argv and argv[0] == "debt" and _is_action(argv, _DEBT_ACTIONS):
+        _header(compact=True)
         return _cmd_debt(repo_root(cwd), argv[1:], _resolve_config_root(os.environ, []))
     if argv and argv[0] == "memory" and _is_action(argv, _MEMORY_ACTIONS):
         sub = argv[1] if len(argv) > 1 else ""
+        session = sub in ("consolidate", "link") or (sub == "audit" and "--context" not in argv)
+        _header(compact=not session, machine="--json" in argv)
         if sub == "add":
             return _cmd_write_entry(repo_root(cwd), argv[2:], "memory", _resolve_config_root(os.environ, []))
         if sub == "consolidate":
@@ -2115,12 +2131,16 @@ def _run(argv: list[str] | None = None) -> int:
               "claude-loadout memory")
         return 2                                    # unreachable: _is_action already filtered
     if argv and argv[0] == "recall":                # T2 retrieval: no scoping, no launch
+        _header(compact=True)
         return _cmd_recall(repo_root(cwd), argv[1:], _resolve_config_root(os.environ, []))
     if argv and argv[0] == "measure":               # opt-in, connects to servers; no scoping
+        _header(compact=True)
         return _cmd_measure(cwd)
     if argv and argv[0] == "init":                  # bulk-seed repo config; resolves profiles itself
+        _header()
         return _cmd_init(cwd, argv[1:], os.environ)
     if argv and argv[0] == "update":                # refresh existing seeds (single repo or bulk)
+        _header()
         return _cmd_update(cwd, argv[1:], os.environ)
     rules_cmd = bool(argv) and argv[0] == "rules"
     explain = "--explain" in argv
@@ -2128,6 +2148,10 @@ def _run(argv: list[str] | None = None) -> int:
     scope_skills = "--no-scope-skills" not in argv and not os.environ.get("LOADOUT_NO_SCOPE_SKILLS")
     passthrough = [a for a in argv                                          # loadout flags, not claude's
                    if a not in ("--explain", "--no-gate", "--no-scope-skills")]
+    if explain:
+        _header(compact=True)
+    elif rules_cmd or _interactive(passthrough):    # -p/--print: claude's output owns stdout
+        _header()
     try:                                            # ask which profile when it is implicit
         override = _resolve_config_root(os.environ, [] if rules_cmd else passthrough)
     except _Abort:
