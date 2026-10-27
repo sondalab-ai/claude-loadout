@@ -148,9 +148,9 @@ def test_repo_list_prompt_is_capped(tmp_path, monkeypatch):
         cli._select_repos_line([tmp_path], 0)
 
 
-def test_numbered_checklist_caps_consecutive_bad_answers(monkeypatch):
+def test_numbered_checklist_caps_bad_answers_in_all(monkeypatch):
     monkeypatch.setattr(cli, "_can_raw", lambda: False)
-    _replies(monkeypatch, "x", "1", *["x"] * RETRIES)      # a valid toggle resets the count
+    _replies(monkeypatch, "x", "1", "x", "2", "x", "")     # valid toggles between do not reset it
     with pytest.raises(slt.NoValidAnswer):
         cli._checkbox_select("Pick", ["a", "b"])
 
@@ -377,3 +377,12 @@ def test_non_tty_with_yes_runs_and_exits_zero(tmp_path, monkeypatch, cmd):
     monkeypatch.setattr("builtins.input", lambda *a: pytest.fail("no prompt with --yes"))
     assert cli.main([cmd, str(repos), "--yes"]) == 0
     assert (r1 / ".loadout" / "rules.toml").exists()
+
+
+def test_bad_answers_get_the_same_feedback_in_every_capped_prompt(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(cli, "_can_raw", lambda: False)
+    _replies(monkeypatch, "x", "")
+    cli._checkbox_select("Pick", ["a"])
+    _replies(monkeypatch, "x", "")
+    cli._pick_profile([tmp_path], tmp_path, tmp_path)
+    assert capsys.readouterr().err.count("! Not a valid answer: 'x'") == 2

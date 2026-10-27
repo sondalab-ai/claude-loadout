@@ -107,7 +107,7 @@ def _ask_valid(question: str, prompt: str, parse):
     NoValidAnswer naming `question`; end of input raises it at once.
     """
     tries = _sl.ROBUSTNESS["promptRetries"]
-    for _ in range(tries):
+    for attempt in range(1, tries + 1):
         sys.stderr.write(prompt)
         sys.stderr.flush()
         line = _readline()
@@ -117,7 +117,19 @@ def _ask_valid(question: str, prompt: str, parse):
         got = parse(line.strip())
         if got is not None:
             return got
-    raise _slt.NoValidAnswer(question, f"no recognised answer in {tries} tries")
+        _not_valid(question, line.strip(), attempt)
+    raise AssertionError("unreachable: _not_valid raises on the last try")
+
+def _not_valid(question: str, answer: str, attempt: int) -> None:
+    """An unrecognised answer: warn and let the caller ask again, or raise on the last try.
+
+    Shared by every capped local prompt, so the feedback and the cap (promptRetries answers
+    in all, as in the palette's confirm) are the same everywhere.
+    """
+    tries = _sl.ROBUSTNESS["promptRetries"]
+    if attempt >= tries:
+        raise _slt.NoValidAnswer(question, f"no recognised answer in {tries} tries")
+    _warn(f"Not a valid answer: {answer!r}")
 
 def _menu(question: str, prompt: str, choices: dict[str, tuple[str, ...]]) -> str:
     """A letter menu: the key of `choices` whose spellings hold the answer, case-insensitive.
@@ -1217,7 +1229,7 @@ def _checkbox_plain(title, labels, preset=None, allow_empty=False, headers=None)
     selected = list(preset) if preset is not None else [True] * n
     width = len(str(n))
     err = lambda s: print(s, file=sys.stderr)
-    question, tries, misses = "Toggle which?", _sl.ROBUSTNESS["promptRetries"], 0
+    question, misses = "Toggle which?", 0
     while True:
         err("")
         err(title)
@@ -1244,13 +1256,10 @@ def _checkbox_plain(title, labels, preset=None, allow_empty=False, headers=None)
             selected = [not all(selected)] * n
             continue
         picks = _parse_selection(raw, n)
-        if picks is None:                           # capped like any prompt; a valid toggle resets it
+        if picks is None:                           # capped like any prompt: promptRetries in all
             misses += 1
-            if misses >= tries:
-                raise _slt.NoValidAnswer(question, f"no recognised answer in {tries} tries")
-            _warn(f"Not a valid choice: {raw!r}")
+            _not_valid(question, raw, misses)
             continue
-        misses = 0
         for p in picks:
             selected[p - 1] = not selected[p - 1]
 

@@ -304,7 +304,7 @@ def test_numbered_fallback_without_a_raw_terminal(monkeypatch, capsys):
     monkeypatch.setattr(cli, "_can_raw", lambda: False)
     _replies(monkeypatch, "x", "all", "")                  # invalid, then flip all off, confirm
     assert cli._checkbox_select("Pick", ["a", "b"], allow_empty=True) == []
-    assert "Not a valid choice: 'x'" in capsys.readouterr().err
+    assert "Not a valid answer: 'x'" in capsys.readouterr().err
 
 
 def test_numbered_fallback_cancels_on_q_and_fails_on_eof(monkeypatch):
