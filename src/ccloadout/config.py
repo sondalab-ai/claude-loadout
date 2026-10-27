@@ -4,7 +4,16 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Mapping
 from ccloadout.savings import DEFAULT_TOKEN_COSTS
-from ccloadout.term import warn as _warn
+
+def _warn(msg: str) -> None:
+    """A warning on stderr on the Term warn line; term is imported only when one is printed.
+
+    Loaded lazily because the prompt hook reaches this module (memory -> inventory) on every
+    prompt, and a warning is rare. Messages name claude-loadout: in a hook's stderr nothing
+    else says which tool spoke.
+    """
+    from ccloadout.term import warn
+    warn(msg)
 
 DEFAULT_THRESHOLD = 0.24   # potion-base-8M; re-centered from 0.20 when plugin items gained real
                            # manifest descriptions (richer text shifts scores up) — holds the prior
@@ -53,7 +62,7 @@ def _read_toml(path: Path) -> dict:
     except OSError:                                 # absent file is the normal case
         return {}
     except tomllib.TOMLDecodeError as exc:         # spec §7: parse error -> keep all + warn
-        _warn(f"Config parse error in {path} ({exc}); using defaults")
+        _warn(f"claude-loadout hit a parse error in {path} ({exc}); using the defaults")
         return {}
 
 def _resolve_paths(environ: Mapping[str, str]) -> tuple[Path, Path]:
@@ -140,7 +149,8 @@ def _memory_fields(table: dict) -> dict:
             else:
                 out[key] = value
         except (TypeError, ValueError):
-            _warn(f"[memory] {key} = {value!r} is not a {field.type}; using the default")
+            _warn(f"claude-loadout ignored [memory] {key} = {value!r}: not a {field.type}; "
+                  "using the default")
     return out
 
 def set_memory_enabled(repo: Path, enabled: bool) -> Path:

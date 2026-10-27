@@ -460,3 +460,25 @@ def test_slow_scoping_shows_a_running_line_and_ends_in_a_step(tmp_path, monkeypa
     cli.main(["--explain"])
     err = capsys.readouterr().err.splitlines()
     assert err[0].startswith("  ● Ranking ") and err[-1].startswith("  ✓ Ranked ")
+
+
+# --- warnings from config and rules (also printed at hook time) ---------------------------------
+
+def test_config_and_rules_warnings_name_the_tool_on_the_warn_line(tmp_path, capsys):
+    from ccloadout.config import _read_toml
+    from ccloadout.rules import read_rules
+    bad = tmp_path / "x.toml"; bad.write_text("= nope")
+    assert _read_toml(bad) == {} and read_rules(bad) == []
+    err = capsys.readouterr().err.splitlines()
+    assert len(err) == 2
+    assert all(ln.startswith("  ! claude-loadout hit a parse error in ") for ln in err)
+
+
+def test_the_hook_path_does_not_load_the_terminal_layer():
+    # The prompt hook imports memory (-> inventory -> config) on every prompt; term and the
+    # palette load only when a warning is actually printed.
+    import subprocess, sys
+    code = ("import ccloadout.memory, sys; "
+            "print('ccloadout.term' in sys.modules, 'sondalab_palette' in sys.modules)")
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
+    assert out.stdout.strip() == "False False"

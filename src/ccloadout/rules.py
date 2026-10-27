@@ -4,8 +4,16 @@ from dataclasses import dataclass
 from fnmatch import fnmatch
 from pathlib import Path
 from ccloadout.inventory import Item
-from ccloadout.term import warn as _warn
 
+def _warn(msg: str) -> None:
+    """A warning on stderr on the Term warn line; term is imported only when one is printed.
+
+    Loaded lazily because the prompt hook reaches this module (memory -> inventory) on every
+    prompt, and a warning is rare. Messages name claude-loadout: in a hook's stderr nothing
+    else says which tool spoke.
+    """
+    from ccloadout.term import warn
+    warn(msg)
 
 @dataclass(frozen=True)
 class Predicate:
@@ -75,14 +83,14 @@ def _parse(path: Path) -> list[Rule]:
     except OSError:                                 # absent file is the normal case
         return []
     except tomllib.TOMLDecodeError as exc:          # spec §7: parse error -> keep all + warn
-        _warn(f"Rules parse error in {path} ({exc}); ignoring rules file")
+        _warn(f"claude-loadout hit a parse error in {path} ({exc}); ignoring the rules file")
         return []
     out = []
     for r in data.get("rule", []):
         try:
             target = r["target"]
         except KeyError:
-            _warn(f"Skipped a rule without target in {path}")
+            _warn(f"claude-loadout skipped a rule without target in {path}")
             continue
         p = r.get("predicate", {})
         out.append(Rule(target=target, nl=r.get("nl", ""),
