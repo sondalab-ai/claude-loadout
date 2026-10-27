@@ -336,7 +336,7 @@ def test_help_on_a_tty_opens_with_the_full_header(monkeypatch):
     assert lines[0] == sl.HEADER["mark"][0] + "  sonda/lab"
     assert lines[1].endswith(f"  cld {cli._loadout_version()}")
     assert lines[2].endswith("  " + cli._TAGLINE)
-    assert "Usage:" in out.getvalue()                       # the help itself is still printed
+    assert "USAGE" in out.getvalue()                       # the help itself is still printed
 
 
 def test_one_shot_command_on_a_tty_opens_with_the_compact_header(tmp_path, monkeypatch):

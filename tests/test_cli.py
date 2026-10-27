@@ -157,7 +157,7 @@ def test_doctor_prints_guidance_and_does_not_launch(tmp_path, monkeypatch, capsy
     rc = cli.main(["doctor"])
     assert rc == 0 and launched["ran"] is False
     out = capsys.readouterr().out
-    assert "claude profiles: 1 profile" in out and f"{root} (active)" in out
+    assert "PROFILES" in out and f"{root} (active)" in out
     assert "1 mcp, 1 plugin, 0 skills" in out                # singular/plural
     assert "--explain" in out and "alias claude=" in out    # init guidance present
     assert "keyword fallback" in out                        # model state reported
@@ -173,7 +173,7 @@ def test_doctor_enumerates_multiple_profiles(tmp_path, monkeypatch, capsys):
     rc = cli.main(["doctor"])
     assert rc == 0
     out = capsys.readouterr().out
-    assert "claude profiles: 2 profiles" in out
+    assert out.count("    Profile ") == 2                     # one Profile line per profile
     assert f"{tmp_path / '.claude-perso'} (active)" in out   # env-selected profile marked active
     assert f"{tmp_path / '.claude'}\n" in out                # sibling listed, not marked active
 
@@ -270,7 +270,7 @@ def test_explain_dropped_skill_in_dropping_section(tmp_path, monkeypatch, capsys
     assert rc == 0
     lines = capsys.readouterr().out.splitlines()
     assert not any("always loaded" in l for l in lines)  # the non-prunable skill section is gone
-    drop_i = next(i for i, l in enumerate(lines) if "dropping (" in l)
+    drop_i = next(i for i, l in enumerate(lines) if "DROPPING (" in l)
     astro_i = next(i for i, l in enumerate(lines) if "astro" in l)
     assert astro_i > drop_i                               # a ranked-out skill lands in dropping
     assert "↷" in lines[astro_i]                          # drop marker: skipped, never the failure glyph
@@ -285,7 +285,7 @@ def test_no_scope_skills_force_keeps_skill(tmp_path, monkeypatch, capsys):
     rc = cli.main(["--explain", "--no-scope-skills"])
     assert rc == 0
     lines = capsys.readouterr().out.splitlines()
-    drop_i = next(i for i, l in enumerate(lines) if "dropping (" in l)
+    drop_i = next(i for i, l in enumerate(lines) if "DROPPING (" in l)
     astro_lines = [i for i, l in enumerate(lines) if "astro" in l]
     assert astro_lines and all(i < drop_i for i in astro_lines)   # skill sits under keeping, never dropped
 
@@ -472,9 +472,9 @@ def test_explain_reports_estimated_savings(tmp_path, monkeypatch, capsys):
     rc = cli.main(["--explain"])
     assert rc == 0
     out = capsys.readouterr().out
-    assert "savings" in out and "pruned:" in out and "2 of 2 tools" in out
-    assert "up front:" in out and "600 tokens" in out    # plugin (eager) trimmed from context now
-    assert "on-demand:" in out and "1.2k tokens" in out  # mcp (deferred) — avoided only if used
+    assert "SAVINGS" in out and "Pruned" in out and "2 of 2 tools" in out
+    assert "Up front" in out and "600 tokens" in out    # plugin (eager) trimmed from context now
+    assert "On-demand" in out and "1.2k tokens" in out  # mcp (deferred) — avoided only if used
 
 def test_launch_prints_savings_line_to_stderr(tmp_path, monkeypatch, capsys):
     _root(tmp_path)
@@ -649,8 +649,8 @@ def test_explain_prefers_measured_cost_over_constant(tmp_path, monkeypatch, caps
     rc = cli.main(["--explain"])
     assert rc == 0
     out = capsys.readouterr().out
-    assert "up front:" in out and "600 tokens" in out    # figma plugin (eager)
-    assert "on-demand:" in out and "9k tokens" in out    # Gmail mcp measured 9000 (deferred)
+    assert "Up front" in out and "600 tokens" in out    # figma plugin (eager)
+    assert "On-demand" in out and "9k tokens" in out    # Gmail mcp measured 9000 (deferred)
 
 def test_explain_surfaces_connectors_dropped_by_strict_mode(tmp_path, monkeypatch, capsys):
     root = _root(tmp_path)                                # mcp "Gmail" + plugin "figma@x"
@@ -668,11 +668,11 @@ def test_explain_surfaces_connectors_dropped_by_strict_mode(tmp_path, monkeypatc
     rc = cli.main(["--explain"])
     assert rc == 0
     out = capsys.readouterr().out
-    assert "connectors dropped (all-or-nothing" in out
+    assert "CONNECTORS DROPPED (ALL-OR-NOTHING" in out
     assert "claude.ai Calendar" in out and "21k" in out
     assert "plugin:playwright:playwright" not in out      # plugin-bundled server is not a connector
-    assert "up front:" in out and "600 tokens" in out     # figma plugin (eager) trimmed now
-    assert "on-demand:" in out and "30k tokens" in out    # 9000 (Gmail mcp) + 21000 (Calendar connector)
+    assert "Up front" in out and "600 tokens" in out     # figma plugin (eager) trimmed now
+    assert "On-demand" in out and "30k tokens" in out    # 9000 (Gmail mcp) + 21000 (Calendar connector)
 
 def test_help_prints_usage_without_prompting_or_launching(tmp_path, monkeypatch, capsys):
     _two_profiles(tmp_path)                               # two profiles -> would prompt if not bypassed
@@ -687,7 +687,7 @@ def test_help_prints_usage_without_prompting_or_launching(tmp_path, monkeypatch,
         rc = cli.main([flag])
         assert rc == 0 and launched["ran"] is False
         out = capsys.readouterr().out
-        assert "Usage:" in out and "cld doctor" in out and "pass straight through" in out
+        assert "USAGE" in out and "cld doctor" in out and "pass straight through" in out
 
 def test_version_prints_without_prompting(tmp_path, monkeypatch, capsys):
     _two_profiles(tmp_path)
@@ -1086,8 +1086,8 @@ def test_update_bulk_reports_unseeded(tmp_path, monkeypatch, capsys):
     rc = cli.main(["update", str(repos), "--yes"])
     assert rc == 0
     out = capsys.readouterr().out
-    assert "Updated 1 project" in out
-    assert "proj2 (not seeded — run init)" in out
+    assert "Summary  1 ok" in out                                  # one project updated
+    assert "proj2 (not seeded; run claude-loadout init)" in out
 
 def test_update_single_refuses_unseeded(tmp_path, monkeypatch, capsys):
     root = _root(tmp_path); monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
@@ -1225,7 +1225,7 @@ def test_enabled_memory_is_injected_and_reported(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(cli.subprocess, "run", lambda *a, **k: _RC(0))
     cli.main(["--explain"])
     out = capsys.readouterr().out
-    assert "memory" in out.lower() and "of 2 entries" in out and "net up front" in out
+    assert "memory" in out.lower() and "of 2 entries" in out and "Net up front" in out
 
 def test_min_entries_suppresses_the_payload(tmp_path, monkeypatch, capsys):
     root = _memory_repo(tmp_path, n=1)
@@ -1344,7 +1344,7 @@ def test_resolved_debt_is_not_injected_but_recall_still_finds_it(tmp_path, monke
     capsys.readouterr()
     monkeypatch.setattr(cli.subprocess, "run", lambda *a, **k: _RC(0))
     cli.main(["--explain"])
-    assert "none injected" in capsys.readouterr().out
+    assert "none of" in capsys.readouterr().out
     cli.main(["recall", "shim"])
     assert "shim" in capsys.readouterr().out
 
@@ -1618,8 +1618,8 @@ def test_entries_the_harness_already_injects_are_not_repeated(tmp_path, monkeypa
     monkeypatch.setattr(cli.subprocess, "run", lambda *a, **k: _RC(0))
     cli.main(["--explain"])
     out = capsys.readouterr().out
-    assert "already loaded: 1 by Claude Code itself" in out
-    assert "injected:       1 of 2" in out              # only the entry it does not already have
+    assert re.search(r"Already loaded +1 by Claude Code itself", out)
+    assert re.search(r"Injected +1 of 2 entries", out)              # only the entry it does not already have
     cli.main(["memory", "audit", "--context", "scoping sessions"])
     assert "already-in-context" in capsys.readouterr().out
 

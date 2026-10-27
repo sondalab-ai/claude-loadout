@@ -442,8 +442,8 @@ def _cmd_link(root: Path, args: list[str], override: Path | None = None) -> int:
     cfg = load_config(cwd=root, config_root_override=override)
     if not cfg.memory.git_tracked:
         _say("skipped", "Nothing to link", "")
-        print(_t.cont(_paint("Notes here go to Claude Code's own memory folder ([memory] "
-                             "git_tracked = false), which it already reads", "dim")))
+        print(_t.prose("Notes here go to Claude Code's own memory folder ([memory] git_tracked = "
+                       "false), which it already reads", dim=True))
         return 0
     plan = plan_link(cfg.config_root, root)
     if plan.state == "unknown-project":
@@ -456,20 +456,22 @@ def _cmd_link(root: Path, args: list[str], override: Path | None = None) -> int:
         _fail(f"Left {plan.harness} alone",
               f"it is a symlink to {plan.harness.resolve()}", f"ls -l {plan.harness}")
         return 1
-    print(_paint("claude-loadout memory link", "bold"))
-    print(f"  Claude Code reads:  {plan.harness}")
-    print(f"  notes live in:      {plan.store}")
+    print(_t.heading("Memory link"))
+    print(_t.kv("Claude Code reads", str(plan.harness)))
+    print(_t.kv("Notes live in", str(plan.store)))
     if plan.copies:
         names = (", ".join(p.name for p in plan.copies[:6])
                  + (" " + _t.ellipsis() if len(plan.copies) > 6 else ""))
-        print(f"  copy {_plural(len(plan.copies), 'file')} into docs/memory: {_paint(names, 'dim')}")
+        print(_t.kv("Copy into docs/memory", _plural(len(plan.copies), "file")) + " "
+              + _paint(names, "dim"))
     if plan.added:
-        print(f"  add {_plural(len(plan.added), 'line')} to MEMORY.md, so those notes reach sessions")
+        print(_t.kv("Add to MEMORY.md", f"{_plural(len(plan.added), 'line')}, so those notes "
+                                        "reach sessions"))
     if plan.backup:
-        print(f"  keep the original folder as {plan.backup}")
+        print(_t.kv("Keep the original as", str(plan.backup)))
     if plan.state in ("merge", "missing"):
         arrow = "->" if _t.ascii_on() else "→"
-        print(f"  then link {plan.harness.name} {arrow} {plan.store}")
+        print(_t.kv("Then link", f"{plan.harness.name} {arrow} {plan.store}"))
     if plan.conflicts:
         _fail("Could not link: files differ on both sides",
               "reconcile by hand, then link again: " + ", ".join(plan.conflicts),
@@ -511,6 +513,25 @@ def _cmd_scope(cwd: Path, args: list[str], override: Path | None = None) -> int:
     _say("done", f"Scoped to {args[1]}", f"{match.name} now reaches {reach}")
     return 0
 
+def _table(headers: list[str], rows: list[list[tuple[str, str | None]]]) -> list[str]:
+    """A table for stdout (TP Tables): a dim uppercase header row, then one line per record.
+
+    Each cell is (plain text, role or None). Columns are padded on the plain text and painted
+    after, so escape bytes never shift a column; the last column is not padded. Returns the
+    lines, header first, so a caller can put a continuation line under a record.
+    """
+    last = len(headers) - 1
+    widths = [max([len(h)] + [len(r[i][0]) for r in rows]) for i, h in enumerate(headers)]
+    head = "  ".join(h if i == last else h.ljust(widths[i]) for i, h in enumerate(headers))
+    lines = ["  " + _t.heading(head)]
+    for cells in rows:
+        out = []
+        for i, (text, role) in enumerate(cells):
+            pad = "" if i == last else " " * (widths[i] - len(text))
+            out.append((_paint(text, role) if role else text) + pad)
+        lines.append("  " + "  ".join(out))
+    return lines
+
 def _cmd_debt(cwd: Path, args: list[str], override: Path | None = None) -> int:
     action, rest = (args[0], args[1:]) if args else ("list", [])
     if action == "add":
@@ -543,10 +564,14 @@ def _cmd_debt(cwd: Path, args: list[str], override: Path | None = None) -> int:
     if not shown:
         print(f"No open debt for this repository{_t.sep()}add one with claude-loadout debt add <text>")
         return 0
+    rows = []
     for e in shown:
-        state = _paint("resolved", "dim") if e.status == "resolved" else _paint("open", "yellow")
-        mark = "" if anchor_state(e, cwd) != "missing" else f"  {_t.glyph('warn')} anchor gone"
-        print(f"  {state}  {e.name} — {_short_desc(e.description, 60)}{mark}")
+        resolved = e.status == "resolved"
+        gone = anchor_state(e, cwd) == "missing"
+        mark = f"  {_t.glyph('warn')} anchor gone" if gone else ""
+        rows.append([(e.name, None), ("resolved" if resolved else "open", "dim" if resolved else "yellow"),
+                     (_short_desc(e.description, 60) + mark, None)])
+    print("\n".join(_table(["Name", "State", "Description"], rows)))
     return 0
 
 def _session_hooks(cfg, cwd: Path, mem) -> tuple[dict | None, dict | None]:
@@ -625,34 +650,33 @@ def _memory_next_steps(state: dict, enabled: bool) -> list[tuple[str, str]]:
 
 def _print_memory_status(cwd: Path, cfg) -> int:
     on = cfg.memory.enabled
-    head = _paint("on", "green") if on else _paint("off", "dim")
-    print(f"{_paint('  memory', 'bold')} — {head} for this repository")
+    print(_t.heading("Memory"))
+    print(_t.kv("Recall", "on for this repository" if on else "off for this repository",
+                dim=not on))
     if not on:
-        print(_paint("    Ranked recall puts only the notes relevant to a session into its "
-                     "context,", "dim"))
-        print(_paint("    inside a token budget you set. Nothing is loaded until you turn it on.",
-                     "dim"))
+        print(_t.prose("Ranked recall puts only the notes relevant to a session into its "
+                       "context, inside a token budget. Nothing is loaded until it is turned on.",
+                       dim=True))
     state = _memory_state(cwd, cfg)
     if on or state["entries"]:
         kinds = ", ".join(f"{n} {k}" for k, n in state["kinds"].items())
-        print(f"    entries:      {len(state['entries'])}" + (f"  ({kinds})" if kinds else ""))
+        print(_t.kv("Entries", f"{len(state['entries'])}" + (f" ({kinds})" if kinds else "")))
         if state["usage"]:
-            print(f"    delivered:    {len(state['usage'])}, "
-                  f"{state['promoted']} promoted")
+            print(_t.kv("Delivered", f"{len(state['usage'])}, {state['promoted']} promoted"))
         if state["candidates"]:
-            print(f"    candidates:   {len(state['candidates'])} "
+            print(_t.kv("Candidates", f"{len(state['candidates'])}") + " "
                   + _paint("sessions waiting to be reviewed", "dim"))
-        for label, rows in (("flags", state["flags"]), ("dead anchors", state["gone"]),
-                            ("open debt", state["debt"])):
+        for label, rows in (("Flags", state["flags"]), ("Dead anchors", state["gone"]),
+                            ("Open debt", state["debt"])):
             if rows:
-                print(f"    {label + ':':<14}{_paint(str(len(rows)), 'yellow')}")
+                _say("warn", label, str(len(rows)))
     steps = _memory_next_steps(state, on)
     if steps:
         print()
-        print("  " + _t.heading("next"))
+        print(_t.heading("Next"))
         width = max(len(cmd) for cmd, _ in steps)
-        for command, why in steps:
-            print(f"    {_paint(command.ljust(width), 'cyan')}  {_paint(why, 'dim')}")
+        for command, why in steps:                  # commands in the default ink (TP Error block)
+            print(_t.cont(f"{command.ljust(width)}  {_paint(why, 'dim')}"))
     return 0
 
 def _cmd_memory_toggle(cwd: Path, enabled: bool, override: Path | None) -> int:
@@ -700,7 +724,7 @@ def _entry_signals(entry, cwd: Path | None, usage, flags, shadowed_ids: set) -> 
     if entry.scope == "global":                     # a session can write these; they reach everywhere
         bits.append(_paint("global", "cyan", err=True))
     if cwd is None:
-        return _paint("another project — signals not evaluated here", "dim", err=True)
+        return _paint("another project; signals not evaluated here", "dim", err=True)
     state = anchor_state(entry, cwd)
     if state == "missing":
         bits.append(_paint("anchor gone", "red", err=True))
@@ -755,12 +779,15 @@ def _cmd_audit(cwd: Path, args: list[str], override: Path | None = None) -> int:
                           for project, e in rows], indent=1))
         return 0
     if not _interactive([]):
-        for project, e in rows:
-            print(f"  {_paint(f'[{e.kind}{_t.sep_plain()}{project}]', 'dim')} {e.name} — "
-                  f"{_short_desc(e.description, 50)}")
+        lines = _table(["Name", "Kind", "Project", "Description"],
+                       [[(e.name, None), (e.kind, "dim"), (project, "dim"),
+                         (_short_desc(e.description, 50), None)] for project, e in rows])
+        print(lines[0])
+        for (project, e), line in zip(rows, lines[1:]):
+            print(line)
             signals = _entry_signals(e, root_of(e), usage, flags, shadowed)
             if signals:
-                print(f"      {signals}")
+                print(_t.cont(signals))
         return 0
     return _audit_interactive(cwd, cfg, rows, usage, flags, shadowed, root_of)
 
@@ -817,20 +844,21 @@ def _audit_context(cwd: Path, cfg, entries, context: str, usage, flags, as_json:
                            "base": round(v.base, 4), "reasons": list(v.reasons),
                            "admitted": v.admitted} for v in verdicts], indent=1))
         return 0
-    print(_paint(f"  what a session on {context!r} would recall", "bold"))
-    print(_paint(f"  threshold {cfg.memory.threshold}{_t.sep_plain()}budget "
-                 f"{cfg.memory.budget_tokens} tokens", "dim"))
+    print(_t.heading("Recall preview"))
+    print(_t.kv("What a session would recall", repr(context)))
+    print(_t.kv("Threshold", str(cfg.memory.threshold)))
+    print(_t.kv("Budget", f"{cfg.memory.budget_tokens} tokens"))
     print()
     cut_drawn = False
     for v in verdicts:
         if not v.admitted and not cut_drawn:
             rule = _t.box("horizontal") * 2
-            print(_paint(f"    {rule} below the line {rule}", "dim"))
+            print(_t.cont(_paint(f"{rule} below the line {rule}", "dim")))
             cut_drawn = True
-        mark = _t.glyph("done") if v.admitted else _t.glyph("skipped")
+        mark = _t.mark("done", "recalled") if v.admitted else _t.mark("skipped", "cut")
         why = _paint("  " + ", ".join(v.reasons), "dim") if v.reasons else ""
         moved = "" if abs(v.score - v.base) < 1e-9 else _paint(f" (from {v.base:.3f})", "dim")
-        print(f"    {mark} {v.score:.3f}{moved}  "
+        print(f"  {mark} {v.score:.3f}{moved}  "
               f"{_paint(v.entry.kind[:4], 'dim')} {_short_desc(v.entry.name, 38):<38} "
               f"{_short_desc(v.entry.description, 38)}{why}")
     return 0
@@ -859,7 +887,7 @@ def _cmd_flag(cwd: Path, args: list[str], override: Path | None = None) -> int:
               f"claude-loadout memory flag {match.name} --reason <why>")
         return 2
     set_flag(cfg.config_root, cwd, match.id, reasons[0])
-    _say("warn", "Flagged entry", f"{match.name} — {reasons[0]}")
+    _say("warn", "Flagged entry", f"{match.name}: {reasons[0]}")
     return 0
 
 def _cmd_decision(cwd: Path, args: list[str], override: Path | None = None) -> int:
@@ -913,9 +941,9 @@ def _cmd_decision(cwd: Path, args: list[str], override: Path | None = None) -> i
         print(f"No decisions for this repository{_t.sep()}"
               "add one with claude-loadout decision new <title>")
         return 0
-    for e in decisions:
-        state = _paint("active", "green") if e.status == "active" else _paint(e.status or "?", "dim")
-        print(f"  {state}  {e.name} — {_short_desc(e.description, 60)}")
+    rows = [[(e.name, None), (e.status or "?", "green" if e.status == "active" else "dim"),
+             (_short_desc(e.description, 60), None)] for e in decisions]
+    print("\n".join(_table(["Name", "State", "Description"], rows)))
     return 0
 
 def _cmd_recall(cwd: Path, args: list[str], config_root_override: Path | None = None) -> int:
@@ -937,7 +965,7 @@ def _cmd_recall(cwd: Path, args: list[str], config_root_override: Path | None = 
         for e in store.entries:
             # Session-facing (recall is how a session reads the store): fixed bytes, no ASCII swap.
             print(f"  {_paint(f'[{e.kind} · {e.scope}]', 'dim')} {e.name} — "
-                  f"{_short_desc(e.description, 60)}")
+                  f"{_short_desc(e.description, 60, ellipsis='…')}")
         return 0
     for entry, score in search(store.entries, query, _build_embed(cfg.model_name), limit):
         state = anchor_state(entry, cwd)
@@ -1361,11 +1389,16 @@ _KIND_HEADER = {"mcp": "mcp servers", "plugin": "plugins", "skill": "skills"}
 def _display_name(item) -> str:
     return item.id.split("@", 1)[0]                 # drop the @marketplace suffix for readability
 
-def _short_desc(text: str, width: int) -> str:
+def _short_desc(text: str, width: int, ellipsis: str | None = None) -> str:
+    """`text` on one line, cut to `width` with an ellipsis (`…`, or `...` in ASCII mode).
+
+    Session-facing callers pass `ellipsis="…"`: their bytes stay the same in every locale.
+    """
     s = " ".join((text or "").split())              # collapse newlines/runs of whitespace
     if width <= 0 or not s:
         return ""
-    return s if len(s) <= width else s[: width - 1].rstrip() + "…"
+    mark = _t.ellipsis() if ellipsis is None else ellipsis
+    return s if len(s) <= width else s[: max(width - len(mark), 0)].rstrip() + mark
 
 def _review_keep_drop(repo: Path, prunable: list[Item], kept_ids: set[str],
                       label: str = "claude-loadout init"):
@@ -1386,7 +1419,7 @@ def _review_keep_drop(repo: Path, prunable: list[Item], kept_ids: set[str],
     if not _t.accessible() and (not _can_raw() or frame > size.lines):
         return set(kept_ids)                        # can't draw the picker; accept auto silently
     id_w = min(max(len(_display_name(i)) for i in ordered), 30)
-    desc_w = size.columns - id_w - 12               # room left after the box, name column, and gaps
+    desc_w = min(size.columns, _t.width()) - id_w - 12   # room after the box, name column and gaps
     labels = []
     for i in ordered:
         desc = _short_desc(i.description, desc_w)
@@ -1398,10 +1431,10 @@ def _review_keep_drop(repo: Path, prunable: list[Item], kept_ids: set[str],
     count = _paint(f"({_plural(len(ordered), 'tool')})", "dim", err=True)
     title = (f"{_paint(label, 'bold', err=True)}{_t.sep(err=True)}keep/drop{_t.sep(err=True)}"
              f"{_paint(repo.name, 'cyan', err=True)}  {count}\n"
-             f"  {_paint('[x] keep — loads here', 'green', err=True)}{_t.sep(err=True)}"
-             f"{_paint('[ ] drop — pruned this session', 'dim', err=True)}")
+             f"  {_paint('[x] keep: loads here', 'green', err=True)}{_t.sep(err=True)}"
+             f"{_paint('[ ] drop: pruned this session', 'dim', err=True)}")
     hint = ((_MOVE, "move"), ("space", "keep/drop"), ("a", "all/none"), ("enter", "save"),
-            ("q", "skip repo"), ("ctrl-c", "quit"))
+            ("q", "back"), ("ctrl-c", "quit"))
     picks = _checkbox_select(title, labels, preset=preset, allow_empty=True, hint=hint, headers=headers)
     if picks is None:                               # q / Esc -> skip this repo entirely
         return None
@@ -1557,11 +1590,10 @@ def _offer_memory(repos: list[Path], yes: bool) -> None:
     if not repos or yes or not _interactive([]):
         return
     print()
-    print(_paint("  Memory recall", "bold"))
-    print(_t.cont(_paint("Puts the notes relevant to a session into its context, inside a token "
-                         "budget", "dim")))
-    print(_t.cont(_paint("Off unless you say otherwise; reversible with "
-                         "`claude-loadout memory disable`", "dim")))
+    print(_t.heading("Memory recall"))
+    print(_t.prose("Puts the notes relevant to a session into its context, inside a token budget. "
+                   "Off unless enabled here; `claude-loadout memory disable` turns it off again.",
+                   dim=True))
     if not _confirm(f"Enable memory recall for {_plural(len(repos), 'repo')}?"):
         _say("skipped", "Left memory recall off")
         _next("claude-loadout memory enable")
@@ -1573,24 +1605,28 @@ def _offer_memory(repos: list[Path], yes: bool) -> None:
 def _report_repo(repo: Path, kept: list[Item], dropped: list[Item]) -> None:
     # Verbose per-repo receipt: the count line, then the full kept/dropped id lists.
     print(_t.note("done", f"{repo}  {_paint(f'({len(kept)} kept / {len(dropped)} dropped)', 'dim')}"))
-    for items, mark in ((kept, "done"), (dropped, "skipped")):
+    for items, mark, word in ((kept, "done", "kept"), (dropped, "skipped", "dropped")):
         for i in items:
-            print(_t.cont(f"  {_t.glyph(mark)} {i.id} {_paint(f'({i.kind})', 'dim')}"))
+            print(_t.cont(f"  {_t.mark(mark, word)} {i.id} {_paint(f'({i.kind})', 'dim')}"))
     if not kept and not dropped:
         print(_t.cont(f"  {_paint('(no prunable tools)', 'dim')}"))
 
+def _print_run_summary(done: int, left_out: list[tuple[Path, str]]) -> None:
+    """The end of an init/update run: each project left out with its reason, then the Summary.
+
+    `done` (seeded or updated) is the ok count; a project left out by choice is neither a
+    warning nor a failure, so it is named above the Summary rather than counted.
+    """
+    if left_out:
+        print()
+    for repo, reason in left_out:                    # name every project the run did not touch
+        print(_t.note("skipped", f"{repo} {_paint(f'({reason})', 'dim')}"))
+    print("\n" * _t.blank_before_summary(), end="")
+    print(_t.summary(done, 0, 0, 0))
+
 def _print_init_summary(seeded: int, skipped: list[tuple[Path, str]],
                         already_list: list[Path]) -> None:
-    print()
-    parts = [f"Seeded {_plural(seeded, 'project')}"]
-    if skipped:
-        parts.append(f"{_plural(len(skipped), 'project')} skipped")
-    if already_list:
-        parts.append(f"{len(already_list)} already configured")
-    print(_t.sep().join(parts))
-    notes = skipped + [(r, "already configured") for r in already_list]
-    for repo, reason in notes:                       # name every project that didn't get seeded
-        print(_t.note("skipped", f"{repo} {_paint(f'({reason})', 'dim')}"))
+    _print_run_summary(seeded, skipped + [(r, "already configured") for r in already_list])
 
 _UPDATE_LABEL = "claude-loadout update"
 
@@ -1653,16 +1689,8 @@ def _update_repo(repo: Path, profile: Path, goal: str, yes: bool):
 
 def _print_update_summary(updated: int, skipped: list[tuple[Path, str]],
                           unseeded: list[Path]) -> None:
-    print()
-    parts = [f"Updated {_plural(updated, 'project')}"]
-    if skipped:
-        parts.append(f"{_plural(len(skipped), 'project')} skipped")
-    if unseeded:
-        parts.append(f"{len(unseeded)} not seeded")
-    print(_t.sep().join(parts))
-    notes = skipped + [(r, "not seeded — run init") for r in unseeded]
-    for repo, reason in notes:
-        print(_t.note("skipped", f"{repo} {_paint(f'({reason})', 'dim')}"))
+    _print_run_summary(updated, skipped + [(r, "not seeded; run claude-loadout init")
+                                           for r in unseeded])
 
 def _cmd_update(cwd: Path, args: list[str], environ) -> int:
     yes = "--yes" in args
@@ -1747,8 +1775,7 @@ def _profile_report(root: Path, cwd: Path, active: bool,
                     global_config_path: Path | None = None,
                     token_costs: dict[str, int] | None = None, tally: _Tally | None = None) -> None:
     tally = tally or _Tally()
-    tag = f" {_paint('(active)', 'green', 'bold')}" if active else ""
-    print(f"  {_paint(str(root), 'cyan')}{tag}")
+    print(_t.kv("Profile", f"{root} (active)" if active else str(root)))
     user_cfg = root / "loadout" / "config.toml"
     if user_cfg.is_file():
         tally.check("done", "User config", "present")
@@ -1760,8 +1787,8 @@ def _profile_report(root: Path, cwd: Path, active: bool,
         reminder = None
     if reminder is False:
         tally.check("warn", "Decision reminder", "off")
-        print(_t.cont(_paint(f"Sessions are not asked to record decisions; set [memory] "
-                             f"stop_prompt = true in {user_cfg}", "dim")))
+        print(_t.prose(f"Sessions are not asked to record decisions; set [memory] stop_prompt = "
+                       f"true in {user_cfg}", dim=True))
     try:
         items = claude_code_inventory(root, cwd, global_config_path)
     except Exception as exc:                        # fail-open: doctor must never crash
@@ -1772,28 +1799,27 @@ def _profile_report(root: Path, cwd: Path, active: bool,
                                      f"{_plural(counts['skill'], 'skill')}")
     cache = _measure.load_costs(root)
     b = _savings.budget(items, token_costs, cache)
-    print(_t.kv("Up front", f"up to ~{_savings.human_tokens(b.eager)} tokens ")
+    print(_t.kv("Up front", f"up to ~{_savings.human_tokens(b.eager)} tokens") + " "
           + _paint("(skill + plugin context; actual depends on the goal)", "dim"))
     conns = _measure.connector_costs(cache, {i.id for i in items if i.kind == "mcp"})
     on_demand = b.deferred + sum(conns.values())
     if on_demand:
         detail = f"{_plural(len(conns), 'connector')} + MCP schemas" if conns else "MCP schemas"
-        print(_t.kv("On-demand", f"~{_savings.human_tokens(on_demand)} tokens, {detail} ")
+        print(_t.kv("On-demand", f"~{_savings.human_tokens(on_demand)} tokens, {detail}") + " "
               + _paint("(load lazily; avoided only if used)", "dim"))
 
 def _memory_report(cfg, cwd: Path, tally: _Tally | None = None) -> None:
     tally = tally or _Tally()
-    print(_paint("  memory", "bold"))
+    print(_t.heading("Memory"))
     if not cfg.memory.enabled:
         tally.check("skipped", "Memory recall", "off", dim=True)
         print(_t.cont(_paint("Enable with [memory] enabled = true in loadout/config.toml", "dim")))
-        print()
         return
     store = read_store(cwd, cfg.config_root)
     kinds = {k: sum(1 for e in store.entries if e.kind == k)
              for k in sorted({e.kind for e in store.entries})}
     print(_t.kv("Entries", f"{len(store.entries)}"
-                  + (f" ({', '.join(f'{n} {k}' for k, n in kinds.items())})" if kinds else "")))
+                + (f" ({', '.join(f'{n} {k}' for k, n in kinds.items())})" if kinds else "")))
     open_debt = [e for e in store.entries if e.kind == "debt" and e.status != "resolved"]
     if open_debt:
         tally.check("warn", "Open debt", str(len(open_debt)))
@@ -1808,30 +1834,42 @@ def _memory_report(cfg, cwd: Path, tally: _Tally | None = None) -> None:
     usage = load_usage(cfg.config_root, cwd)
     if usage:
         earning = sum(1 for rec in usage.values() if rec.uses >= cfg.memory.promote_after)
-        print(_t.kv("Delivered", f"{len(usage)} entries, {earning} promoted ")
+        print(_t.kv("Delivered", f"{len(usage)} entries, {earning} promoted") + " "
               + _paint(f"(>= {cfg.memory.promote_after} deliveries)", "dim"))
     pending = load_candidates(cfg.config_root, cwd)
     if pending:
         tally.check("pending", "Candidates", f"{len(pending)} waiting for review")
         _next("claude-loadout memory consolidate")
-    print()
+
+def _doctor_next_steps(cwd: Path, cfg) -> list[tuple[str, list[str]]]:
+    """Doctor's closing guidance: (sentence, commands) pairs, the memory one chosen by state."""
+    steps = [("Launch through claude-loadout (short alias: cld), for example from a shell rc:",
+              ['alias claude="claude-loadout"']),
+             ("A separate profile wraps the same way:",
+              ['alias claude-work="CLAUDE_CONFIG_DIR=~/.claude-work claude-loadout"']),
+             ("Preview what a session would load, with no launch:", ["claude-loadout --explain"]),
+             ("Scope tools with plain-language rules:", ["claude-loadout rules"])]
+    memory = _memory_next_steps(_memory_state(cwd, cfg), cfg.memory.enabled)
+    if memory:
+        command, why = memory[0]
+        steps.append((f"{why[0].upper()}{why[1:]}:", [command]))
+    return steps
 
 def _cmd_doctor(cwd: Path) -> int:
     cfg = load_config(cwd=cwd)
     tally = _Tally()
-    print(_paint("claude-loadout doctor", "bold"))
-    print()
-    profiles = _discover_profiles(cfg.config_root)
-    print(_paint(f"  claude profiles: {_plural(len(profiles), 'profile')}", "bold"))
-    print()
-    for root in profiles:
+    print(_t.heading("Profiles"))
+    for n, root in enumerate(_discover_profiles(cfg.config_root)):
+        if n:
+            print()
         active = root == cfg.config_root
         _profile_report(root, cwd, active,
                         cfg.global_config_path if active else None, cfg.token_costs, tally)
-        print()
+    print()
     _memory_report(cfg, cwd, tally)
+    print()
+    print(_t.heading("Environment"))
     repo_cfg = cwd / ".loadout" / "config.toml"
-    print(_paint("  environment", "bold"))
     if repo_cfg.is_file():
         tally.check("done", "Repo config", str(repo_cfg))
     else:
@@ -1844,8 +1882,8 @@ def _cmd_doctor(cwd: Path) -> int:
         else:
             tally.check("warn", "Notes folder", str(notes))
             if not notes.exists():                  # nothing unread yet; say where the next note goes
-                print(_t.cont(_paint("Not created yet; new notes would go here, where Claude "
-                                     "Code doesn't read them", "dim")))
+                print(_t.prose("Not created yet; new notes would go here, where Claude Code "
+                               "doesn't read them", dim=True))
             else:
                 print(_t.cont(_paint("Claude Code doesn't read it", "dim")))
             _next("claude-loadout memory link")
@@ -1863,23 +1901,11 @@ def _cmd_doctor(cwd: Path) -> int:
     print("\n" * _t.blank_before_summary(), end="")
     print(tally.summary())
     print()
-    print(_paint("  Next steps", "bold"))
-    print("    1. Point your launch command at claude-loadout (short alias: cld),")
-    print("       e.g. add to your shell rc:")
-    alias_plain = _paint('alias claude="claude-loadout"', 'cyan')  # kept out of the f-string: nested
-    print(f"         {alias_plain}")                                # double quotes break f-strings on 3.11
-    print("       or wrap a separate profile:")
-    alias_profile = _paint('alias claude-work="CLAUDE_CONFIG_DIR=~/.claude-work claude-loadout"', 'cyan')
-    print(f"         {alias_profile}")
-    print("    2. Preview what a session would load, without launching anything:")
-    print(f"         {_paint('claude-loadout --explain', 'cyan')}")
-    print("    3. Scope tools with plain-language rules:")
-    print(f"         {_paint('claude-loadout rules', 'cyan')}")
-    steps = _memory_next_steps(_memory_state(cwd, cfg), cfg.memory.enabled)
-    if steps:
-        command, why = steps[0]
-        print(f"    4. {why[0].upper()}{why[1:]}:")
-        print(f"         {_paint(command, 'cyan')}")
+    print(_t.heading("Next steps"))
+    for sentence, commands in _doctor_next_steps(cwd, cfg):
+        print(_t.prose(sentence))
+        for command in commands:                    # commands in the default ink, never wrapped
+            print(" " * 6 + command)
     return 0
 
 def _cmd_measure(cwd: Path) -> int:
@@ -1916,11 +1942,10 @@ def _cmd_measure(cwd: Path) -> int:
     _say("done", f"Measured {_plural(n, 'server')}",
          f"~{_savings.human_tokens(total)} tokens total{_t.sep_plain()}{_t.elapsed(start)}")
     print(_t.cont(_paint(f"Cached to {_measure.costs_path(cfg.config_root)}", "dim")))
-    print(_t.cont(_paint("A diagnostic view; a measured cost feeds savings only for MCP "
-                         "servers in your .claude.json/.mcp.json (matched by bare name)", "dim")))
-    print(_t.cont(_paint("claude.ai connectors are shown here but can't be kept under strict "
-                         "mode; a plugin's own servers load exactly when the plugin is kept",
-                         "dim")))
+    print(_t.prose("A diagnostic view; a measured cost feeds savings only for MCP servers in "
+                   ".claude.json or .mcp.json (matched by bare name)", dim=True))
+    print(_t.prose("claude.ai connectors are shown here but can't be kept under strict mode; a "
+                   "plugin's own servers load exactly when the plugin is kept", dim=True))
     return 0
 
 def _loadout_version() -> str:
@@ -1931,6 +1956,39 @@ def _loadout_version() -> str:
 
 _TAGLINE = "Goal-aware launcher for Claude Code."
 
+# `cld --help` rows: (command, what it does). Descriptions wrap at the terminal width.
+_HELP = (
+    ("cld [claude-args...]", "Launch claude with a goal-scoped tool set"),
+    ("cld --explain", "Print the scoping plan, then exit (no launch)"),
+    ("cld recall <query>", "Search the memory store and print matching entries in full"),
+    ("cld memory", "Show the memory recall state and what to do next"),
+    ("cld memory add <text>", "Record a note (--global for every repo, --anchor <path>)"),
+    ("cld memory scope <name> repo|global", "Change how far an existing note reaches"),
+    ("cld memory link", "Make docs/memory the folder Claude Code loads (--yes skips the prompt)"),
+    ("cld memory consolidate", "Review recorded sessions and promote them to memories"),
+    ("cld memory audit", "Review the store and delete what no longer earns its place "
+                         "(--context '<goal>' shows what it would recall and why, --all-repos "
+                         "covers every project, --json is for a session to read)"),
+    ("cld memory flag <name>", "Mark an entry as wrong (--reason <why>, --clear to undo)"),
+    ("cld debt add|list|resolve", "Track shims, stubs and skipped tests left behind"),
+    ("cld decision new|list|show|supersede", "Architectural decisions, versioned per repo"),
+    ("cld rules", "Author profile-wide keep/drop rules (all repos; launch prompts are "
+                  "repo-local)"),
+    ("cld init [ROOT]", "Seed local config: this repo, or every project under ROOT (--yes "
+                        "asks nothing)"),
+    ("cld update [ROOT]", "Refresh existing seeds: this repo, or every seeded project under ROOT "
+                          "(--yes asks nothing)"),
+    ("cld doctor", "Report profiles, config and model state"),
+    ("cld measure", "Measure the real tool-token cost of MCP servers (opt-in; connects to each)"),
+    ("cld --no-gate", "Launch without the pre-launch review pause (or set LOADOUT_NO_GATE)"),
+    ("cld --no-scope-skills", "Keep every user skill loaded, with no skill scoping (or set "
+                              "LOADOUT_NO_SCOPE_SKILLS)"),
+    ("cld <command> --debug", "Show the traceback of an unexpected error. On a launch --debug "
+                              "is claude's, so use --loadout-debug or LOADOUT_DEBUG=1"),
+    ("cld --help, -h", "Show this help"),
+    ("cld --version, -V", "Show the claude-loadout version"),
+)
+
 def _header(compact: bool = False, machine: bool = False) -> None:
     """Print the Sondalab header on stdout before a command's own output.
 
@@ -1940,110 +1998,91 @@ def _header(compact: bool = False, machine: bool = False) -> None:
     print(_t.header("cld", _loadout_version(), _TAGLINE, compact=compact, machine=machine), end="")
 
 def _print_help() -> None:
-    cmd = lambda s: _paint(s, "cyan")
-    print(
-        f"{_paint('claude-loadout', 'bold')} — goal-aware launcher for Claude Code  {_paint('(alias: cld)', 'dim')}\n"
-        "\n"
-        f"{_paint('Usage:', 'bold')}\n"
-        f"  {cmd('cld [claude-args...]')}   Launch claude with a goal-scoped tool set\n"
-        f"  {cmd('cld --explain')}          Print the scoping plan, then exit (no launch)\n"
-        f"  {cmd('cld recall <query>')}    Search the memory store and print matching entries in full\n"
-        f"  {cmd('cld memory add <text>')} Record a note (--global for every repo, --anchor path)\n"
-        f"  {cmd('cld memory scope <name> repo|global')}  Change how far an existing note reaches\n"
-        f"  {cmd('cld memory link')}      Make docs/memory the folder Claude Code loads (--yes to skip the prompt)\n"
-        f"  {cmd('cld memory consolidate')}  Review recorded sessions and promote them to memories\n"
-        f"  {cmd('cld memory audit')}     Review the store and delete what no longer earns its place\n"
-        f"                                (--context '<goal>' to see what it would recall and why,\n"
-        f"                                 --all-repos for every project, --json for a session to read)\n"
-        f"  {cmd('cld memory flag <name>')}  Mark an entry as wrong (--reason ..., --clear to undo)\n"
-        f"  {cmd('cld debt add|list|resolve')}  Track shims, stubs and skipped tests you left behind\n"
-        f"  {cmd('cld decision new|list|show|supersede')}  Architectural decisions, versioned per repo\n"
-        f"  {cmd('cld rules')}              Author profile-wide keep/drop rules (all repos; launch prompts are repo-local)\n"
-        f"  {cmd('cld init [ROOT]')}        Seed local config — this repo, or bulk-seed every project under ROOT\n"
-        f"  {cmd('cld update [ROOT]')}      Refresh existing seeds — this repo, or all seeded under ROOT\n"
-        f"  {cmd('cld doctor')}             Report profiles, config, and model state\n"
-        f"  {cmd('cld measure')}            Measure real MCP tool-token cost — MCP only (they expose tools at runtime; opt-in, connects)\n"
-        f"  {cmd('cld --no-gate')}          Launch without the pre-launch review pause (or set LOADOUT_NO_GATE)\n"
-        f"  {cmd('cld --no-scope-skills')}  Keep every user skill loaded — skip skill scoping (or set LOADOUT_NO_SCOPE_SKILLS)\n"
-        f"  {cmd('cld --help, -h')}         Show this help\n"
-        f"  {cmd('cld --version, -V')}      Show the claude-loadout version\n"
-        "\n"
-        f"{_paint('Any other flags pass straight through to claude — run `claude --help` for those.', 'dim')}"
-    )
+    col = 30                                        # descriptions start here, wrapped at width()
+    print("claude-loadout (alias cld): goal-aware launcher for Claude Code")
+    print()
+    print(_t.heading("Usage"))
+    for command, text in _HELP:
+        body = _t.prose(text, indent=col).split("\n")
+        if len(command) <= col - 4:
+            body[0] = f"  {command.ljust(col - 2)}{body[0][col:]}"
+        else:                                       # a long command takes its own line
+            body.insert(0, f"  {command}")
+        print("\n".join(body))
+    print()
+    print(_t.prose("Any other flags pass straight through to claude; run `claude --help` for "
+                   "those.", indent=0, dim=True))
 
 def _print_explain(scope: _Scope, plan) -> None:
-    print(_paint("claude-loadout — scoping plan", "bold"))
-    print()
-    lbl = lambda s: _paint(f"  {s:<11}", "dim")
-    print(f"{lbl('goal')}{scope.goal!r}   "
-          f"{_paint(f'({scope.source}{_t.sep_plain()}confidence {scope.confidence:.2f})', 'dim')}")
-    print(f"{lbl('threshold')}{scope.threshold}")
+    print(_t.heading("Scoping plan"))
+    print(_t.kv("Goal", repr(scope.goal)) + " "
+          + _paint(f"({scope.source}{_t.sep_plain()}confidence {scope.confidence:.2f})", "dim"))
+    print(_t.kv("Threshold", str(scope.threshold)))
     print()
     kept_prunable = [i for i in scope.kept if i.kind in _savings.PRUNABLE]
-    print(_paint(f"  keeping ({len(kept_prunable)})", "bold"))
+    print(_t.heading(f"Keeping ({len(kept_prunable)})"))
     for i in kept_prunable:
-        print(f"    {_t.glyph('done')} {i.id}")
+        print(f"  {_t.mark('done', 'kept')} {i.id}")
     if not kept_prunable:
-        print(_paint("    (nothing)", "dim"))
+        print(_t.cont(_paint("nothing", "dim")))
     print()
     dropped = scope.dropped
-    print(_paint(f"  dropping ({len(dropped)})", "bold"))
+    print(_t.heading(f"Dropping ({len(dropped)})"))
     width = max((len(i.id) for i, _ in dropped), default=0)
     for item, s in dropped:
         reason = f"{s:.3f}" if isinstance(s, float) else str(s)
-        print(f"    {_t.glyph('skipped')} {item.id:<{width}}  {_paint(reason, 'dim')}")
+        print(f"  {_t.mark('skipped', 'dropped')} {item.id:<{width}}  {_paint(reason, 'dim')}")
     if not dropped:
-        print(_paint("    (nothing)", "dim"))
-    print()
+        print(_t.cont(_paint("nothing", "dim")))
     conn_tok = sum(t for _, t in scope.connectors)
     if scope.connectors:
-        print(_paint("  connectors dropped (all-or-nothing, strict mode)", "bold"))
+        print()
+        print(_t.heading("Connectors dropped (all-or-nothing, strict mode)"))
         w = max(len(c) for c, _ in scope.connectors)
         for cid, tok in scope.connectors:
-            print(f"    {_t.glyph('skipped')} {cid:<{w}}  {_paint('~' + _savings.human_tokens(tok), 'dim')}")
-        print()
+            print(f"  {_t.mark('skipped', 'dropped')} {cid:<{w}}  "
+                  f"{_paint('~' + _savings.human_tokens(tok), 'dim')}")
     if scope.memory is not None:
         m = scope.memory
-        print(_paint("  memory", "bold"))
-        if m.total == 0:
-            print(_paint("    store is empty — nothing injected", "dim"))
-        elif m.shown == 0:
-            print(_paint(f"    {_plural(m.total, 'entry')} in store, none injected "
-                         "(below min_entries or threshold)", "dim"))
-        else:
-            print(f"    injected:       {m.shown} of {m.total} entries  "
-                  f"{_paint('≈ ' + _savings.human_tokens(m.injected) + ' tokens (heuristic)', 'yellow')}")
-        if m.resident:
-            print(_paint(f"    already loaded: {m.resident} by Claude Code itself "
-                         "(MEMORY.md index) — not repeated here", "dim"))
         print()
+        print(_t.heading("Memory"))
+        if m.total == 0:
+            print(_t.kv("Injected", "nothing; the store is empty", dim=True))
+        elif m.shown == 0:
+            print(_t.kv("Injected", f"none of {_plural(m.total, 'entry')} (below min_entries "
+                                    "or threshold)", dim=True))
+        else:
+            print(_t.kv("Injected", f"{m.shown} of {m.total} entries") + " "
+                  + _paint(f"(~{_savings.human_tokens(m.injected)} tokens, heuristic)", "yellow"))
+        if m.resident:
+            print(_t.kv("Already loaded", f"{m.resident} by Claude Code itself (MEMORY.md index), "
+                                          "not repeated here", dim=True))
     s = scope.savings
     on_demand = s.deferred + conn_tok
-    print(_paint("  savings", "bold"))
-    print(f"    pruned:         {s.dropped} of {s.total} tools")
-    print(f"    up front:       "
-          f"{_paint('≈ ' + _savings.human_tokens(s.eager) + ' tokens', 'green', 'bold')} "
-          f"{_paint('— skill + plugin context, gone from turn one', 'dim')}")
+    print()
+    print(_t.heading("Savings"))
+    print(_t.kv("Pruned", f"{s.dropped} of {s.total} tools"))
+    print(_t.kv("Up front", f"~{_savings.human_tokens(s.eager)} tokens") + " "
+          + _paint("(skill + plugin context, gone from turn one)", "dim"))
     if s.injected:
         net = _savings.human_tokens(abs(s.net))
         sign = "gain" if s.net >= 0 else "cost"
-        print(f"    net up front:   "
-              f"{_paint(('≈ ' if s.net >= 0 else '≈ -') + net + ' tokens', 'bold')} "
-              f"{_paint(f'— after the memory payload ({sign})', 'dim')}")
+        print(_t.kv("Net up front", f"~{'' if s.net >= 0 else '-'}{net} tokens") + " "
+              + _paint(f"(after the memory payload, {sign})", "dim"))
     if on_demand:
         note = "measured" if scope.connectors else "estimate"
-        print(f"    on-demand:      {_paint('≈ ' + _savings.human_tokens(on_demand) + ' tokens', 'dim')} "
-              f"{_paint(f'— MCP/connector schemas load lazily; avoided only if used ({note})', 'dim')}")
+        print(_t.kv("On-demand", f"~{_savings.human_tokens(on_demand)} tokens") + " "
+              + _paint(f"(MCP/connector schemas load lazily; avoided only if used, {note})", "dim"))
     elif not scope.measured:
-        print(_paint("    on-demand:      run `claude-loadout measure` to quantify the claude.ai "
-                     "connectors strict mode blocks", "dim"))
+        print(_t.kv("On-demand", "run `claude-loadout measure` to quantify the claude.ai "
+                                 "connectors strict mode blocks", dim=True))
     print()
     servers = getattr(plan, "servers", ())
-    print(_paint("  mcp servers", "bold"))
-    print(f"    {', '.join(servers) if servers else _paint('none', 'dim')}")
+    print(_t.heading("MCP servers"))
+    print(_t.cont(", ".join(servers) if servers else _paint("none", "dim")))
     print()
-    print(_paint("  command", "bold"))
-    print(f"    {_paint(' '.join(plan.argv), 'dim')}")
+    print(_t.heading("Command"))
+    print(_t.cont(" ".join(plan.argv)))
 
 def _savings_line(scope: _Scope) -> str:
     s = scope.savings
@@ -2052,13 +2091,15 @@ def _savings_line(scope: _Scope) -> str:
     if scope.connectors:
         core += f" + {len(scope.connectors)} connectors"
     parts = [core, f"~{_savings.human_tokens(s.eager)} trimmed up front"]
-    if on_demand:                                   # MCP schemas load lazily — cost only if used
+    if on_demand:                                   # MCP schemas load lazily; cost only if used
         parts.append(f"~{_savings.human_tokens(on_demand)} on-demand avoided")
-    return _t.sep(err=True).join(parts)
+    return _t.sep_plain().join(parts)
 
 def _scoped(scope: _Scope) -> None:
-    """The scoping summary on stderr, as a done line, before claude takes the screen."""
-    print(_t.note("done", _savings_line(scope), err=True), file=sys.stderr)
+    """The scoping summary on stderr, as a done line wrapped at the width, before claude starts."""
+    lines = _t.prose(_savings_line(scope), indent=4, err=True).split("\n")
+    lines[0] = "  " + _t.glyph("done", err=True) + " " + lines[0][4:]
+    print("\n".join(lines), file=sys.stderr)
 
 def _maybe_persist_edit(gate: _EditGate, selected_ids: set) -> None:
     # Offer to freeze the edited keep/drop as a repo seed so future launches respect it.
@@ -2093,7 +2134,7 @@ def _launch_gate(scope: _Scope, plan, gate: _EditGate, passthrough: list[str], n
         if choice == "launch":
             return scope, plan
         if not gate.editable:
-            _warn("Nothing to edit — every kept tool is pinned by config")
+            _warn("Nothing to edit; every kept tool is pinned by config")
             return scope, plan
         preset = [i.id in gate.kept_ids for i in gate.editable]
         labels = [f"{i.id}  {_paint('(' + i.kind + ')', 'dim', err=True)}" for i in gate.editable]
