@@ -129,11 +129,16 @@ def _menu(question: str, prompt: str, choices: dict[str, tuple[str, ...]]) -> st
         return next((key for key, words in choices.items() if answer.lower() in words), None)
     return _ask_valid(question, prompt, parse)
 
-def _build_embed(model_name: str):
+def _build_embed(model_name: str, warn=None):
+    """The embedding function for `model_name`, or the keyword fallback when it cannot load.
+
+    `warn` receives the fallback warning; inside a Waiting block pass a collector and print
+    after it, so the spinner never draws over the line.
+    """
     try:
         return make_model2vec_embed(model_name)
     except Exception as exc:                       # import error, download failure, etc.
-        _warn(f"Model unavailable ({exc}); using keyword fallback")
+        (warn or _warn)(f"Model unavailable ({exc}); using keyword fallback")
         return keyword_embed
 
 def _build_compiler(cfg):
@@ -599,7 +604,7 @@ def _session_hooks(cfg, cwd: Path, mem) -> tuple[dict | None, dict | None]:
 
 _MOVE = None                                        # hint key placeholder: the arrows, ↑↓ or up/dn
 _AUDIT_HINT = ((_MOVE, "move"), ("space", "keep/drop"), ("a", "all/none"), ("enter", "apply"),
-               ("q", "cancel"), ("ctrl-c", "quit"))
+               ("q", "back"), ("ctrl-c", "quit"))
 _LIST_SEP = "\x1f"                                  # env-passed lists: see debt_hook.LIST_SEP
 _MEMORY_ACTIONS = frozenset({"enable", "disable", "add", "audit", "flag", "consolidate", "scope",
                             "link"})
@@ -992,8 +997,19 @@ def _scoped_plan(passthrough: list[str], cwd: Path, config_root_override: Path |
     pinned_ids = {i.id for i in pinned}            # always_keep config wins over rules (spec §12)
     remainder = [i for i in items if i.id not in pinned_ids]
     outcome = apply_rules(remainder, rules, context)
-    embed = _build_embed(cfg.model_name)
-    ranked = Ranker(embed=embed).rank(context, list(outcome.undecided), cfg.threshold, cfg.always_keep)
+    # Loading the model and ranking can take seconds: a spinner on stderr after delayMs, started
+    # after the goal prompt so it never draws over a question.
+    warnings: list[str] = []
+    start, label = time.monotonic(), _plural(len(items), "tool")
+    with _t.Waiting(f"Ranking {label}{_t.ellipsis()}") as waiting:
+        embed = _build_embed(cfg.model_name, warnings.append)
+        ranked = Ranker(embed=embed).rank(context, list(outcome.undecided), cfg.threshold,
+                                          cfg.always_keep)
+        payload, mem = _recall_payload(cfg, cwd, context, embed)
+    for message in warnings:
+        _warn(message)
+    if waiting.shown:                               # a spinner always ends in a persisted line
+        print(_t.step("done", f"Ranked {label}", _t.elapsed(start), err=True), file=sys.stderr)
     # Skill scoping on: every kind (mcp, plugin, skill) is prunable and flows through keep/drop
     # (compose turns dropped user skills off via skillOverrides). --no-scope-skills force-keeps
     # skills — none get dropped, so compose writes no overrides.
@@ -1006,7 +1022,6 @@ def _scoped_plan(passthrough: list[str], cwd: Path, config_root_override: Path |
     # Launch-time keep/drop review is the pre-launch gate (a single checkbox over every prunable
     # tool), not a per-item prompt — see _launch_gate. `claude-loadout rules` remains the per-item /
     # natural-language authoring path.
-    payload, mem = _recall_payload(cfg, cwd, context, embed)
     hooks, hook_env = _session_hooks(cfg, cwd, mem)
     def _finish(kept, dropped):                    # compose + cost accounting for a keep/drop decision
         plan = compose(kept, items, cfg.config_root, passthrough, cwd=cwd,
@@ -1139,19 +1154,33 @@ def _parse_selection(raw: str, n: int) -> set[int] | None:
     return picks or None
 
 _CHECK_HINT = ((_MOVE, "move"), ("space", "toggle"), ("a", "all/none"), ("enter", "confirm"),
-               ("q", "cancel"), ("ctrl-c", "quit"))
+               ("q", "back"), ("ctrl-c", "quit"))
 
-def _read_key():                                    # one keypress -> normalized token
-    import termios, tty
+_ESC_WAIT = 0.1   # seconds to wait for the rest of an escape sequence before ESC is the Esc key
+
+def _read_key():
+    """One keypress in raw mode as a token: "up", "down", "esc", or the character typed.
+
+    Reads the descriptor directly: sys.stdin's buffer would hide the rest of an escape
+    sequence from select(). A lone ESC returns after _ESC_WAIT, not on the next keypress;
+    end of input reads as "esc", so every menu loop ends.
+    """
+    import select, termios, tty
     fd = sys.stdin.fileno()
     old = termios.tcgetattr(fd)
     try:
         tty.setraw(fd)
-        ch = sys.stdin.read(1)
-        if ch == "\x1b":                            # CSI escape -> arrow keys
-            seq = sys.stdin.read(2)
-            return {"[A": "up", "[B": "down"}.get(seq, "esc")
-        return ch
+        ch = os.read(fd, 1)
+        if not ch:
+            return "esc"
+        if ch != b"\x1b":
+            return ch.decode(errors="replace")
+        seq = b""
+        while select.select([fd], [], [], _ESC_WAIT)[0]:
+            seq += os.read(fd, 1)
+            if len(seq) >= 2 and (seq[:1] not in (b"[", b"O") or 0x40 <= seq[-1] <= 0x7E):
+                break                               # a CSI/SS3 sequence ends at its final byte
+        return {b"[A": "up", b"[B": "down", b"OA": "up", b"OB": "down"}.get(seq, "esc")
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, old)
 
@@ -1888,7 +1917,11 @@ def _cmd_doctor(cwd: Path) -> int:
                 print(_t.cont(_paint("Claude Code doesn't read it", "dim")))
             _next("claude-loadout memory link")
     resolved = resolve_model_source(cfg.model_name)
-    embed = _build_embed(cfg.model_name)           # warns + falls back on failure
+    warnings: list[str] = []
+    with _t.Waiting(f"Loading embedding model{_t.ellipsis()}"):   # ends in the check line below
+        embed = _build_embed(cfg.model_name, warnings.append)   # falls back on failure
+    for message in warnings:
+        _warn(message)
     model_state = ("keyword fallback" if embed is keyword_embed
                    else "bundled copy" if resolved == str(bundled_model_path()) else "external")
     tally.check("warn" if embed is keyword_embed else "done", "Embedding model",

@@ -195,19 +195,21 @@ def test_recall_bytes_ignore_ascii_mode(tmp_path, monkeypatch, capsys):
                                        "sessions\n")
 
 
-def _fake_termios(monkeypatch, read):
-    import termios, tty
+def _fake_termios(monkeypatch, read, ready=lambda: False):
+    """A raw terminal on fd 0: os.read() yields `read()`, select() reports `ready()`."""
+    import select, termios, tty
     calls = []
     monkeypatch.setattr(termios, "tcgetattr", lambda fd: "saved")
     monkeypatch.setattr(termios, "tcsetattr", lambda fd, when, old: calls.append(old))
     monkeypatch.setattr(tty, "setraw", lambda fd: None)
-    monkeypatch.setattr(cli.sys, "stdin", type("S", (), {"fileno": lambda self: 0,
-                                                          "read": lambda self, n: read()})())
+    monkeypatch.setattr(cli.sys, "stdin", type("S", (), {"fileno": lambda self: 0})())
+    monkeypatch.setattr(cli.os, "read", lambda fd, n: read())
+    monkeypatch.setattr(select, "select", lambda r, w, x, t: (r if ready() else [], [], []))
     return calls
 
 
 def test_read_key_restores_the_terminal_on_ctrl_c(monkeypatch):
-    calls = _fake_termios(monkeypatch, lambda: "\x03")
+    calls = _fake_termios(monkeypatch, lambda: b"\x03")
     assert cli._read_key() == "\x03" and calls == ["saved"]
 
 
@@ -216,6 +218,26 @@ def test_read_key_restores_the_terminal_on_an_exception(monkeypatch):
     with pytest.raises(OSError):
         cli._read_key()
     assert calls == ["saved"]
+
+
+def test_lone_esc_returns_without_waiting_for_more_bytes(monkeypatch):
+    _fake_termios(monkeypatch, iter([b"\x1b"]).__next__)  # a second read would raise
+    assert cli._read_key() == "esc"
+
+
+def test_arrow_sequence_reads_as_a_key(monkeypatch):
+    data = iter([b"\x1b", b"[", b"A"])
+    pending = [2]
+    def ready():
+        pending[0] -= 1
+        return pending[0] >= 0
+    _fake_termios(monkeypatch, data.__next__, ready)
+    assert cli._read_key() == "up"
+
+
+def test_end_of_input_reads_as_esc(monkeypatch):
+    _fake_termios(monkeypatch, lambda: b"")              # a hung-up terminal ends the menu
+    assert cli._read_key() == "esc"
 
 
 @pytest.mark.parametrize("env", [{"TERM": "dumb"}, {"CI": ""}])
@@ -257,6 +279,7 @@ def test_menu_marks_the_cursor_row_with_the_seam():
     rows = [ln.replace("\033[K", "") for ln in out.getvalue().split("\n")]
     assert " ".join(rows).count("▌") == 1 and any(r.startswith("▌  [ ] b") for r in rows)
     assert "↑↓ move · space toggle" in out.getvalue() and "ctrl-c quit" in out.getvalue()
+    assert "q back" in out.getvalue()                      # the shared verb, not "cancel"
 
 
 def test_menu_hint_paints_keys_accent_and_verbs_dim(monkeypatch):
@@ -373,3 +396,37 @@ def test_accessible_mode_has_no_header(monkeypatch):
     monkeypatch.setenv("SONDALAB_ACCESSIBLE", "1")
     cli.main(["--help"])
     assert "sonda/lab" not in out.getvalue()
+
+
+# --- no VT (a Windows console that refuses it): plain text ------------------------------------
+
+def test_without_vt_output_is_plain_ascii(tmp_path, monkeypatch, capsys):
+    _memory_repo(tmp_path, n=0)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "root"))
+    monkeypatch.setenv("FORCE_COLOR", "1")                 # colour would be on
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli._t, "_vt", True)                # restored after the test
+    monkeypatch.setattr(cli._slt, "enable_vt", lambda stream=None: False)
+    cli.main(["debt", "add", "--name", "m0", "a shim left behind"])
+    capsys.readouterr()
+    cli.main(["debt", "list"])
+    out = capsys.readouterr().out
+    assert "\033" not in out and out.isascii() and "m0" in out
+    assert cli._can_raw() is False and cli._t.sync("x") == "x"
+
+
+# --- the scoping spinner ----------------------------------------------------------------------
+
+def test_slow_scoping_shows_a_running_line_and_ends_in_a_step(tmp_path, monkeypatch, capsys):
+    import time
+    from test_cli import _root
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(_root(tmp_path)))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setitem(sl.SPINNER, "delayMs", 0)
+    def slow(name):
+        time.sleep(0.05)
+        return cli.keyword_embed
+    monkeypatch.setattr(cli, "make_model2vec_embed", slow)
+    cli.main(["--explain"])
+    err = capsys.readouterr().err.splitlines()
+    assert err[0].startswith("  ● Ranking ") and err[-1].startswith("  ✓ Ranked ")
