@@ -454,7 +454,7 @@ def _cmd_link(root: Path, args: list[str], override: Path | None = None) -> int:
     if plan.state == "unknown-project":
         _fail("Could not confirm the folder Claude Code reads",
               f"Claude Code keeps no sessions for {root} under {plan.harness.parent} yet; start "
-              "one here first, from the symlinked path if that is how you reach this repo",
+              "one here first, from the symlinked path if the repo is reached through one",
               "claude, then claude-loadout memory link")
         return 1
     if plan.state == "elsewhere":
