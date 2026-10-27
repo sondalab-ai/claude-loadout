@@ -1,5 +1,5 @@
 from __future__ import annotations
-import json, os, re, shlex, subprocess, sys, time
+import json, os, re, shlex, subprocess, sys, time, traceback
 from fnmatch import fnmatch
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
@@ -2108,8 +2108,36 @@ def _launch_gate(scope: _Scope, plan, gate: _EditGate, passthrough: list[str], n
         _scoped(scope)
         return scope, plan
 
+# Commands cld claims itself; anything else launches claude with argv passed through.
+_SUBCOMMANDS = frozenset({"--help", "-h", "help", "--version", "-V", "doctor", "recall", "measure",
+                          "init", "update", "rules"})
+
+def _is_subcommand(argv: list[str]) -> bool:
+    """Whether cld handles argv itself rather than launching claude with it (mirrors _run)."""
+    if not argv:
+        return False
+    head = argv[0]
+    return (head in _SUBCOMMANDS
+            or (head == "decision" and _is_action(argv, _DECISION_ACTIONS))
+            or (head == "debt" and _is_action(argv, _DEBT_ACTIONS))
+            or (head == "memory" and _is_action(argv, _MEMORY_ACTIONS)))
+
+def _debug_switch(argv: list[str]) -> tuple[list[str], bool, str]:
+    """Take cld's debug switch out of argv: (argv, on, the flag an error's fix line names).
+
+    `--loadout-debug` or LOADOUT_DEBUG work everywhere. A bare `--debug` is cld's only on a
+    subcommand: on the launch path it is claude's own flag and passes through untouched.
+    """
+    on = bool(os.environ.get("LOADOUT_DEBUG")) or "--loadout-debug" in argv
+    argv = [a for a in argv if a != "--loadout-debug"]
+    bare = [a for a in argv if a != "--debug"]
+    if _is_subcommand(bare):
+        return bare, on or len(bare) != len(argv), "--debug"
+    return argv, on, "--loadout-debug"
+
 def main(argv: list[str] | None = None) -> int:
     _t.enable_vt()                                  # Windows: no VT means plain text throughout
+    argv, debug, debug_flag = _debug_switch(sys.argv[1:] if argv is None else list(argv))
     try:
         return _run(argv)
     except KeyboardInterrupt:                       # Ctrl-C at any prompt -> clean abort, no traceback
@@ -2118,6 +2146,13 @@ def main(argv: list[str] | None = None) -> int:
     except _slt.TermError as exc:                   # no valid answer, or a flag missing off a TTY
         print(_t.term_error(exc), file=sys.stderr)
         return 2
+    except Exception as exc:                        # unexpected: three lines; traceback only on ask
+        if debug:
+            traceback.print_exc()
+            return 1
+        _fail("Unexpected error in claude-loadout", f"{type(exc).__name__}: {exc}",
+              shlex.join(["claude-loadout", *argv, debug_flag]))
+        return 1
 
 def _run(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv

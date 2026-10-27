@@ -229,3 +229,67 @@ def test_root_that_is_not_a_directory_exits_non_zero(tmp_path, monkeypatch, caps
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(_root(tmp_path)))
     assert cli.main([cmd, str(tmp_path / "nope"), "--yes"]) == 2
     assert "is not a directory" in " ".join(capsys.readouterr().err.split())
+
+
+# --- unexpected failures: three lines, traceback only with --debug ---------------------------
+
+def _boom(*a, **k):
+    raise RuntimeError("boom")
+
+
+def test_unexpected_error_is_the_three_line_block(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "_cmd_doctor", _boom)
+    assert cli.main(["doctor"]) == 1
+    err = capsys.readouterr().err
+    assert "Traceback" not in err
+    assert err.splitlines() == ["  ✗ Unexpected error in claude-loadout",
+                                "    RuntimeError: boom",
+                                "    Try: claude-loadout doctor --debug"]
+
+
+def test_debug_on_a_subcommand_shows_the_traceback(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    seen = []
+    monkeypatch.setattr(cli, "_cmd_recall", lambda cwd, args, override: seen.append(args) or _boom())
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(_root(tmp_path)))
+    assert cli.main(["recall", "--debug", "q"]) == 1
+    assert seen == [["q"]]                                 # --debug is cld's here, not the query's
+    err = capsys.readouterr().err
+    assert "Traceback" in err and "RuntimeError: boom" in err
+
+
+def test_debug_on_the_launch_path_stays_claudes(tmp_path, monkeypatch, capsys):
+    # claude has its own --debug: it passes through, and cld's switch is --loadout-debug.
+    root = _root(tmp_path)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "make_model2vec_embed", lambda name: cli.keyword_embed)
+    seen = {}
+    monkeypatch.setattr(cli.subprocess, "run", lambda argv, **k: (seen.setdefault("argv", argv), _RC(0))[1])
+    assert cli.main(["--debug", "--loadout-debug", "-p", "hi"]) == 0
+    assert "--debug" in seen["argv"] and "--loadout-debug" not in seen["argv"]
+
+
+def test_launch_path_fix_names_loadout_debug(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(_root(tmp_path)))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "_launch_gate", _boom)
+    monkeypatch.setattr(cli, "make_model2vec_embed", lambda name: cli.keyword_embed)
+    assert cli.main(["-p", "hi there"]) == 1
+    err = capsys.readouterr().err.splitlines()
+    assert err[-1] == "    Try: claude-loadout -p 'hi there' --loadout-debug"
+
+
+def test_loadout_debug_env_shows_the_traceback(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("LOADOUT_DEBUG", "1")
+    monkeypatch.setattr(cli, "_cmd_doctor", _boom)
+    assert cli.main(["doctor"]) == 1
+    assert "Traceback" in capsys.readouterr().err
+
+
+def test_ctrl_c_is_not_an_unexpected_error(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "_cmd_doctor", lambda cwd: (_ for _ in ()).throw(KeyboardInterrupt()))
+    assert cli.main(["doctor"]) == 130
