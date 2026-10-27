@@ -9,9 +9,9 @@ from pathlib import Path
 import pytest
 import sondalab_palette as sl
 from sondalab_palette import term as slt
-
-import ccloadout.cli as cli
 from test_cli import _RC, _fake_stdin, _memory_repo, _proj, _root, _two_profiles
+
+from ccloadout import cli
 
 RETRIES = sl.ROBUSTNESS["promptRetries"]
 

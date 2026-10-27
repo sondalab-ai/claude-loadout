@@ -1477,7 +1477,7 @@ def test_audit_context_explains_admission_and_rejection(tmp_path, monkeypatch, c
     monkeypatch.setattr(cli, "make_model2vec_embed", lambda name: cli.keyword_embed)
     cli.main(["memory", "audit", "--context", "note number 0 about scoping sessions"])
     out = capsys.readouterr().out
-    assert "would recall" in out and "threshold" in out
+    assert "WOULD RECALL" in out and "Threshold" in out
     assert "below the line" in out and "below-threshold" in out
 
 def test_flagging_demotes_an_entry_and_shows_up_in_the_audit(tmp_path, monkeypatch, capsys):

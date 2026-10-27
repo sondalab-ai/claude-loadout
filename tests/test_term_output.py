@@ -419,6 +419,7 @@ def test_without_vt_output_is_plain_ascii(tmp_path, monkeypatch, capsys):
 
 def test_slow_scoping_shows_a_running_line_and_ends_in_a_step(tmp_path, monkeypatch, capsys):
     import time
+
     from test_cli import _root
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(_root(tmp_path)))
     monkeypatch.chdir(tmp_path)

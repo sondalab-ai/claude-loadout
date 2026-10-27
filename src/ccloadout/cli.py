@@ -452,9 +452,9 @@ def _cmd_link(root: Path, args: list[str], override: Path | None = None) -> int:
         return 0
     plan = plan_link(cfg.config_root, root)
     if plan.state == "unknown-project":
-        _fail(f"Could not confirm the folder Claude Code reads for {root}",
-              f"Claude Code keeps no sessions under {plan.harness.parent} yet; start one here "
-              "first, from the symlinked path if that is how you reach this repo",
+        _fail("Could not confirm the folder Claude Code reads",
+              f"Claude Code keeps no sessions for {root} under {plan.harness.parent} yet; start "
+              "one here first, from the symlinked path if that is how you reach this repo",
               "claude, then claude-loadout memory link")
         return 1
     if plan.state == "elsewhere":
@@ -849,8 +849,8 @@ def _audit_context(cwd: Path, cfg, entries, context: str, usage, flags, as_json:
                            "base": round(v.base, 4), "reasons": list(v.reasons),
                            "admitted": v.admitted} for v in verdicts], indent=1))
         return 0
-    print(_t.heading("Recall preview"))
-    print(_t.kv("What a session would recall", repr(context)))
+    print(_t.heading("What a session would recall"))
+    print(_t.kv("Goal", repr(context)))
     print(_t.kv("Threshold", str(cfg.memory.threshold)))
     print(_t.kv("Budget", f"{cfg.memory.budget_tokens} tokens"))
     print()
@@ -1165,7 +1165,7 @@ def _read_key():
     sequence from select(). A lone ESC returns after _ESC_WAIT, not on the next keypress;
     end of input reads as "esc", so every menu loop ends.
     """
-    import select, termios, tty
+    import select as _select, termios, tty
     fd = sys.stdin.fileno()
     old = termios.tcgetattr(fd)
     try:
@@ -1176,7 +1176,7 @@ def _read_key():
         if ch != b"\x1b":
             return ch.decode(errors="replace")
         seq = b""
-        while select.select([fd], [], [], _ESC_WAIT)[0]:
+        while _select.select([fd], [], [], _ESC_WAIT)[0]:
             seq += os.read(fd, 1)
             if len(seq) >= 2 and (seq[:1] not in (b"[", b"O") or 0x40 <= seq[-1] <= 0x7E):
                 break                               # a CSI/SS3 sequence ends at its final byte
@@ -1999,25 +1999,25 @@ _HELP = (
     ("cld memory scope <name> repo|global", "Change how far an existing note reaches"),
     ("cld memory link", "Make docs/memory the folder Claude Code loads (--yes skips the prompt)"),
     ("cld memory consolidate", "Review recorded sessions and promote them to memories"),
-    ("cld memory audit", "Review the store and delete what no longer earns its place "
+    ("cld memory audit", ("Review the store and delete what no longer earns its place "
                          "(--context '<goal>' shows what it would recall and why, --all-repos "
-                         "covers every project, --json is for a session to read)"),
+                         "covers every project, --json is for a session to read)")),
     ("cld memory flag <name>", "Mark an entry as wrong (--reason <why>, --clear to undo)"),
     ("cld debt add|list|resolve", "Track shims, stubs and skipped tests left behind"),
     ("cld decision new|list|show|supersede", "Architectural decisions, versioned per repo"),
-    ("cld rules", "Author profile-wide keep/drop rules (all repos; launch prompts are "
-                  "repo-local)"),
-    ("cld init [ROOT]", "Seed local config: this repo, or every project under ROOT (--yes "
-                        "asks nothing)"),
-    ("cld update [ROOT]", "Refresh existing seeds: this repo, or every seeded project under ROOT "
-                          "(--yes asks nothing)"),
+    ("cld rules", ("Author profile-wide keep/drop rules (all repos; launch prompts are "
+                  "repo-local)")),
+    ("cld init [ROOT]", ("Seed local config: this repo, or every project under ROOT (--yes "
+                        "asks nothing)")),
+    ("cld update [ROOT]", ("Refresh existing seeds: this repo, or every seeded project under ROOT "
+                          "(--yes asks nothing)")),
     ("cld doctor", "Report profiles, config and model state"),
     ("cld measure", "Measure the real tool-token cost of MCP servers (opt-in; connects to each)"),
     ("cld --no-gate", "Launch without the pre-launch review pause (or set LOADOUT_NO_GATE)"),
-    ("cld --no-scope-skills", "Keep every user skill loaded, with no skill scoping (or set "
-                              "LOADOUT_NO_SCOPE_SKILLS)"),
-    ("cld <command> --debug", "Show the traceback of an unexpected error. On a launch --debug "
-                              "is claude's, so use --loadout-debug or LOADOUT_DEBUG=1"),
+    ("cld --no-scope-skills", ("Keep every user skill loaded, with no skill scoping (or set "
+                              "LOADOUT_NO_SCOPE_SKILLS)")),
+    ("cld <command> --debug", ("Show the traceback of an unexpected error. On a launch --debug "
+                              "is claude's, so use --loadout-debug or LOADOUT_DEBUG=1")),
     ("cld --help, -h", "Show this help"),
     ("cld --version, -V", "Show the claude-loadout version"),
 )
