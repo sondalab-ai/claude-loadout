@@ -477,7 +477,9 @@ def test_config_and_rules_warnings_name_the_tool_on_the_warn_line(tmp_path, caps
 def test_the_hook_path_does_not_load_the_terminal_layer():
     # The prompt hook imports memory (-> inventory -> config) on every prompt; term and the
     # palette load only when a warning is actually printed.
-    import subprocess, sys
+    import subprocess
+    import sys
+
     code = ("import ccloadout.memory, sys; "
             "print('ccloadout.term' in sys.modules, 'sondalab_palette' in sys.modules)")
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
