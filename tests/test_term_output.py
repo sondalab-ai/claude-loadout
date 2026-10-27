@@ -400,19 +400,48 @@ def test_accessible_mode_has_no_header(monkeypatch):
 
 # --- no VT (a Windows console that refuses it): plain text ------------------------------------
 
-def test_without_vt_output_is_plain_ascii(tmp_path, monkeypatch, capsys):
+def _vt(monkeypatch, *, out: bool, err: bool, out_tty=True, err_tty=True):
+    """enable_vt() fails on the streams marked False; each stream a TTY or not."""
+    stdout, stderr = (_Tty() if out_tty else io.StringIO()), (_Tty() if err_tty else io.StringIO())
+    monkeypatch.setattr("sys.stdout", stdout)
+    monkeypatch.setattr("sys.stderr", stderr)
+    monkeypatch.setenv("FORCE_COLOR", "1")                 # colour would be on everywhere
+    monkeypatch.setattr(cli._t, "_vt", {"out": True, "err": True})   # restored after the test
+    monkeypatch.setattr(cli._slt, "enable_vt",
+                        lambda stream=None: {id(stdout): out, id(stderr): err}[id(stream)])
+    return stdout, stderr
+
+
+def test_without_vt_output_is_plain_ascii(tmp_path, monkeypatch):
     _memory_repo(tmp_path, n=0)
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "root"))
-    monkeypatch.setenv("FORCE_COLOR", "1")                 # colour would be on
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(cli._t, "_vt", True)                # restored after the test
-    monkeypatch.setattr(cli._slt, "enable_vt", lambda stream=None: False)
+    stdout, stderr = _vt(monkeypatch, out=False, err=False)
     cli.main(["debt", "add", "--name", "m0", "a shim left behind"])
-    capsys.readouterr()
     cli.main(["debt", "list"])
-    out = capsys.readouterr().out
+    out = stdout.getvalue()
     assert "\033" not in out and out.isascii() and "m0" in out
-    assert cli._can_raw() is False and cli._t.sync("x") == "x"
+    w = cli._t.Waiting("Measuring 1 MCP server...", total=1)
+    w._draw()                                              # even a forced frame: no sync, no colour
+    assert "\033[?2026" not in stderr.getvalue() and "\033[3" not in stderr.getvalue()
+    assert cli._can_raw() is False and w._motion is False
+
+
+def test_only_stderr_without_vt_leaves_stdout_coloured(monkeypatch):
+    _vt(monkeypatch, out=True, err=False)
+    cli._t.enable_vt()
+    assert cli._paint("x", "green") == "\033[32mx\033[0m"                 # stdout keeps colour
+    assert cli._paint("x", "green", err=True) == "x"                       # stderr is plain
+    assert cli._t.sync("f") == "f" and cli._can_raw() is False and not cli._t.motion_on()
+    assert cli._t.ascii_on()                               # glyphs are one choice per process
+
+
+def test_a_redirected_stream_never_counts_as_a_vt_failure(monkeypatch):
+    # Off a console (piped, redirected) enable_vt has nothing to enable: no plain-text fallout.
+    _vt(monkeypatch, out=False, err=True, out_tty=False)
+    assert cli._t.enable_vt() is True
+    assert cli._paint("x", "green") == "\033[32mx\033[0m"                 # FORCE_COLOR still wins
+    assert not cli._t.ascii_on() and cli._t.sync("f") != "f"
 
 
 # --- the scoping spinner ----------------------------------------------------------------------

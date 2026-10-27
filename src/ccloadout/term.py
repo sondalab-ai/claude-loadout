@@ -22,34 +22,35 @@ _BOLD = "\033[1m"
 _ALIAS = {"green": "ok", "red": "err", "yellow": "warn", "cyan": "accent"}
 SYNC_ON, SYNC_OFF = "\033[?2026h", "\033[?2026l"     # DEC 2026 synchronized output
 
-_vt = True                                           # False once enable_vt() fails: plain text
+_vt = {"out": True, "err": True}                     # per stream: False when VT could not be enabled
 
 
 def enable_vt() -> bool:
-    """Turn on VT processing for stdout and stderr (Windows); False means plain text from now on.
+    """Turn on VT processing for stdout and stderr (Windows); False if a terminal refused it.
 
-    Both streams are tried. When either fails, every later call writes no escape sequences, no
-    motion and ASCII glyphs (TP Windows). A no-op returning True off Windows.
+    Tracked per stream. A stream that is not a terminal (piped, redirected) has no console to
+    enable, so it never counts as failed. A terminal stream that refuses gets no colour and no
+    motion, and glyphs take their ASCII form (TP Windows). A no-op returning True off Windows.
     """
     global _vt
-    out_ok = slt.enable_vt(sys.stdout)
-    err_ok = slt.enable_vt(sys.stderr)
-    _vt = out_ok and err_ok
-    return _vt
+    _vt = {name: slt.enable_vt(stream) or not stream.isatty()
+           for name, stream in (("out", sys.stdout), ("err", sys.stderr))}
+    return all(_vt.values())
 
 
-def vt_ok() -> bool:
-    """Whether escape sequences may be written (enable_vt() has not failed)."""
-    return _vt
+def _env(stream: str | None = None) -> dict:
+    """os.environ for the palette: LOADOUT_NO_COLOR folded into NO_COLOR, VT failures applied.
 
-
-def _env() -> dict:
-    """os.environ with LOADOUT_NO_COLOR folded into NO_COLOR, and plain text forced without VT."""
+    `stream` ("out" or "err") without VT gets no colour and no motion. Glyphs are chosen once
+    for the process, so a terminal stream without VT turns ASCII on for both.
+    """
     env = dict(os.environ)
     if env.get("LOADOUT_NO_COLOR") and not env.get("NO_COLOR"):
         env["NO_COLOR"] = "1"
-    if not _vt:
-        env.update(NO_COLOR="1", SONDALAB_ASCII="1", SONDALAB_REDUCED_MOTION="1")
+    if stream and not _vt[stream]:
+        env.update(NO_COLOR="1", SONDALAB_REDUCED_MOTION="1")
+    if not all(_vt.values()):
+        env["SONDALAB_ASCII"] = "1"
     return env
 
 
@@ -61,7 +62,7 @@ def color_mode(err: bool = False) -> str:
     call, never cached, so pytest's capsys stream swap is honoured.
     """
     stream = sys.stderr if err else sys.stdout
-    return slt.color_mode(_env(), isatty=stream.isatty(), truecolor=True)
+    return slt.color_mode(_env("err" if err else "out"), isatty=stream.isatty(), truecolor=True)
 
 
 def paint(text: str, *codes: str, err: bool = False) -> str:
@@ -95,7 +96,8 @@ def header(name: str, version: str, description: str, *, compact: bool = False,
     The palette returns "" for machine output, accessible mode and a stdout that is not a TTY,
     and the lockup on TERM=dumb, in ASCII mode or on a terminal too narrow for the mark.
     """
-    return slt.header(name, version, description, compact=compact, machine=machine, env=_env())
+    return slt.header(name, version, description, compact=compact, machine=machine,
+                      env=_env("out"))
 
 
 def lockup(name: str, version: str) -> str:
@@ -104,14 +106,14 @@ def lockup(name: str, version: str) -> str:
 
 
 def no_key_reader() -> bool:
-    """TERM=dumb, CI set or no VT: no raw-mode key reader, so menus take the numbered form."""
-    return (not _vt or any(os.environ.get(n) == "dumb" for n in sl.ENV["term"])
+    """TERM=dumb, CI set or no VT on stderr (where menus draw): the numbered form instead."""
+    return (not _vt["err"] or any(os.environ.get(n) == "dumb" for n in sl.ENV["term"])
             or slt.switch_on("ci", os.environ))
 
 
 def motion_on() -> bool:
     """Whether the spinner and progress bar may draw on stderr."""
-    return slt.motion_enabled(_env(), isatty=sys.stderr.isatty())
+    return slt.motion_enabled(_env("err"), isatty=sys.stderr.isatty())
 
 
 def glyph(name: str, err: bool = False) -> str:
@@ -182,12 +184,13 @@ def summary(ok: int, fixed: int, warn: int, failed: int) -> str:
 
 def error_block(what: str, why: str = "", fix: str = "") -> str:
     """The three-line error for stderr: `failed` + what, why in dim (wrapped), `Try:` + fix."""
-    return slt.error_block(what, why, fix, env=_env(), ascii=ascii_on(), mode=color_mode(True))
+    return slt.error_block(what, why, fix, env=_env("err"), ascii=ascii_on(),
+                           mode=color_mode(True))
 
 
 def term_error(exc: slt.TermError) -> str:
     """A palette TermError (MissingFlag, NoValidAnswer) as the error block for stderr."""
-    return exc.block(env=_env(), ascii=ascii_on(), mode=color_mode(True))
+    return exc.block(env=_env("err"), ascii=ascii_on(), mode=color_mode(True))
 
 
 def next_line(command: str, *, err: bool = False) -> str:
@@ -229,8 +232,9 @@ def prose(text: str, indent: int = 4, *, dim: bool = False, err: bool = False) -
 
 
 def sync(frame: str) -> str:
-    """`frame` wrapped in synchronized output (DEC 2026); bare when VT is unavailable."""
-    return SYNC_ON + frame + SYNC_OFF if _vt else frame
+    """`frame` wrapped in synchronized output (DEC 2026); bare without VT on stderr, where
+    every redrawn frame (spinner, menu) is drawn."""
+    return SYNC_ON + frame + SYNC_OFF if _vt["err"] else frame
 
 
 class Waiting:
