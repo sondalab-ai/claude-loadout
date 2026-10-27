@@ -284,12 +284,13 @@ def test_numbered_fallback_without_a_raw_terminal(monkeypatch, capsys):
     assert "Not a valid choice: 'x'" in capsys.readouterr().err
 
 
-def test_numbered_fallback_cancels_on_q_and_eof(monkeypatch):
+def test_numbered_fallback_cancels_on_q_and_fails_on_eof(monkeypatch):
     monkeypatch.setattr(cli, "_can_raw", lambda: False)
     _replies(monkeypatch, "q")
     assert cli._checkbox_select("Pick", ["a"]) is None
     monkeypatch.setattr("builtins.input", lambda *a: (_ for _ in ()).throw(EOFError()))
-    assert cli._checkbox_select("Pick", ["a"]) is None
+    with pytest.raises(cli._slt.NoValidAnswer):            # end of input is not an answer
+        cli._checkbox_select("Pick", ["a"])
 
 
 def test_accessible_review_offers_the_list_instead_of_accepting(monkeypatch):
@@ -305,7 +306,7 @@ def test_accessible_repo_picker_is_the_numbered_prompt(tmp_path, monkeypatch):
     monkeypatch.setenv("ACCESSIBLE", "")                   # Charm's name: set means on
     monkeypatch.setattr(cli, "_can_raw", lambda: True)
     monkeypatch.setattr(cli, "_checkbox_select", lambda *a, **k: pytest.fail("no arrow menu"))
-    monkeypatch.setattr(cli, "_ask", lambda prompt: "1")
+    monkeypatch.setattr("builtins.input", lambda *a, **k: "1")
     assert cli._select_repos([tmp_path], 0) == [tmp_path]
 
 
@@ -313,7 +314,7 @@ def test_non_tty_init_asks_nothing(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(cli.sys, "stdin", io.StringIO())
     monkeypatch.setattr("builtins.input", lambda *a: pytest.fail("no prompt without a TTY"))
     monkeypatch.chdir(tmp_path)
-    assert cli.main(["init"]) == 0
+    assert cli.main(["init"]) == 2
     assert "Try: claude-loadout init --yes" in capsys.readouterr().err
 
 

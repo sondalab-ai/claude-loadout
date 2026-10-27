@@ -1,5 +1,5 @@
 from __future__ import annotations
-import json, os, re, subprocess, sys, time
+import json, os, re, shlex, subprocess, sys, time
 from fnmatch import fnmatch
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
@@ -28,17 +28,12 @@ from ccloadout import measure as _measure
 
 _LAUNCH_PAUSE_S = 1.5   # seeded launch: hold the scoping summary on screen before claude's TUI takes over
 
-class _Abort(Exception):
-    """User declined to pick a profile at the selection prompt."""
-
 # Output follows the Sondalab Term spec through ccloadout.term (colour by color_mode + ROLES,
 # glyphs, step lines, error blocks, prompts). _paint/_sgr keep their names for every caller.
 from ccloadout import term as _t
+import sondalab_palette as _sl
 from sondalab_palette import term as _slt
 _paint = _t.paint
-
-def _yn(flag: bool, *, err: bool = False) -> str:
-    return _paint("present", "green", err=err) if flag else _paint("absent", "dim", err=err)
 
 _warn = _t.warn
 
@@ -89,9 +84,50 @@ def _ask(prompt: str) -> str:                       # EOF on piped stdin -> trea
     except EOFError:
         return ""
 
-def _confirm(question: str) -> bool:
-    """`? <question> [y/N]`: default no, Enter takes it; an answer starting with y is yes."""
-    return _ask(f"{_t.question(question)} [y/N] ").strip().lower().startswith("y")
+def _readline() -> str:
+    """One line from input() with its newline, or "" at end of input (the palette's read contract)."""
+    try:
+        return input() + "\n"
+    except EOFError:
+        return ""
+
+def _confirm(question: str, default: bool = False) -> bool:
+    """`? <question> [y/N]` through the palette: y/yes, n/no, Enter takes the default.
+
+    Anything else re-asks, at most promptRetries times in all, then raises NoValidAnswer; end
+    of input raises at once and never takes the default.
+    """
+    return _slt.confirm(question, default=default, read=_readline, mode=_t.color_mode(err=True))
+
+def _ask_valid(question: str, prompt: str, parse):
+    """Write `prompt` to stderr and read until `parse(answer)` is not None (TP Confirmation).
+
+    For the prompts the palette has no helper for: letter menus, ranges, a numbered list with
+    a default. The answer reaches `parse` stripped. At most promptRetries tries in all, then
+    NoValidAnswer naming `question`; end of input raises it at once.
+    """
+    tries = _sl.ROBUSTNESS["promptRetries"]
+    for _ in range(tries):
+        sys.stderr.write(prompt)
+        sys.stderr.flush()
+        line = _readline()
+        if not line:
+            sys.stderr.write("\n")
+            raise _slt.NoValidAnswer(question, "input ended before an answer")
+        got = parse(line.strip())
+        if got is not None:
+            return got
+    raise _slt.NoValidAnswer(question, f"no recognised answer in {tries} tries")
+
+def _menu(question: str, prompt: str, choices: dict[str, tuple[str, ...]]) -> str:
+    """A letter menu: the key of `choices` whose spellings hold the answer, case-insensitive.
+
+    Put "" among a key's spellings to make Enter choose it. Unrecognised input re-asks, capped
+    as in _ask_valid; it is never read as a choice.
+    """
+    def parse(answer: str) -> str | None:
+        return next((key for key, words in choices.items() if answer.lower() in words), None)
+    return _ask_valid(question, prompt, parse)
 
 def _build_embed(model_name: str):
     try:
@@ -142,10 +178,11 @@ def _rules_intro(compile_fn, scope: str) -> None:
     p("")
 
 def _pick_keep_drop_skip(item: Item) -> Predicate | None:
-    choice = _ask(_t.question(f"'{item.id}': [k]eep always, [d]rop always or [s]kip "
-                              "(decide later)? ")).strip().lower()
-    return {"k": Predicate("always_keep", (), "any"),
-            "d": Predicate("always_drop", (), "any")}.get(choice)
+    question = f"'{item.id}': [k]eep always, [d]rop always or [s]kip (decide later)?"
+    choice = _menu(question, _t.question(question + " "),
+                   {"keep": ("k", "keep"), "drop": ("d", "drop"), "skip": ("", "s", "skip")})
+    return {"keep": Predicate("always_keep", (), "any"),
+            "drop": Predicate("always_drop", (), "any")}.get(choice)
 
 def _elicit(item: Item, context: str, compile_fn, save) -> str:
     # `save(Rule)` persists an authored rule to the chosen scope (profile or a repo's local file).
@@ -282,10 +319,11 @@ def _cmd_consolidate(cwd: Path, override: Path | None = None) -> int:
         if not interactive:                         # no TTY: report, promote nothing
             kept_rows += rows_for_goal
             continue
-        answer = _ask(_t.question("[k]eep as a memory, [d]iscard or [s]kip? ")).strip().lower()
-        if answer.startswith("d"):
+        answer = _menu("Keep as a memory?", _t.question("[k]eep as a memory, [d]iscard or [s]kip? "),
+                       _CONSOLIDATE_CHOICES)
+        if answer == "discard":
             continue                                # dropped: the rows go, no entry is written
-        if not answer.startswith("k"):
+        if answer == "skip":
             kept_rows += rows_for_goal
             continue
         description = _ask(_t.question("One line describing what to remember: ")).strip() or goal
@@ -304,6 +342,8 @@ def _cmd_consolidate(cwd: Path, override: Path | None = None) -> int:
         drop_rows(cfg.config_root, cwd, kept_rows)
     return 0
 
+_CONSOLIDATE_CHOICES = {"keep": ("k", "keep"), "discard": ("d", "discard"), "skip": ("", "s", "skip")}
+
 def _consolidate_signals(cwd: Path, cfg, signals: list[dict], interactive: bool) -> list[dict]:
     # A debt marker seen being written is a *signal*, not an entry: the ledger only ever gains
     # something a person agreed to put there.
@@ -318,10 +358,11 @@ def _consolidate_signals(cwd: Path, cfg, signals: list[dict], interactive: bool)
         if not interactive:
             kept.append(row)
             continue
-        answer = _ask(_t.question("[k]eep as open debt, [d]iscard or [s]kip? ")).strip().lower()
-        if answer.startswith("d"):
+        answer = _menu("Keep as open debt?", _t.question("[k]eep as open debt, [d]iscard or [s]kip? "),
+                       _CONSOLIDATE_CHOICES)
+        if answer == "discard":
             continue
-        if not answer.startswith("k"):
+        if answer == "skip":
             kept.append(row)
             continue
         description = _ask(_t.question("One line describing the debt: ")).strip() or str(row.get("excerpt"))
@@ -745,8 +786,13 @@ def _audit_interactive(cwd: Path, cfg, rows, usage, flags, shadowed, root_of) ->
     print(_t.note("warn", f"About to delete {_plural(len(doomed), 'entry')}"))
     for entry in doomed:
         print(_t.cont(str(entry.path)))
-    if not _ask(_t.question(f"Type delete to delete {_plural(len(doomed), 'entry')} "
-                            "permanently: ")).strip().lower().startswith("delete"):
+    count = _plural(len(doomed), "entry")
+    if not _confirm(f"Delete {count}?"):
+        _warn("Nothing was deleted")
+        return 0
+    # An irreversible delete takes the exact name of what it deletes; anything else cancels.
+    name, it = (doomed[0].name, "it") if len(doomed) == 1 else (count, "them")
+    if _ask(_t.question(f"Type {name} to delete {it} permanently: ")).strip() != name:
         _warn("Nothing was deleted")
         return 0
     for entry in doomed:
@@ -1024,23 +1070,12 @@ def _resolve_config_root(environ, passthrough: list[str]) -> Path | None:
     if len(profiles) <= 1:
         return None
     print("", file=sys.stderr)
-    print(_t.question("Which Claude profile? CLAUDE_CONFIG_DIR is not set. "
-                      "Type a number, then Enter"), file=sys.stderr)
-    for idx, prof in enumerate(profiles, 1):
-        has_cfg = (prof / "loadout" / "config.toml").is_file()
-        num = _paint(f"{idx:>{len(str(len(profiles)))}}", "bold", err=True)
-        print(f"  {num}  {prof}  {_paint(f'(claude-loadout config: {_yn(has_cfg, err=True)})', 'dim', err=True)}",
-              file=sys.stderr)
-    while True:                                          # no default (spec B): Enter re-asks
-        try:
-            raw = _prompt("> ").strip()
-        except EOFError:                                 # Ctrl-D / exhausted stdin -> abort
-            raise _Abort
-        if not raw:
-            continue
-        if raw.isdigit() and 1 <= int(raw) <= len(profiles):
-            return profiles[int(raw) - 1]
-        _warn(f"Invalid choice {raw!r}")
+    state = lambda p: "present" if (p / "loadout" / "config.toml").is_file() else "absent"
+    options = [f"{p}  " + _paint(f"(claude-loadout config: {state(p)})", "dim", err=True)
+               for p in profiles]
+    picked = _slt.choose("Which Claude profile? CLAUDE_CONFIG_DIR is not set.", options,   # no default
+                         read=_readline, mode=_t.color_mode(err=True))
+    return profiles[picked]
 
 _CONFIG_HEADER = (
     "# generated by loadout init — local, gitignored; layers over your profile config\n"
@@ -1125,6 +1160,7 @@ def _checkbox_plain(title, labels, preset=None, allow_empty=False, headers=None)
     selected = list(preset) if preset is not None else [True] * n
     width = len(str(n))
     err = lambda s: print(s, file=sys.stderr)
+    question, tries, misses = "Toggle which?", _sl.ROBUSTNESS["promptRetries"], 0
     while True:
         err("")
         err(title)
@@ -1135,10 +1171,13 @@ def _checkbox_plain(title, labels, preset=None, allow_empty=False, headers=None)
             err(f"  {i + 1:>{width}}  {state}  {lab}")
         err(_t.question("Toggle which? Type numbers, ranges or all, then Enter. "
                         "Enter alone confirms, q cancels"))
-        try:
-            raw = _prompt("> ").strip().lower()
-        except EOFError:
-            return None
+        sys.stderr.write("> ")
+        sys.stderr.flush()
+        line = _readline()
+        if not line:                                # end of input is not an answer
+            sys.stderr.write("\n")
+            raise _slt.NoValidAnswer(question, "input ended before an answer")
+        raw = line.strip().lower()
         if not raw:
             chosen = [i for i, s in enumerate(selected) if s]
             return chosen if allow_empty else (chosen or None)
@@ -1148,9 +1187,13 @@ def _checkbox_plain(title, labels, preset=None, allow_empty=False, headers=None)
             selected = [not all(selected)] * n
             continue
         picks = _parse_selection(raw, n)
-        if picks is None:
+        if picks is None:                           # capped like any prompt; a valid toggle resets it
+            misses += 1
+            if misses >= tries:
+                raise _slt.NoValidAnswer(question, f"no recognised answer in {tries} tries")
             _warn(f"Not a valid choice: {raw!r}")
             continue
+        misses = 0
         for p in picks:
             selected[p - 1] = not selected[p - 1]
 
@@ -1229,14 +1272,13 @@ def _select_repos_line(eligible: list[Path], already: int,
     width = len(str(len(eligible)))
     for idx, repo in enumerate(eligible, 1):
         print(f"  {_paint(f'{idx:>{width}}', 'bold', err=True)}  {repo}", file=sys.stderr)
-    while True:
-        raw = _ask("> ")
-        if not raw.strip():
-            return None
+    def parse(raw: str) -> list[int] | None:
+        if not raw:
+            return []                               # Enter alone cancels
         picks = _parse_selection(raw, len(eligible))
-        if picks is not None:
-            return [eligible[i - 1] for i in sorted(picks)]
-        _warn(f"Invalid selection {raw!r}")
+        return sorted(picks) if picks is not None else None
+    picks = _ask_valid(f"Which projects to {action}?", "> ", parse)
+    return [eligible[i - 1] for i in picks] or None
 
 def _pick_profile(profiles: list[Path], default: Path, repo: Path,
                   label: str = "claude-loadout init") -> Path:
@@ -1249,13 +1291,12 @@ def _pick_profile(profiles: list[Path], default: Path, repo: Path,
     for idx, prof in enumerate(profiles, 1):
         mark = _paint(" (default)", "dim", err=True) if prof == default else ""
         print(f"  {_paint(f'{idx:>{width}}', 'bold', err=True)}  {prof}{mark}", file=sys.stderr)
-    while True:
-        raw = _ask("> ").strip()
+    def parse(raw: str) -> Path | None:
         if not raw:
-            return default
-        if raw.isdigit() and 1 <= int(raw) <= len(profiles):
-            return profiles[int(raw) - 1]
-        _warn(f"Invalid choice {raw!r}")
+            return default                          # Enter alone takes the default
+        at = _slt.parse_choice(raw, len(profiles))
+        return None if at is None else profiles[at]
+    return _ask_valid("Which profile?", "> ", parse)
 
 def _confirm_goal(repo: Path, use_cache: bool = True, label: str = "claude-loadout init") -> str | None:
     # Returns the accepted/overridden goal, or None to skip this repo. update re-infers fresh.
@@ -1445,8 +1486,10 @@ def _cmd_init(cwd: Path, args: list[str], environ) -> int:
     if root_args:                                    # bulk: every unconfigured project under ROOT
         root = Path(root_args[0]).expanduser()
         if not root.is_dir():
-            _warn(f"{root} is not a directory; nothing to do")
-            return 0
+            _fail("Could not read the projects folder",
+                  f"{root} is not a directory; init takes a folder whose subfolders are projects",
+                  "claude-loadout init <folder>")
+            return 2
         projects = _discover_projects(root)
         eligible = [r for r in projects if not configured(r)]   # either config file -> skip whole project
         already_list = [r for r in projects if configured(r)]   # named in the report, never re-seeded
@@ -1462,10 +1505,8 @@ def _cmd_init(cwd: Path, args: list[str], environ) -> int:
         if already:
             _next("claude-loadout update")
         return 0
-    if not sys.stdin.isatty() and not yes:
-        _warn("Init asks questions and stdin is not a terminal; nothing seeded")
-        _try("claude-loadout init --yes")
-        return 0
+    _slt.needs_prompt("--yes", given=yes, what="Nothing seeded",   # off a TTY: MissingFlag, exit 2
+                      command=shlex.join(["claude-loadout", "init", *root_args]))
     if root_args and not yes:
         selected = _select_repos(eligible, already)   # bulk picker; empty pick / Ctrl-D -> None
         if not selected:
@@ -1630,8 +1671,10 @@ def _cmd_update(cwd: Path, args: list[str], environ) -> int:
     if root_args:                                    # bulk: every seeded project under ROOT
         root = Path(root_args[0]).expanduser()
         if not root.is_dir():
-            _warn(f"{root} is not a directory; nothing to do")
-            return 0
+            _fail("Could not read the projects folder",
+                  f"{root} is not a directory; update takes a folder whose subfolders are projects",
+                  "claude-loadout update <folder>")
+            return 2
         projects = _discover_projects(root)
         eligible = [r for r in projects if _is_seeded(r)]
         unseeded = [r for r in projects if not _is_seeded(r)]
@@ -1647,10 +1690,8 @@ def _cmd_update(cwd: Path, args: list[str], environ) -> int:
             _try("claude-loadout init")
             return 0
         eligible = [cwd]
-    if not sys.stdin.isatty() and not yes:
-        _warn("Update asks questions and stdin is not a terminal; nothing updated")
-        _try("claude-loadout update --yes")
-        return 0
+    _slt.needs_prompt("--yes", given=yes, what="Nothing updated",   # off a TTY: MissingFlag, exit 2
+                      command=shlex.join(["claude-loadout", "update", *root_args]))
     if root_args and not yes:
         selected = _select_repos(eligible, 0, label=_UPDATE_LABEL, action="update")
         if not selected:
@@ -2021,8 +2062,7 @@ def _scoped(scope: _Scope) -> None:
 
 def _maybe_persist_edit(gate: _EditGate, selected_ids: set) -> None:
     # Offer to freeze the edited keep/drop as a repo seed so future launches respect it.
-    ans = _ask(f"{_t.question('Save these choices to this repo?')} [y/N] ").strip().lower()
-    if ans not in ("y", "yes"):
+    if not _confirm("Save these choices to this repo?"):
         return
     _seed_repo(gate.cwd, gate.cfg, gate.items, gate.pinned_ids | selected_ids, gate.goal)
     print(_t.note("done", "Saved; this repo is now seeded", err=True), file=sys.stderr)
@@ -2045,11 +2085,12 @@ def _launch_gate(scope: _Scope, plan, gate: _EditGate, passthrough: list[str], n
         return scope, plan
     while True:
         dot = _t.sep(err=True)
-        choice = _ask(_t.question(f"Launch now? [enter] launch{dot}[e] edit keep/drop{dot}"
-                                  "[q] cancel ")).strip().lower()
-        if choice == "q":
+        choice = _menu("Launch now?", _t.question(f"Launch now? [enter] launch{dot}"
+                                                  f"[e] edit keep/drop{dot}[q] cancel "),
+                       {"launch": ("",), "edit": ("e", "edit"), "cancel": ("q", "quit", "cancel")})
+        if choice == "cancel":
             raise KeyboardInterrupt                 # clean abort, exit 130
-        if choice != "e":
+        if choice == "launch":
             return scope, plan
         if not gate.editable:
             _warn("Nothing to edit — every kept tool is pinned by config")
@@ -2074,6 +2115,9 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:                       # Ctrl-C at any prompt -> clean abort, no traceback
         _warn("Aborted")
         return 130
+    except _slt.TermError as exc:                   # no valid answer, or a flag missing off a TTY
+        print(_t.term_error(exc), file=sys.stderr)
+        return 2
 
 def _run(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
@@ -2145,17 +2189,15 @@ def _run(argv: list[str] | None = None) -> int:
         _header(compact=True)
     elif rules_cmd or _interactive(passthrough):    # -p/--print: claude's output owns stdout
         _header()
-    try:                                            # ask which profile when it is implicit
-        override = _resolve_config_root(os.environ, [] if rules_cmd else passthrough)
-    except _Abort:
-        _warn("No profile selected; nothing to do")
-        return 0
+    override = _resolve_config_root(os.environ, [] if rules_cmd else passthrough)   # asks when implicit
     if rules_cmd:
         return _cmd_rules(cwd, override)
     fallback_env = _launch_env(override)            # keep a prompted profile on the fallback launches
     try:
         result, plan, gate = _scoped_plan(passthrough, cwd, override, scope_skills,
                                           persist=not explain)   # --explain writes nothing
+    except _slt.TermError:                          # a prompt failed: stop, never launch on a default
+        raise
     except Exception as exc:
         _warn(f"Scoping failed ({exc}); launching full session")
         return subprocess.run(["claude", *passthrough], env=fallback_env).returncode

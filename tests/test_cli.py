@@ -127,7 +127,7 @@ def test_rules_subcommand_noop_without_tty(tmp_path, monkeypatch, capsys):
     assert rc == 0
     assert "interactive" in capsys.readouterr().err.lower()
 
-def test_launch_elicitation_survives_eof_on_piped_stdin(tmp_path, monkeypatch):
+def test_launch_gate_eof_on_piped_stdin_does_not_launch(tmp_path, monkeypatch):
     root = _root(tmp_path)
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
     monkeypatch.setenv("LOADOUT_THRESHOLD", "0.99")      # force everything into dropped
@@ -137,9 +137,10 @@ def test_launch_elicitation_survives_eof_on_piped_stdin(tmp_path, monkeypatch):
     def _eof(*a, **k):
         raise EOFError
     monkeypatch.setattr("builtins.input", _eof)            # piped stdin exhausted
-    monkeypatch.setattr(cli.subprocess, "run", lambda *a, **k: _RC(0))
+    launched = []
+    monkeypatch.setattr(cli.subprocess, "run", lambda argv, **k: launched.append(argv) or _RC(0))
     rc = cli.main([])                                      # must not raise EOFError
-    assert rc == 0
+    assert rc == 2 and not [a for a in launched if a[0] == "claude"]   # end of input is no answer
 
 def test_doctor_prints_guidance_and_does_not_launch(tmp_path, monkeypatch, capsys):
     root = _root(tmp_path)                             # one mcp + one plugin
@@ -353,7 +354,7 @@ def test_resolve_config_root_aborts_on_eof(tmp_path, monkeypatch):
     def _eof(*a, **k):
         raise EOFError
     monkeypatch.setattr("builtins.input", _eof)
-    with pytest.raises(cli._Abort):
+    with pytest.raises(cli._slt.NoValidAnswer):
         cli._resolve_config_root({}, [])
 
 def test_main_aborts_launch_when_no_profile_selected(tmp_path, monkeypatch, capsys):
@@ -366,8 +367,8 @@ def test_main_aborts_launch_when_no_profile_selected(tmp_path, monkeypatch, caps
     launched = {"ran": False}
     monkeypatch.setattr(cli.subprocess, "run", lambda *a, **k: launched.__setitem__("ran", True) or _RC(0))
     rc = cli.main([])
-    assert rc == 0 and launched["ran"] is False
-    assert "No profile selected" in capsys.readouterr().err
+    assert rc == 2 and launched["ran"] is False
+    assert "No valid answer to: Which Claude profile?" in capsys.readouterr().err
 
 def test_main_prompted_profile_reaches_launched_claude(tmp_path, monkeypatch):
     perso = _two_profiles(tmp_path)
@@ -435,7 +436,8 @@ def test_main_prompted_default_profile_leaves_env_unset(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(cli, "make_model2vec_embed", lambda name: cli.keyword_embed)
     monkeypatch.setattr(cli, "_interactive", lambda p: True)
-    monkeypatch.setattr("builtins.input", lambda *a, **k: "1")                 # pick ~/.claude default
+    answers = iter(["1"])                                                     # pick ~/.claude default
+    monkeypatch.setattr("builtins.input", lambda *a, **k: next(answers, ""))   # then Enter launches
     captured = {}
     monkeypatch.setattr(cli.subprocess, "run",
                         lambda argv, **k: captured.update(k) or _RC(0))
@@ -758,7 +760,7 @@ def test_select_repos_falls_back_when_frame_taller_than_window(tmp_path, monkeyp
     import shutil
     monkeypatch.setattr(shutil, "get_terminal_size", lambda default=(80, 24): os.terminal_size((80, 10)))
     eligible = [tmp_path / f"p{i}" for i in range(20)]    # 20 + 4 > 10 rows -> typed fallback
-    monkeypatch.setattr(cli, "_ask", lambda prompt: "2")
+    monkeypatch.setattr("builtins.input", lambda *a, **k: "2")
     picks = cli._select_repos(eligible, 0)
     assert picks == [eligible[1]]                         # line path parsed the typed index
 
@@ -824,7 +826,8 @@ def test_init_non_tty_without_yes_is_noop(tmp_path, monkeypatch, capsys):
     _fake_stdin(monkeypatch, tty=False)
     rc = cli.main(["init", str(repos)])
     err = capsys.readouterr().err
-    assert rc == 0 and "stdin is not a terminal" in err and "init --yes" in err
+    assert rc == 2 and "stdin is not a terminal" in err
+    assert err.splitlines()[-1] == f"    Try: claude-loadout init {repos} --yes"   # copy-pasteable
     assert not (r1 / ".loadout").exists()
 
 def test_init_interactive_selects_subset(tmp_path, monkeypatch):
@@ -834,7 +837,7 @@ def test_init_interactive_selects_subset(tmp_path, monkeypatch):
     repos = tmp_path / "repos"; r1 = _proj(repos, "proj1"); r2 = _proj(repos, "proj2")
     _fake_stdin(monkeypatch, tty=True)
     answers = iter(["1", ""])                            # pick repo 1, then accept its goal
-    monkeypatch.setattr(cli, "_ask", lambda prompt: next(answers, ""))
+    monkeypatch.setattr("builtins.input", lambda *a, **k: next(answers, ""))
     rc = cli.main(["init", str(repos)])
     assert rc == 0
     assert (r1 / ".loadout" / "config.toml").is_file()
@@ -847,7 +850,7 @@ def test_init_goal_override_persists(tmp_path, monkeypatch):
     repos = tmp_path / "repos"; r1 = _proj(repos, "proj1")
     _fake_stdin(monkeypatch, tty=True)
     answers = iter(["all", "frontend work"])             # select all, override goal
-    monkeypatch.setattr(cli, "_ask", lambda prompt: next(answers, ""))  # later prompts: default
+    monkeypatch.setattr("builtins.input", lambda *a, **k: next(answers, ""))  # later prompts: default
     rc = cli.main(["init", str(repos)])
     assert rc == 0
     assert (r1 / ".loadout" / "goal").read_text().strip() == "frontend work"
@@ -859,7 +862,7 @@ def test_init_skip_repo_at_goal_prompt(tmp_path, monkeypatch):
     repos = tmp_path / "repos"; r1 = _proj(repos, "proj1")
     _fake_stdin(monkeypatch, tty=True)
     answers = iter(["all", "s"])                         # select all, then skip the repo
-    monkeypatch.setattr(cli, "_ask", lambda prompt: next(answers))
+    monkeypatch.setattr("builtins.input", lambda *a, **k: next(answers))
     rc = cli.main(["init", str(repos)])
     assert rc == 0
     assert not (r1 / ".loadout").exists()               # 's' skips before any write
@@ -973,7 +976,7 @@ def test_init_review_choice_is_what_gets_frozen(tmp_path, monkeypatch):
     repos = tmp_path / "repos"; r1 = _proj(repos, "proj1")
     _fake_stdin(monkeypatch, tty=True)
     monkeypatch.setattr(cli, "_select_repos", lambda eligible, already: eligible)
-    monkeypatch.setattr(cli, "_ask", lambda prompt: "")           # accept the goal
+    monkeypatch.setattr("builtins.input", lambda *a, **k: "")           # accept the goal
     monkeypatch.setattr(cli, "_review_keep_drop", lambda repo, prunable, auto: {"Gmail"})
     rc = cli.main(["init", str(repos)])
     assert rc == 0
@@ -991,7 +994,7 @@ def test_init_summary_names_skipped_and_already(tmp_path, monkeypatch, capsys):
     (pre / ".loadout").mkdir(); (pre / ".loadout" / "config.toml").write_text("threshold = 0.5\n")
     _fake_stdin(monkeypatch, tty=True)
     monkeypatch.setattr(cli, "_select_repos", lambda eligible, already: [eligible[0]])  # only proj1
-    monkeypatch.setattr(cli, "_ask", lambda prompt: "")
+    monkeypatch.setattr("builtins.input", lambda *a, **k: "")
     monkeypatch.setattr(cli, "_review_keep_drop", lambda repo, prunable, auto: auto)
     rc = cli.main(["init", str(repos)])
     assert rc == 0
@@ -1038,7 +1041,7 @@ def test_update_flip_overrides_human_rule(tmp_path, monkeypatch):
     monkeypatch.chdir(r1)
     _fake_stdin(monkeypatch, tty=True)
     monkeypatch.setattr(cli, "_discover_profiles", lambda active: [active])
-    monkeypatch.setattr(cli, "_ask", lambda prompt: "")   # accept the goal
+    monkeypatch.setattr("builtins.input", lambda *a, **k: "")   # accept the goal
     seen = {}
     def _stub(repo, prunable, kept, label=""):            # capture the preset, then drop everything
         seen["kept"] = set(kept); return set()
@@ -1062,7 +1065,7 @@ def test_update_keeps_config_pinned_even_if_unticked(tmp_path, monkeypatch):
     monkeypatch.chdir(r1)
     _fake_stdin(monkeypatch, tty=True)
     monkeypatch.setattr(cli, "_discover_profiles", lambda active: [active])
-    monkeypatch.setattr(cli, "_ask", lambda prompt: "")
+    monkeypatch.setattr("builtins.input", lambda *a, **k: "")
     seen = {}
     def _stub(repo, prunable, kept, label=""):
         seen["ids"] = {i.id for i in prunable}; return set()   # untick everything offered
@@ -1386,7 +1389,7 @@ def test_consolidate_promotes_a_candidate_on_confirmation(tmp_path, monkeypatch,
     record_session(root, tmp_path, goal="scoping sessions", exit_code=0, changed=[])
     monkeypatch.setattr(cli, "_interactive", lambda passthrough: True)
     answers = iter(["k", "threshold recentred after the plugin descriptions grew"])
-    monkeypatch.setattr(cli, "_ask", lambda prompt: next(answers))
+    monkeypatch.setattr("builtins.input", lambda *a, **k: next(answers))
     assert cli.main(["memory", "consolidate"]) == 0
     assert (tmp_path / "docs" / "memory" /
             "threshold-recentred-after-the-plugin-descriptions-grew.md").exists()
@@ -1399,7 +1402,7 @@ def test_consolidate_discards_without_writing_anything(tmp_path, monkeypatch, ca
     monkeypatch.chdir(tmp_path)
     record_session(root, tmp_path, goal="a dead end", exit_code=1, changed=[])
     monkeypatch.setattr(cli, "_interactive", lambda passthrough: True)
-    monkeypatch.setattr(cli, "_ask", lambda prompt: "d")
+    monkeypatch.setattr("builtins.input", lambda *a, **k: "d")
     cli.main(["memory", "consolidate"])
     assert load_candidates(root, tmp_path) == []
     assert not list((tmp_path / "docs" / "memory").glob("a-dead-end*"))
@@ -1500,10 +1503,11 @@ def test_audit_deletes_only_after_a_typed_confirmation(tmp_path, monkeypatch, ca
     monkeypatch.setattr(cli, "_interactive", lambda passthrough: True)
     monkeypatch.setattr(cli, "_checkbox_select",
                         lambda *a, **k: [0])                        # keep m0, drop m1
-    monkeypatch.setattr(cli, "_ask", lambda prompt: "no")
+    monkeypatch.setattr("builtins.input", lambda *a, **k: "no")
     cli.main(["memory", "audit"])
     assert (tmp_path / "docs" / "memory" / "m1.md").exists()        # refused: nothing deleted
-    monkeypatch.setattr(cli, "_ask", lambda prompt: "delete")
+    answers = iter(["y", "m1"])                                     # [y/N], then the exact name
+    monkeypatch.setattr("builtins.input", lambda *a, **k: next(answers))
     cli.main(["memory", "audit"])
     assert not (tmp_path / "docs" / "memory" / "m1.md").exists()
     assert (tmp_path / "docs" / "memory" / "m0.md").exists()
@@ -1583,7 +1587,7 @@ def test_init_offers_memory_and_respects_a_no(tmp_path, monkeypatch):
     repos = tmp_path / "repos"; r1 = _proj(repos, "proj1")
     _fake_stdin(monkeypatch, tty=True)
     answers = iter(["all", "", "n"])                  # select all, keep goal, decline memory
-    monkeypatch.setattr(cli, "_ask", lambda prompt: next(answers, ""))
+    monkeypatch.setattr("builtins.input", lambda *a, **k: next(answers, ""))
     assert cli.main(["init", str(repos)]) == 0
     assert "[memory]" not in (r1 / ".loadout" / "config.toml").read_text()
 
@@ -1594,7 +1598,7 @@ def test_init_enables_memory_when_accepted(tmp_path, monkeypatch):
     repos = tmp_path / "repos"; r1 = _proj(repos, "proj1")
     _fake_stdin(monkeypatch, tty=True)
     answers = iter(["all", "", "y"])
-    monkeypatch.setattr(cli, "_ask", lambda prompt: next(answers, ""))
+    monkeypatch.setattr("builtins.input", lambda *a, **k: next(answers, ""))
     assert cli.main(["init", str(repos)]) == 0
     text = (r1 / ".loadout" / "config.toml").read_text()
     assert "[memory]" in text and "enabled = true" in text
@@ -1629,7 +1633,8 @@ def test_deleting_an_indexed_entry_leaves_no_dangling_index_line(tmp_path, monke
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(cli, "_interactive", lambda passthrough: True)
     monkeypatch.setattr(cli, "_checkbox_select", lambda *a, **k: [])   # drop everything
-    monkeypatch.setattr(cli, "_ask", lambda prompt: "delete")
+    answers = iter(["y", "native"])                                    # [y/N], then the exact name
+    monkeypatch.setattr("builtins.input", lambda *a, **k: next(answers))
     cli.main(["memory", "audit"])
     assert not (mem / "native.md").exists()
     assert "native" not in (mem / "MEMORY.md").read_text()
@@ -1643,7 +1648,7 @@ def test_consolidate_turns_a_debt_signal_into_an_open_entry(tmp_path, monkeypatc
                   excerpt="pass  # TODO(loadout) drop the shim")
     monkeypatch.setattr(cli, "_interactive", lambda passthrough: True)
     answers = iter(["k", "shim in the rules compiler"])
-    monkeypatch.setattr(cli, "_ask", lambda prompt: next(answers, ""))
+    monkeypatch.setattr("builtins.input", lambda *a, **k: next(answers, ""))
     assert cli.main(["memory", "consolidate"]) == 0
     entry = tmp_path / "docs" / "memory" / "shim-in-the-rules-compiler.md"
     assert entry.exists() and "status: open" in entry.read_text()
@@ -1657,7 +1662,7 @@ def test_consolidate_discards_a_signal_without_writing(tmp_path, monkeypatch, ca
     monkeypatch.chdir(tmp_path)
     record_signal(root, tmp_path, pattern="TODO(loadout)", file="a.py", excerpt="# TODO(loadout) x")
     monkeypatch.setattr(cli, "_interactive", lambda passthrough: True)
-    monkeypatch.setattr(cli, "_ask", lambda prompt: "d")
+    monkeypatch.setattr("builtins.input", lambda *a, **k: "d")
     cli.main(["memory", "consolidate"])
     assert load_candidates(root, tmp_path) == []
     assert not list((tmp_path / "docs" / "memory").glob("*todo*"))
