@@ -93,7 +93,8 @@ If you run `claude-loadout` (or `--explain` / `rules`) with **`CLAUDE_CONFIG_DIR
 one profile exists (`~/.claude`, `~/.claude-perso`, ...), it asks which profile to use rather than
 silently falling back to `~/.claude`, where your `always_keep` wouldn't apply. Set the variable
 explicitly (as in the aliases above) to skip the prompt. There is no default at the prompt: pick a
-number, or press `Ctrl-D` to cancel without launching.
+number, or press `Ctrl-C` to cancel without launching. Like every prompt, it re-asks on an answer it
+doesn't recognise, at most 3 times, then stops with an error; end of input (`Ctrl-D`) stops at once.
 
 ### Installing from source
 
@@ -154,7 +155,13 @@ glyphs. These environment variables change how it prints:
 | `TERM=dumb` | No colour, no motion, ASCII glyphs. |
 | `SONDALAB_ASCII=1` | ASCII glyphs (`+ x ! - |`), also used on a non-UTF-8 locale. |
 | `SONDALAB_REDUCED_MOTION=1`, `CI` | No spinner or progress bar; a long step prints its running line once. |
-| `SONDALAB_ACCESSIBLE=1`, `ACCESSIBLE` | Accessible mode: no motion, and every arrow-key menu becomes a numbered list you answer by typing. |
+| `SONDALAB_ACCESSIBLE=1`, `ACCESSIBLE` | Accessible mode: no motion, every arrow-key menu becomes a numbered list you answer by typing, and every state glyph carries its word. |
+| `LOADOUT_DEBUG=1` | Show the Python traceback of an unexpected error. |
+
+An unexpected error prints three lines (what failed, why, and the command to re-run) instead of a
+traceback. On a cld subcommand, add `--debug` to see the traceback (`cld doctor --debug`). On a
+launch, `--debug` belongs to `claude` and is passed through, so use `--loadout-debug` or
+`LOADOUT_DEBUG=1` there.
 
 ## How much it saves
 
@@ -461,7 +468,8 @@ marker with `grep` records nothing.
 
 Notes rot. `cld memory audit` lists them with the signals that decide whether they still earn their
 place — how often used, an anchor that disappeared, a flag someone raised. Unchecking marks a note
-for deletion; nothing is removed until you type `delete`. Add `--all-repos` for every project at
+for deletion; nothing is removed until you answer `y` and then type the name of what goes (the
+entry's name, or `2 entries` for two). Add `--all-repos` for every project at
 once, which is where the forgotten ones live.
 
 To see why a session recalled what it did:
@@ -694,7 +702,8 @@ servers, plugins and standalone skills).
 those two keys are updated, so `[memory]` and anything else you added survive a re-seed (a file
 that can't be edited safely in place is left unchanged, with a warning). Pass **`--yes`** to run
 non-interactively (every eligible project, auto-detected goals, auto keep/drop, active profile) -
-required when there's no terminal, e.g. in a script.
+required when there's no terminal, e.g. in a script: without it, `init` and `update` exit 2 and
+print the command with `--yes` added.
 
 > [!NOTE]
 > The frozen decisions come from the *auto-detected* goal, which can be low-confidence for a project
