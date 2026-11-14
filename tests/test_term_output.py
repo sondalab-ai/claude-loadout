@@ -398,6 +398,25 @@ def test_accessible_mode_has_no_header(monkeypatch):
     assert "sonda/lab" not in out.getvalue()
 
 
+def test_header_takes_ascii_from_cld_not_the_environment(monkeypatch):
+    # cld's ascii_on() reaches the header through ascii= (palette 0.9.1): the lockup, no mark.
+    out = _tty_stdout(monkeypatch)
+    monkeypatch.setattr(cli._t, "ascii_on", lambda: True)
+    cli.main(["--help"])
+    first = out.getvalue().splitlines()[0]
+    assert first == f"sonda/lab cld {cli._loadout_version()}"
+
+
+def test_header_takes_colour_from_cld_so_truecolor_reaches_it(monkeypatch):
+    # cld's color_mode() opts in to truecolor; through mode= the header paints the brand hues too.
+    out = _tty_stdout(monkeypatch)
+    monkeypatch.delenv("NO_COLOR")
+    monkeypatch.setenv("COLORTERM", "truecolor")
+    cli.main(["--help"])
+    header = "\n".join(out.getvalue().splitlines()[:len(sl.HEADER["mark"])])
+    assert "sonda" in header and "\033[38;2;" in header and "\033[93m" not in header
+
+
 # --- no VT (a Windows console that refuses it): plain text ------------------------------------
 
 def _vt(monkeypatch, *, out: bool, err: bool, out_tty=True, err_tty=True):
