@@ -1,8 +1,9 @@
 """Terminal output on the Sondalab Term spec (docs/tui-patterns.md in sondalab-ui).
 
-Thin bindings over `sondalab_palette.term` (0.9): colour, glyphs, step and report lines, the
-error block, the summary, key hints and prose wrapping all come from the palette, called with
-cld's environment (LOADOUT_NO_COLOR folded into NO_COLOR, plain text when VT is unavailable).
+Thin bindings over `sondalab_palette.term` (0.9.1): colour, glyphs, the header, step and report
+lines, the error block, the summary, key hints and prose wrapping all come from the palette, called
+with cld's environment (LOADOUT_NO_COLOR folded into NO_COLOR, plain text when VT is unavailable)
+or with the ascii/mode that environment resolves to.
 The waiting spinner stays here: the palette has no runner by design.
 """
 from __future__ import annotations
@@ -94,10 +95,11 @@ def header(name: str, version: str, description: str, *, compact: bool = False,
     """The Sondalab header for stdout, or "" when nothing should print.
 
     The palette returns "" for machine output, accessible mode and a stdout that is not a TTY,
-    and the lockup on TERM=dumb, in ASCII mode or on a terminal too narrow for the mark.
+    and the lockup on TERM=dumb, in ASCII mode or on a terminal too narrow for the mark. ASCII
+    and colour come from ascii_on() and color_mode(), so cld's folds and truecolor reach it.
     """
     return slt.header(name, version, description, compact=compact, machine=machine,
-                      env=_env("out"))
+                      ascii=ascii_on(), mode=color_mode())
 
 
 def lockup(name: str, version: str) -> str:
