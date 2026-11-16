@@ -1,5 +1,5 @@
 from __future__ import annotations
-import json, os, tempfile
+import json, os, shutil, tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -9,6 +9,24 @@ class LaunchPlan:
     env: dict[str, str]
     tmp_paths: list[Path]
     servers: tuple[str, ...] = ()        # MCP servers the curated config carries
+    tmp_dirs: tuple[Path, ...] = ()      # temp directories the launch flow removes after the run
+
+def remove_tmp(plan: LaunchPlan) -> None:
+    """Delete a plan's temp files and temp directories, ignoring what is already gone.
+
+    A symlink inside a temp directory is removed as a link: rmtree never follows one, so the
+    files it points at (a harness's real auth or sessions) are left alone.
+    """
+    for p in plan.tmp_paths:
+        try:
+            p.unlink()
+        except OSError:
+            pass
+    for d in plan.tmp_dirs:
+        if d.is_symlink():
+            d.unlink()
+        else:
+            shutil.rmtree(d, ignore_errors=True)
 
 def write_tmp_text(prefix: str, text: str, suffix: str = ".txt") -> Path:
     """Write text to a fresh temp file named loadout-<prefix>-*<suffix> and return its path.

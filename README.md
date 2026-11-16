@@ -742,6 +742,24 @@ claude-loadout update ~/src      # refresh every seeded project under a root (bu
   that because it re-infers the goal, a goal you typed by hand at a previous run is replaced by the
   inferred one; run update interactively (and override at the goal prompt) to keep a hand-typed goal.
 
+## OpenAI Codex CLI (experimental)
+
+`cld --harness codex [codex-args...]` scopes and launches `codex` instead of `claude`. The choice
+holds for that one run. `--explain` and `rules` take it too, and nothing stores it.
+
+- **What it scopes.** MCP servers from `$CODEX_HOME/config.toml` (default `~/.codex`) and from a
+  trusted project's `.codex/config.toml`, and skills in `.agents/skills` (cwd up to the project
+  root), `~/.agents/skills` and `/etc/codex/skills`. Codex plugins are not scoped.
+- **How.** Each run gets a temporary `CODEX_HOME`. Its `config.toml` is your own, with only the
+  kept servers, dropped skills turned off through `[[skills.config]]`, and the memory text appended
+  to `developer_instructions`. Every other entry (`auth.json`, `sessions/`, `log/`, ...) is a
+  symlink to your real `CODEX_HOME`, and the directory is removed after the run. Changes Codex
+  saves to `config.toml` during that run are not kept.
+- **Hooks.** The prompt-recall and debt hooks are added and marked trusted with the same
+  `[hooks.state]` hash entry that `/hooks` writes, so no trust-bypass flag is used. The
+  end-of-session reminder stays Claude-only. `cld measure`, `cld memory link` and the profile
+  prompt are Claude-only.
+
 ## Design guarantees
 
 - **Session-local.** Scoping affects only the session it launches. Your Claude configuration is

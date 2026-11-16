@@ -186,11 +186,11 @@ def _plugin_footprint(install: Path | None, pid: str) -> int | None:
         total += len(f"- {plugin}:{name}: {fm.get('description') or ''}")
     return total
 
-def resolve_mcp_servers(global_config_path: Path, cwd: Path | None) -> dict:
+def resolve_mcp_servers(config_file: Path, cwd: Path | None) -> dict:
     # Single source of truth for MCP discovery, shared by inventory + launch composition.
     # Merge order = least to most specific (later wins, spec §4.2):
     #   user-global -> projects[cwd] inside .claude.json -> repo .mcp.json.
-    global_cfg = _load_json(global_config_path)
+    global_cfg = _load_json(config_file)
     servers = dict(global_cfg.get("mcpServers") or {})
     if cwd is not None:
         project = (global_cfg.get("projects") or {}).get(str(cwd)) or {}
@@ -199,7 +199,7 @@ def resolve_mcp_servers(global_config_path: Path, cwd: Path | None) -> dict:
     return servers
 
 def claude_code_inventory(config_root: Path, cwd: Path | None = None,
-                          global_config_path: Path | None = None) -> list[Item]:
+                          config_file: Path | None = None) -> list[Item]:
     items: list[Item] = []
     settings = _load_json(config_root / "settings.json")
     plugin_paths = _installed_plugin_paths(config_root)
@@ -208,9 +208,9 @@ def claude_code_inventory(config_root: Path, cwd: Path | None = None,
             desc = _plugin_description(plugin_paths.get(pid), pid)
             items.append(Item(id=pid, kind="plugin", name=pid, description=desc,
                               footprint=_plugin_footprint(plugin_paths.get(pid), pid)))
-    if global_config_path is None:
-        global_config_path = default_global_config_path(config_root)
-    servers = resolve_mcp_servers(global_config_path, cwd)
+    if config_file is None:
+        config_file = default_global_config_path(config_root)
+    servers = resolve_mcp_servers(config_file, cwd)
     for name in servers:
         items.append(Item(id=name, kind="mcp", name=name, description=name))
     skills_dir = config_root / "skills"

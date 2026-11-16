@@ -8,7 +8,8 @@ from ccloadout.config import load_config, set_memory_enabled
 from ccloadout.inventory import Item
 from ccloadout.goal import detect_goal, write_goal_cache
 from ccloadout.ranker import Ranker, make_model2vec_embed, keyword_embed, bundled_model_path, resolve_model_source
-from ccloadout.harness import harness_for
+from ccloadout.compose import remove_tmp
+from ccloadout.harness import HARNESS_NAMES, ClaudeHarness, harness_for
 from ccloadout.repo import repo_root
 from ccloadout.link import apply_link, is_linked, plan_link
 from ccloadout.memory import (EntryExists, NoStatus, forget_entry, indexed_files,
@@ -65,13 +66,6 @@ _IRREGULAR = {"entry": "entries"}
 
 def _plural(n: int, noun: str) -> str:
     return f"{n} {noun}" if n == 1 else f"{n} {_IRREGULAR.get(noun, noun + 's')}"
-
-def _cleanup(tmp_paths) -> None:
-    for p in tmp_paths:
-        try:
-            p.unlink()
-        except OSError:
-            pass
 
 def _interactive(passthrough: list[str]) -> bool:
     return sys.stdin.isatty() and "-p" not in passthrough and "--print" not in passthrough
@@ -1008,10 +1002,10 @@ def _cmd_recall(cwd: Path, args: list[str], config_root_override: Path | None = 
     return 0
 
 def _scoped_plan(passthrough: list[str], cwd: Path, config_root_override: Path | None = None,
-                 scope_skills: bool = True, persist: bool = True):
-    cfg = load_config(cwd=cwd, config_root_override=config_root_override)
-    harness = harness_for()
-    items = harness.inventory(cfg.config_root, cwd, cfg.global_config_path)
+                 scope_skills: bool = True, persist: bool = True, harness=None):
+    harness = harness or harness_for()
+    cfg = load_config(cwd=cwd, config_root_override=config_root_override, harness=harness)
+    items = harness.inventory(cfg.config_root, cwd, cfg.config_file)
     if not items:
         return None, None, None
     context, gsource, gconf = _resolve_goal(cwd, passthrough, persist)
@@ -1048,8 +1042,8 @@ def _scoped_plan(passthrough: list[str], cwd: Path, config_root_override: Path |
     hooks, hook_env = _session_hooks(cfg, cwd, mem)
     def _finish(kept, dropped):                    # compose + cost accounting for a keep/drop decision
         plan = harness.compose(kept, items, cfg.config_root, passthrough, cwd=cwd,
-                               global_config_path=cfg.global_config_path,
-                               launch_config_dir=_explicit_profile(config_root_override),
+                               config_file=cfg.config_file,
+                               profile_dir=_explicit_profile(config_root_override, harness),
                                memory_payload=payload, hooks=hooks, hook_env=hook_env)
         measured = _measure.load_costs(cfg.config_root)
         saved = _savings.estimate_savings(kept, [i for i, _ in dropped], cfg.token_costs, measured,
@@ -1073,12 +1067,13 @@ def _scoped_plan(passthrough: list[str], cwd: Path, config_root_override: Path |
                      pinned_ids=pinned_ids, replan=_replan, cwd=cwd, cfg=cfg, goal=context)
     return scope, plan, gate
 
-def _cmd_rules(cwd: Path, config_root_override: Path | None = None) -> int:
+def _cmd_rules(cwd: Path, config_root_override: Path | None = None, harness=None) -> int:
     if not _interactive([]):                        # no TTY -> nothing to elicit; fail-open
         _warn("Rule authoring needs an interactive terminal; nothing to do")
         return 0
-    cfg = load_config(cwd=cwd, config_root_override=config_root_override)
-    items = harness_for().inventory(cfg.config_root, cwd, cfg.global_config_path)
+    harness = harness or harness_for()
+    cfg = load_config(cwd=cwd, config_root_override=config_root_override, harness=harness)
+    items = harness.inventory(cfg.config_root, cwd, cfg.config_file)
     rules = load_rules(cfg.config_root, cwd)
     compile_fn = _build_compiler(cfg)
     context, _src, _conf = _resolve_goal(cwd, [])   # goal string for conditional-rule evaluation
@@ -1106,40 +1101,46 @@ def _cmd_rules(cwd: Path, config_root_override: Path | None = None) -> int:
     _next("claude-loadout --explain")
     return 0
 
-def _discover_profiles(active_root: Path) -> list[Path]:
-    # Claude Code keeps each profile in its own dir (~/.claude, ~/.claude-perso, ...);
-    # CLAUDE_CONFIG_DIR selects one. Report every sibling so a wrong-profile setup is visible.
+def _discover_profiles(active_root: Path, harness=None) -> list[Path]:
+    # A harness may keep each profile in its own dir under HOME (Claude Code: ~/.claude,
+    # ~/.claude-perso, ...) and select one through its config env var. Report every sibling so a
+    # wrong-profile setup is visible; a harness with no profile dirs reports only the active one.
+    glob = (harness or harness_for()).profile_glob
     profiles = [active_root]
-    for path in sorted(Path.home().glob(".claude*")):
+    for path in sorted(Path.home().glob(glob)) if glob else []:
         if path.is_dir() and path.resolve() != active_root.resolve() and path not in profiles:
             profiles.append(path)
     return profiles
 
-def _explicit_profile(override: Path | None) -> Path | None:
-    # A prompted profile must reach the launched claude via CLAUDE_CONFIG_DIR — except the
-    # ~/.claude default, which resolves .claude.json from the HOME root and so stays env-less.
-    return override if override and override != Path.home() / ".claude" else None
+def _explicit_profile(override: Path | None, harness=None) -> Path | None:
+    # A prompted profile must reach the launched harness via its config env var — except the
+    # default root (~/.claude, whose .claude.json sits in HOME), which stays env-less.
+    default = (harness or harness_for()).config_paths({})[0]
+    return override if override and override != default else None
 
-def _launch_env(override: Path | None) -> dict | None:
-    prof = _explicit_profile(override)                  # None -> inherit parent env unchanged
-    return {**os.environ, harness_for().config_env: str(prof)} if prof else None
+def _launch_env(override: Path | None, harness=None) -> dict | None:
+    harness = harness or harness_for()
+    prof = _explicit_profile(override, harness)     # None -> inherit parent env unchanged
+    return {**os.environ, harness.config_env: str(prof)} if prof else None
 
-def _resolve_config_root(environ, passthrough: list[str]) -> Path | None:
+def _resolve_config_root(environ, passthrough: list[str], harness=None) -> Path | None:
     # None -> resolve profile from env as usual. A Path -> user picked that profile.
-    # Only prompt when the profile is implicit (env unset), a real choice exists, and
-    # we have a TTY; an explicit CLAUDE_CONFIG_DIR is always honored without asking.
-    if environ.get(harness_for().config_env):
+    # Only prompt when the harness has profile dirs, the profile is implicit (its config env var
+    # unset), a real choice exists, and we have a TTY; an explicit env var is always honored.
+    harness = harness or harness_for()
+    if harness.profile_glob is None or environ.get(harness.config_env):
         return None
     if not _interactive(passthrough):
         return None
-    profiles = _discover_profiles(Path.home() / ".claude")
+    profiles = _discover_profiles(harness.config_paths({})[0], harness)
     if len(profiles) <= 1:
         return None
     print("", file=sys.stderr)
     state = lambda p: "present" if (p / "loadout" / "config.toml").is_file() else "absent"
     options = [f"{p}  " + _paint(f"(claude-loadout config: {state(p)})", "dim", err=True)
                for p in profiles]
-    picked = _slt.choose("Which Claude profile? CLAUDE_CONFIG_DIR is not set.", options,   # no default
+    picked = _slt.choose(f"Which {harness.label} profile? {harness.config_env} is not set.",
+                         options,                   # no default
                          read=_readline, mode=_t.color_mode(err=True))
     return profiles[picked]
 
@@ -1430,7 +1431,7 @@ def _pinned_ids(items, cfg) -> set[str]:
 def _plan_repo(repo: Path, profile: Path, goal: str):
     # Load the profile, inventory the repo, and auto-decide keep/drop (no side effects).
     cfg = load_config(cwd=repo, config_root_override=profile)
-    items = harness_for().inventory(cfg.config_root, repo, cfg.global_config_path)
+    items = harness_for().inventory(cfg.config_root, repo, cfg.config_file)
     kept_ids = _decide_keep(items, cfg, goal, load_rules(cfg.config_root, repo))
     return cfg, items, kept_ids
 
@@ -1722,7 +1723,7 @@ def _reconcile_rules(prunable: list[Item], final_kept: set[str],
 def _update_repo(repo: Path, profile: Path, goal: str, yes: bool):
     # Refresh one seeded repo. Returns (kept, dropped) prunable item lists, or None if skipped.
     cfg = load_config(cwd=repo, config_root_override=profile)
-    items = harness_for().inventory(cfg.config_root, repo, cfg.global_config_path)
+    items = harness_for().inventory(cfg.config_root, repo, cfg.config_file)
     repo_human, _machine = _split_repo_rules(repo)
     decision = _decision_rules(cfg, repo_human)
     baseline = _decide_keep(items, cfg, goal, decision)   # human rules honored, machine rules re-ranked
@@ -1824,7 +1825,7 @@ class _Tally:
         return _t.summary(c["done"], c["fixed"], c["warn"], c["failed"])
 
 def _profile_report(root: Path, cwd: Path, active: bool,
-                    global_config_path: Path | None = None,
+                    config_file: Path | None = None,
                     token_costs: dict[str, int] | None = None, tally: _Tally | None = None) -> None:
     tally = tally or _Tally()
     print(_t.kv("Profile", f"{root} (active)" if active else str(root)))
@@ -1842,7 +1843,7 @@ def _profile_report(root: Path, cwd: Path, active: bool,
         print(_t.prose(f"Sessions are not asked to record decisions; set [memory] stop_prompt = "
                        f"true in {user_cfg}", dim=True))
     try:
-        items = harness_for().inventory(root, cwd, global_config_path)
+        items = harness_for().inventory(root, cwd, config_file)
     except Exception as exc:                        # fail-open: doctor must never crash
         tally.check("failed", "Inventory", f"unavailable ({exc})")
         return
@@ -1898,7 +1899,7 @@ def _doctor_next_steps(cwd: Path, cfg) -> list[tuple[str, list[str]]]:
     steps = [("Launch through claude-loadout (short alias: cld), for example from a shell rc:",
               ['alias claude="claude-loadout"']),
              ("A separate profile wraps the same way:",
-              ['alias claude-work="CLAUDE_CONFIG_DIR=~/.claude-work claude-loadout"']),
+              [f'alias claude-work="{harness_for().config_env}=~/.claude-work claude-loadout"']),
              ("Preview what a session would load, with no launch:", ["claude-loadout --explain"]),
              ("Scope tools with plain-language rules:", ["claude-loadout rules"])]
     memory = _memory_next_steps(_memory_state(cwd, cfg), cfg.memory.enabled)
@@ -1916,7 +1917,7 @@ def _cmd_doctor(cwd: Path) -> int:
             print()
         active = root == cfg.config_root
         _profile_report(root, cwd, active,
-                        cfg.global_config_path if active else None, cfg.token_costs, tally)
+                        cfg.config_file if active else None, cfg.token_costs, tally)
     print()
     _memory_report(cfg, cwd, tally)
     print()
@@ -1964,7 +1965,12 @@ def _cmd_doctor(cwd: Path) -> int:
             print(" " * 6 + command)
     return 0
 
-def _cmd_measure(cwd: Path) -> int:
+def _cmd_measure(cwd: Path, harness=None) -> int:
+    harness = harness or harness_for()
+    if not isinstance(harness, ClaudeHarness):      # discovery is `claude mcp list`, Claude-only
+        _say("skipped", f"No measuring for {harness.label}",
+             f"`{harness.binary} mcp list` has no documented output format to read")
+        return 0
     cfg = load_config(cwd=cwd)
     print(_paint("claude-loadout measure", "bold"))
     print(_paint("  Connects to each MCP server and tokenizes its real tool set", "dim"))
@@ -2036,6 +2042,8 @@ _HELP = (
                           "(--yes asks nothing)")),
     ("cld doctor", "Report profiles, config and model state"),
     ("cld measure", "Measure the real tool-token cost of MCP servers (opt-in; connects to each)"),
+    ("cld --harness codex", ("Launch OpenAI Codex CLI instead of claude (experimental; also "
+                             "takes --explain and rules)")),
     ("cld --no-gate", "Launch without the pre-launch review pause (or set LOADOUT_NO_GATE)"),
     ("cld --no-scope-skills", ("Keep every user skill loaded, with no skill scoping (or set "
                               "LOADOUT_NO_SCOPE_SKILLS)")),
@@ -2199,7 +2207,7 @@ def _launch_gate(scope: _Scope, plan, gate: _EditGate, passthrough: list[str], n
         if picks is None:                           # q in the checkbox -> back to the gate prompt
             continue
         selected = {gate.editable[i].id for i in picks}
-        _cleanup(plan.tmp_paths)                    # discard the superseded plan's temp files
+        remove_tmp(plan)                            # discard the superseded plan's temp files
         scope, plan = gate.replan(selected)
         _maybe_persist_edit(gate, selected)
         _scoped(scope)
@@ -2259,6 +2267,27 @@ def _rerun_command(argv: list[str], debug_flag: str) -> str:
     return shlex.join(["claude-loadout", *argv[:words], *flags]) + "".join(
         f" {x}" for x in elided) + f" {debug_flag}"
 
+_HARNESS_COMMANDS = frozenset({"rules", "measure"})   # subcommands that take --harness
+
+def _harness_switch(argv: list[str]) -> tuple[list[str], str | None]:
+    """Take cld's `--harness NAME` (or `--harness=NAME`) out of argv: (argv, NAME or None).
+
+    Only a launch, `rules` and `measure` take it; elsewhere it raises ValueError rather than
+    run a Claude-only command under the wrong name. The choice lives for this run only.
+    """
+    at = next((i for i, a in enumerate(argv)
+               if a == "--harness" or a.startswith("--harness=")), None)
+    if at is None:
+        return argv, None
+    flag = argv[at]
+    name = flag.partition("=")[2] if "=" in flag else (argv[at + 1] if at + 1 < len(argv) else "")
+    rest = argv[:at] + argv[at + (1 if "=" in flag else 2):]
+    if not name:
+        raise ValueError("--harness needs a name")
+    if _is_subcommand(rest) and rest[0] not in _HARNESS_COMMANDS:
+        raise ValueError(f"--harness does not apply to `{rest[0]}`")
+    return rest, name
+
 def main(argv: list[str] | None = None) -> int:
     _t.enable_vt()                                  # Windows: no VT means plain text throughout
     argv, debug, debug_flag = _debug_switch(sys.argv[1:] if argv is None else list(argv))
@@ -2287,6 +2316,13 @@ def main(argv: list[str] | None = None) -> int:
 def _run(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     cwd = Path.cwd()
+    try:
+        argv, harness_name = _harness_switch(argv)
+        harness = harness_for(harness_name or "claude")
+    except ValueError as exc:
+        _fail("Can't pick the harness", str(exc),
+              f"claude-loadout --harness {'|'.join(HARNESS_NAMES)} [args...]")
+        return 2
     if argv and argv[0] in ("--help", "-h", "help"):  # loadout's own help; no profile prompt/scoping
         _header()
         _print_help()
@@ -2337,7 +2373,7 @@ def _run(argv: list[str] | None = None) -> int:
         return _cmd_recall(repo_root(cwd), argv[1:], _resolve_config_root(os.environ, []))
     if argv and argv[0] == "measure":               # opt-in, connects to servers; no scoping
         _header(compact=True)
-        return _cmd_measure(cwd)
+        return _cmd_measure(cwd, harness)
     if argv and argv[0] == "init":                  # bulk-seed repo config; resolves profiles itself
         _header()
         return _cmd_init(cwd, argv[1:], os.environ)
@@ -2354,14 +2390,16 @@ def _run(argv: list[str] | None = None) -> int:
         _header(compact=True)
     elif rules_cmd or _interactive(passthrough):    # -p/--print: claude's output owns stdout
         _header()
-    override = _resolve_config_root(os.environ, [] if rules_cmd else passthrough)   # asks when implicit
+    override = _resolve_config_root(os.environ, [] if rules_cmd else passthrough,   # asks when
+                                    harness)                                       # implicit
     if rules_cmd:
-        return _cmd_rules(cwd, override)
-    fallback_env = _launch_env(override)            # keep a prompted profile on the fallback launches
-    binary = harness_for().binary
+        return _cmd_rules(cwd, override, harness)
+    fallback_env = _launch_env(override, harness)   # keep a prompted profile on the fallback launches
+    binary = harness.binary
     try:
         result, plan, gate = _scoped_plan(passthrough, cwd, override, scope_skills,
-                                          persist=not explain)   # --explain writes nothing
+                                          persist=not explain,   # --explain writes nothing
+                                          harness=harness)
     except _slt.TermError:                          # a prompt failed: stop, never launch on a default
         raise
     except Exception as exc:
@@ -2372,7 +2410,7 @@ def _run(argv: list[str] | None = None) -> int:
     scope = result
     if explain:
         _print_explain(scope, plan)
-        _cleanup(plan.tmp_paths)
+        remove_tmp(plan)
         return 0
     scope, plan = _launch_gate(scope, plan, gate, passthrough, no_gate)   # read/adjust before claude takes the screen
     _memory_intro_once(scope.memory)                # the first injection explains itself, once
@@ -2382,6 +2420,6 @@ def _run(argv: list[str] | None = None) -> int:
     try:
         code = subprocess.run(plan.argv, env=plan.env).returncode
     finally:
-        _cleanup(plan.tmp_paths)
+        remove_tmp(plan)
     _capture_session(scope, cwd, code, head_before)
     return code
