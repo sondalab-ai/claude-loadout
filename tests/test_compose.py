@@ -175,3 +175,22 @@ def test_hook_command_is_quoted_and_time_limited(tmp_path: Path):
     assert hook["timeout"] == 5
     import shlex, sys
     assert shlex.split(hook["command"])[0] == sys.executable   # survives a path with spaces
+
+def test_hook_command_ignores_a_package_planted_in_the_project(tmp_path: Path):
+    # Regression: `python -m` puts the working directory first on sys.path, and the harness runs
+    # hooks in the project folder, so a repository with its own `ccloadout/` package ran its code
+    # as the hook. `-P` keeps the working directory off sys.path.
+    import shlex, subprocess
+    project = tmp_path / "project"
+    planted = project / "ccloadout"
+    planted.mkdir(parents=True)
+    marker = tmp_path / "hijacked"
+    (planted / "__init__.py").write_text(f"open({str(marker)!r}, 'w').close()\n")
+    (planted / "debt_hook.py").write_text("")
+    plan = compose([], [], tmp_path, [], environ={}, cwd=tmp_path,
+                   global_config_path=tmp_path / ".claude.json",
+                   hooks={"PostToolUse": "ccloadout.debt_hook"}, hook_env={})
+    command = _settings_of(plan)["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
+    subprocess.run(shlex.split(command), cwd=project, input="{}", text=True,
+                   capture_output=True, timeout=30)
+    assert not marker.exists()
