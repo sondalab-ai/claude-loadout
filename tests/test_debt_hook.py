@@ -98,3 +98,19 @@ def test_a_pattern_containing_a_comma_survives_the_env(tmp_path):
          _env(root, patterns="TODO(a,b)"))
     row, = load_candidates(root, repo, kind="debt-signal")
     assert row["pattern"] == "TODO(a,b)"
+
+def test_a_codex_apply_patch_counts_only_added_lines(tmp_path):
+    root, repo = tmp_path / "root", tmp_path / "repo"
+    patch = ("*** Begin Patch\n*** Update File: src/a.py\n@@\n- # TODO(loadout) old shim\n"
+             "+x = 1  # TODO(loadout) new shim\n*** End Patch\n")
+    _run({"tool_name": "apply_patch", "cwd": str(repo), "tool_input": {"command": patch}},
+         _env(root))
+    row, = load_candidates(root, repo, kind="debt-signal")
+    assert row["file"] == "src/a.py" and "new shim" in row["excerpt"]
+
+def test_a_codex_patch_that_removes_the_marker_records_nothing(tmp_path):
+    root, repo = tmp_path / "root", tmp_path / "repo"
+    patch = "*** Begin Patch\n*** Update File: a.py\n@@\n- # TODO(loadout) gone\n*** End Patch\n"
+    _run({"tool_name": "apply_patch", "cwd": str(repo), "tool_input": {"command": patch}},
+         _env(root))
+    assert load_candidates(root, repo) == []

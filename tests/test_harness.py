@@ -17,7 +17,7 @@ def _sample(tmp_path: Path):
 def _run(compose_fn, tmp_path: Path):
     root, items, kept = _sample(tmp_path)
     plan = compose_fn(kept, items, root, ["-c", "--model", "x"], environ={"A": "1"},
-                      cwd=tmp_path, launch_config_dir=root, memory_payload="remember",
+                      cwd=tmp_path, profile_dir=root, memory_payload="remember",
                       hooks={"Stop": "ccloadout.stop_hook"}, hook_env={"LOADOUT_N": 3})
     try:
         return plan, [p.read_text() for p in plan.tmp_paths]
@@ -48,8 +48,8 @@ def test_harness_for_defaults_to_claude_code():
     assert (harness.binary, harness.config_env) == ("claude", "CLAUDE_CONFIG_DIR")
 
 def test_harness_for_rejects_an_unknown_name():
-    with pytest.raises(ValueError, match="codex"):
-        harness_for("codex")
+    with pytest.raises(ValueError, match="aider"):
+        harness_for("aider")
 
 def test_claude_inventory_matches_the_claude_code_reader(tmp_path: Path):
     root, _, _ = _sample(tmp_path)

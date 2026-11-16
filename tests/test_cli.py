@@ -1688,7 +1688,7 @@ def test_memory_off_composes_a_byte_identical_plan(tmp_path, monkeypatch):
     items = [Item("Gmail", "mcp", "Gmail", ""), Item("figma@x", "plugin", "figma", "")]
     def plan_for(**extra):
         plan = compose(items[:1], items, root, ["-c"], environ={"HOME": "/x"}, cwd=tmp_path,
-                       global_config_path=root / ".claude.json", **extra)
+                       config_file=root / ".claude.json", **extra)
         settings = _json.loads(Path(plan.argv[plan.argv.index("--settings") + 1]).read_text())
         return [a for a in plan.argv if not a.startswith("/")], settings, plan.env
     argv, settings, env = plan_for()

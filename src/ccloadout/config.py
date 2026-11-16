@@ -47,7 +47,7 @@ class MemoryConfig:
 @dataclass(frozen=True)
 class Config:
     config_root: Path
-    global_config_path: Path            # .claude.json: mcpServers + project scopes
+    config_file: Path                   # .claude.json (Claude) or config.toml (Codex)
     always_keep: tuple[str, ...]
     threshold: float
     model_name: str
@@ -65,7 +65,16 @@ def _read_toml(path: Path) -> dict:
         _warn(f"claude-loadout hit a parse error in {path} ({exc}); using the defaults")
         return {}
 
-def _resolve_paths(environ: Mapping[str, str]) -> tuple[Path, Path]:
+def _resolve_paths(environ: Mapping[str, str], harness=None) -> tuple[Path, Path]:
+    """(config root, main config file) of the harness, from the environment; Claude by default.
+
+    The harness is passed in, never imported: this module sits on the hook path.
+    """
+    if harness is None:
+        return claude_paths(environ)
+    return harness.config_paths(environ)
+
+def claude_paths(environ: Mapping[str, str]) -> tuple[Path, Path]:
     # Claude Code: settings/skills live in CLAUDE_CONFIG_DIR (or ~/.claude by default),
     # but .claude.json sits at <CLAUDE_CONFIG_DIR>/.claude.json — or ~/.claude.json (HOME
     # root, beside the dir) when the default profile is used.
@@ -83,13 +92,14 @@ def default_global_config_path(config_root: Path) -> Path:
         else config_root / ".claude.json"
 
 def load_config(cwd: Path, environ: Mapping[str, str] | None = None,
-                config_root_override: Path | None = None) -> Config:
+                config_root_override: Path | None = None, harness=None) -> Config:
     environ = os.environ if environ is None else environ
     if config_root_override is not None:                # explicit profile choice (cli prompt)
         root = config_root_override
-        global_config_path = default_global_config_path(root)
+        config_file = (default_global_config_path(root) if harness is None
+                              else harness.config_paths(environ, root)[1])
     else:
-        root, global_config_path = _resolve_paths(environ)
+        root, config_file = _resolve_paths(environ, harness)
     layers = [_read_toml(root / "loadout" / "config.toml"),
               _read_toml(cwd / ".loadout" / "config.toml")]
     always: tuple[str, ...] = ()
@@ -123,7 +133,7 @@ def load_config(cwd: Path, environ: Mapping[str, str] | None = None,
         always = tuple(x for x in environ["LOADOUT_ALWAYS_KEEP"].split(",") if x)
     if "LOADOUT_THRESHOLD" in environ:
         threshold = float(environ["LOADOUT_THRESHOLD"])
-    return Config(config_root=root, global_config_path=global_config_path,
+    return Config(config_root=root, config_file=config_file,
                   always_keep=always, threshold=threshold,
                   model_name=model, rule_model_path=rule_model,
                   token_costs=token_costs, memory=memory)

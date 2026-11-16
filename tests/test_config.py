@@ -30,14 +30,14 @@ def test_config_root_override_wins_over_env(tmp_path: Path):
     cfg = load_config(cwd=tmp_path, environ=env, config_root_override=picked)
     assert cfg.config_root == picked
     assert cfg.always_keep == ("p",)                       # config read from override root
-    assert cfg.global_config_path == picked / ".claude.json"
+    assert cfg.config_file == picked / ".claude.json"
 
 def test_config_root_override_default_profile_uses_home_json(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
     default_root = tmp_path / ".claude"; default_root.mkdir()
     cfg = load_config(cwd=tmp_path, environ={}, config_root_override=default_root)
     assert cfg.config_root == default_root
-    assert cfg.global_config_path == tmp_path / ".claude.json"   # HOME-root, not <dir>/.claude.json
+    assert cfg.config_file == tmp_path / ".claude.json"   # HOME-root, not <dir>/.claude.json
 
 def test_memory_section_is_read_and_defaults_to_off(tmp_path: Path):
     root = tmp_path / "root"; (root / "loadout").mkdir(parents=True)

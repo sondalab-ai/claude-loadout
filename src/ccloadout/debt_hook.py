@@ -17,6 +17,7 @@ _TEXT_FIELDS = ("content", "new_string", "new_str", "replace_all_string", "text"
 # A redirect that writes a file, not `2>&1` or `2>/dev/null` — those are error plumbing, and
 # `grep pattern > out.txt` used to be recorded as debt the session had created.
 _WRITING_SHELL = re.compile(r"(?<![0-9&])>{1,2}\s*[^&\s]|<<|\btee\b|\bsed\s+-i|\bpatch\b")
+_PATCH_FILE = re.compile(r"^\*\*\* (?:Add|Update) File: (.+)$", re.MULTILINE)
 LIST_SEP = "\x1f"                                    # a unit separator cannot occur in a pattern
 
 def _written_text(tool_input: dict) -> str:
@@ -26,11 +27,21 @@ def _written_text(tool_input: dict) -> str:
             parts += [str(edit.get(field)) for field in _TEXT_FIELDS if edit.get(field)]
     return "\n".join(parts)
 
+def _patch_added(patch: str) -> tuple[str, str]:
+    """The lines a Codex `apply_patch` body adds, and the first file it adds or updates.
+
+    Codex reports every file edit as `apply_patch` with the patch text in `tool_input.command`;
+    only `+` lines are written, so context and removed lines never count as new debt.
+    """
+    added = [ln[1:] for ln in patch.splitlines() if ln.startswith("+")]
+    target = _PATCH_FILE.search(patch)
+    return "\n".join(added), target.group(1).strip() if target else ""
+
 def main() -> int:
     try:
         payload = json.loads(sys.stdin.read() or "{}")
         tool = payload.get("tool_name")
-        if tool not in _WRITERS and tool != "Bash":
+        if tool not in _WRITERS and tool not in ("Bash", "apply_patch"):
             return 0
         raw = os.environ.get("LOADOUT_DEBT_PATTERNS") or ""
         patterns = [p for p in raw.split(LIST_SEP) if p]
@@ -39,9 +50,12 @@ def main() -> int:
         tool_input = payload.get("tool_input") or {}
         if not isinstance(tool_input, dict):
             return 0
+        file = str(tool_input.get("file_path") or ("(shell)" if tool == "Bash" else ""))
         if tool == "Bash":
             command = str(tool_input.get("command") or "")
             text = command if _WRITING_SHELL.search(command) else ""
+        elif tool == "apply_patch":
+            text, file = _patch_added(str(tool_input.get("command") or ""))
         else:
             text = _written_text(tool_input)
         hit = next((p for p in patterns if p in text), None)
@@ -53,7 +67,7 @@ def main() -> int:
         record_signal(Path(os.environ["LOADOUT_CONFIG_ROOT"]),
                       repo_root(Path(payload.get("cwd") or os.environ.get("LOADOUT_REPO") or ".")),
                       pattern=hit,
-                      file=str(tool_input.get("file_path") or ("(shell)" if tool == "Bash" else "")),
+                      file=file,
                       excerpt=line)
     except BaseException:                           # bookkeeping must never break a tool call
         return 0
