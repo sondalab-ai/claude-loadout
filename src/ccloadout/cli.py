@@ -1128,7 +1128,7 @@ def _resolve_config_root(environ, passthrough: list[str]) -> Path | None:
     # None -> resolve profile from env as usual. A Path -> user picked that profile.
     # Only prompt when the profile is implicit (env unset), a real choice exists, and
     # we have a TTY; an explicit CLAUDE_CONFIG_DIR is always honored without asking.
-    if environ.get("CLAUDE_CONFIG_DIR"):
+    if environ.get(harness_for().config_env):
         return None
     if not _interactive(passthrough):
         return None
