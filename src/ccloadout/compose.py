@@ -57,7 +57,7 @@ def compose(kept, all_items, config_root: Path, passthrough: list[str],
         # space has to survive quoting; the timeout is explicit because the default is 60 s and
         # these hooks are meant to be imperceptible.
         settings["hooks"] = {event: [{"hooks": [
-            {"type": "command", "command": f"{shlex.quote(sys.executable)} -m {module}",
+            {"type": "command", "command": f"{shlex.quote(sys.executable)} -P -m {module}",
              "timeout": 5}]}]
             for event, module in hooks.items()}
     if dropped_skills:

@@ -96,7 +96,7 @@ def test_the_command_the_payload_names_actually_returns_entries(tmp_path):
     (mem / "note.md").write_text(
         "---\nname: scoping-note\ndescription: how skills are pruned per session\n---\nbody\n")
     (root / "skills").mkdir(parents=True)               # deliberately empty: nothing installed
-    command = f"{sys.executable} -m ccloadout"
+    command = f"{sys.executable} -P -m ccloadout"
     done = subprocess.run(shlex.split(command) + ["recall", "how are skills pruned"],
                           cwd=repo, capture_output=True, text=True,
                           env={**os.environ, "CLAUDE_CONFIG_DIR": str(root)})
