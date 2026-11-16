@@ -5,10 +5,10 @@ from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import NamedTuple
 from ccloadout.config import load_config, set_memory_enabled
-from ccloadout.inventory import claude_code_inventory, Item
+from ccloadout.inventory import Item
 from ccloadout.goal import detect_goal, write_goal_cache
 from ccloadout.ranker import Ranker, make_model2vec_embed, keyword_embed, bundled_model_path, resolve_model_source
-from ccloadout.compose import compose
+from ccloadout.harness import harness_for
 from ccloadout.repo import repo_root
 from ccloadout.link import apply_link, is_linked, plan_link
 from ccloadout.memory import (EntryExists, NoStatus, forget_entry, indexed_files,
@@ -1010,7 +1010,8 @@ def _cmd_recall(cwd: Path, args: list[str], config_root_override: Path | None = 
 def _scoped_plan(passthrough: list[str], cwd: Path, config_root_override: Path | None = None,
                  scope_skills: bool = True, persist: bool = True):
     cfg = load_config(cwd=cwd, config_root_override=config_root_override)
-    items = claude_code_inventory(cfg.config_root, cwd, cfg.global_config_path)
+    harness = harness_for()
+    items = harness.inventory(cfg.config_root, cwd, cfg.global_config_path)
     if not items:
         return None, None, None
     context, gsource, gconf = _resolve_goal(cwd, passthrough, persist)
@@ -1046,10 +1047,10 @@ def _scoped_plan(passthrough: list[str], cwd: Path, config_root_override: Path |
     # natural-language authoring path.
     hooks, hook_env = _session_hooks(cfg, cwd, mem)
     def _finish(kept, dropped):                    # compose + cost accounting for a keep/drop decision
-        plan = compose(kept, items, cfg.config_root, passthrough, cwd=cwd,
-                       global_config_path=cfg.global_config_path,
-                       launch_config_dir=_explicit_profile(config_root_override),
-                       memory_payload=payload, hooks=hooks, hook_env=hook_env)
+        plan = harness.compose(kept, items, cfg.config_root, passthrough, cwd=cwd,
+                               global_config_path=cfg.global_config_path,
+                               launch_config_dir=_explicit_profile(config_root_override),
+                               memory_payload=payload, hooks=hooks, hook_env=hook_env)
         measured = _measure.load_costs(cfg.config_root)
         saved = _savings.estimate_savings(kept, [i for i, _ in dropped], cfg.token_costs, measured,
                                           injected=mem.injected if mem else 0)
@@ -1077,7 +1078,7 @@ def _cmd_rules(cwd: Path, config_root_override: Path | None = None) -> int:
         _warn("Rule authoring needs an interactive terminal; nothing to do")
         return 0
     cfg = load_config(cwd=cwd, config_root_override=config_root_override)
-    items = claude_code_inventory(cfg.config_root, cwd, cfg.global_config_path)
+    items = harness_for().inventory(cfg.config_root, cwd, cfg.global_config_path)
     rules = load_rules(cfg.config_root, cwd)
     compile_fn = _build_compiler(cfg)
     context, _src, _conf = _resolve_goal(cwd, [])   # goal string for conditional-rule evaluation
@@ -1121,7 +1122,7 @@ def _explicit_profile(override: Path | None) -> Path | None:
 
 def _launch_env(override: Path | None) -> dict | None:
     prof = _explicit_profile(override)                  # None -> inherit parent env unchanged
-    return {**os.environ, "CLAUDE_CONFIG_DIR": str(prof)} if prof else None
+    return {**os.environ, harness_for().config_env: str(prof)} if prof else None
 
 def _resolve_config_root(environ, passthrough: list[str]) -> Path | None:
     # None -> resolve profile from env as usual. A Path -> user picked that profile.
@@ -1429,7 +1430,7 @@ def _pinned_ids(items, cfg) -> set[str]:
 def _plan_repo(repo: Path, profile: Path, goal: str):
     # Load the profile, inventory the repo, and auto-decide keep/drop (no side effects).
     cfg = load_config(cwd=repo, config_root_override=profile)
-    items = claude_code_inventory(cfg.config_root, repo, cfg.global_config_path)
+    items = harness_for().inventory(cfg.config_root, repo, cfg.global_config_path)
     kept_ids = _decide_keep(items, cfg, goal, load_rules(cfg.config_root, repo))
     return cfg, items, kept_ids
 
@@ -1721,7 +1722,7 @@ def _reconcile_rules(prunable: list[Item], final_kept: set[str],
 def _update_repo(repo: Path, profile: Path, goal: str, yes: bool):
     # Refresh one seeded repo. Returns (kept, dropped) prunable item lists, or None if skipped.
     cfg = load_config(cwd=repo, config_root_override=profile)
-    items = claude_code_inventory(cfg.config_root, repo, cfg.global_config_path)
+    items = harness_for().inventory(cfg.config_root, repo, cfg.global_config_path)
     repo_human, _machine = _split_repo_rules(repo)
     decision = _decision_rules(cfg, repo_human)
     baseline = _decide_keep(items, cfg, goal, decision)   # human rules honored, machine rules re-ranked
@@ -1841,7 +1842,7 @@ def _profile_report(root: Path, cwd: Path, active: bool,
         print(_t.prose(f"Sessions are not asked to record decisions; set [memory] stop_prompt = "
                        f"true in {user_cfg}", dim=True))
     try:
-        items = claude_code_inventory(root, cwd, global_config_path)
+        items = harness_for().inventory(root, cwd, global_config_path)
     except Exception as exc:                        # fail-open: doctor must never crash
         tally.check("failed", "Inventory", f"unavailable ({exc})")
         return
@@ -2357,6 +2358,7 @@ def _run(argv: list[str] | None = None) -> int:
     if rules_cmd:
         return _cmd_rules(cwd, override)
     fallback_env = _launch_env(override)            # keep a prompted profile on the fallback launches
+    binary = harness_for().binary
     try:
         result, plan, gate = _scoped_plan(passthrough, cwd, override, scope_skills,
                                           persist=not explain)   # --explain writes nothing
@@ -2364,9 +2366,9 @@ def _run(argv: list[str] | None = None) -> int:
         raise
     except Exception as exc:
         _warn(f"Scoping failed ({exc}); launching full session")
-        return subprocess.run(["claude", *passthrough], env=fallback_env).returncode
+        return subprocess.run([binary, *passthrough], env=fallback_env).returncode
     if plan is None:
-        return subprocess.run(["claude", *passthrough], env=fallback_env).returncode
+        return subprocess.run([binary, *passthrough], env=fallback_env).returncode
     scope = result
     if explain:
         _print_explain(scope, plan)

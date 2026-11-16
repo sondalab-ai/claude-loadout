@@ -1,7 +1,9 @@
 import json
 from pathlib import Path
 from ccloadout.inventory import Item
-from ccloadout.compose import compose
+from ccloadout.harness import ClaudeHarness
+
+compose = ClaudeHarness().compose
 
 def _settings_of(plan):
     return json.loads(Path(plan.argv[plan.argv.index("--settings") + 1]).read_text())

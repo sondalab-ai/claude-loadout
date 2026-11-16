@@ -2,6 +2,7 @@ import io, json, os, re, sys
 from pathlib import Path
 import pytest
 import ccloadout.cli as cli
+from ccloadout.harness import ClaudeHarness
 
 class _RC:
     def __init__(self, code): self.returncode = code
@@ -40,8 +41,8 @@ def test_explain_does_not_launch(tmp_path, monkeypatch, capsys):
 def test_fail_open_launches_full_claude_on_error(tmp_path, monkeypatch):
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "root"))
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(cli, "claude_code_inventory",
-                        lambda root, cwd=None: (_ for _ in ()).throw(RuntimeError("boom")))
+    monkeypatch.setattr(ClaudeHarness, "inventory",
+                        lambda self, *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
     captured = {}
     monkeypatch.setattr(cli.subprocess, "run",
                         lambda argv, **k: captured.__setitem__("argv", argv) or _RC(0))
@@ -51,8 +52,8 @@ def test_fail_open_launches_full_claude_on_error(tmp_path, monkeypatch):
 def test_keyboard_interrupt_aborts_cleanly(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "root"))
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(cli, "claude_code_inventory",
-                        lambda *a, **k: (_ for _ in ()).throw(KeyboardInterrupt()))
+    monkeypatch.setattr(ClaudeHarness, "inventory",
+                        lambda self, *a, **k: (_ for _ in ()).throw(KeyboardInterrupt()))
     rc = cli.main([])                               # Ctrl-C at a prompt -> exit 130, no traceback
     assert rc == 130
     assert "Aborted" in capsys.readouterr().err
@@ -224,8 +225,8 @@ def test_doctor_survives_inventory_error(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(cli, "claude_code_inventory",
-                        lambda root, cwd=None: (_ for _ in ()).throw(RuntimeError("boom")))
+    monkeypatch.setattr(ClaudeHarness, "inventory",
+                        lambda self, *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
     rc = cli.main(["doctor"])
     assert rc == 0
     assert "unavailable" in capsys.readouterr().out
@@ -1681,8 +1682,8 @@ def test_repeated_writes_of_one_marker_are_a_single_candidate(tmp_path, monkeypa
 def test_memory_off_composes_a_byte_identical_plan(tmp_path, monkeypatch):
     # Acceptance criterion 1, asserted on the composed plan rather than on the suite staying green.
     import json as _json
-    from ccloadout.compose import compose
     from ccloadout.inventory import Item
+    compose = ClaudeHarness().compose
     root = _root(tmp_path)
     items = [Item("Gmail", "mcp", "Gmail", ""), Item("figma@x", "plugin", "figma", "")]
     def plan_for(**extra):
