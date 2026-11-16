@@ -797,7 +797,7 @@ launches nothing. Plain `cld` is unchanged and still launches `claude`.
 - A run killed hard (SIGKILL) can leave a directory under `loadout/run/`.
 
 **Plugins, skills and stacking.** On Claude Code, plugin and per-run skill switches work as
-before. Stacking with MxM is unchanged on Claude Code. It is not supported on Codex yet.
+before. Stacking with MxM (`MXM_CLAUDE=cld mxm claude`, described in the MxM README) is unchanged on Claude Code. It is not supported on Codex yet.
 
 ### Security
 
