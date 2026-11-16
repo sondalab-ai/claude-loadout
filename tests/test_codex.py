@@ -7,7 +7,7 @@ from ccloadout.compose import remove_tmp
 from ccloadout.harness import CodexHarness, harness_for
 from ccloadout.inventory import Item
 
-_HOOK = f"{shlex.quote(sys.executable)} -m ccloadout.prompt_hook"
+_HOOK = f"{shlex.quote(sys.executable)} -P -m ccloadout.prompt_hook"
 
 def _home(tmp_path: Path, config: str) -> Path:
     home = tmp_path / "codex-home"; home.mkdir()
@@ -253,3 +253,88 @@ def test_the_users_hook_trust_moves_even_without_loadout_hooks(tmp_path, hooks):
     state = tomllib.loads((tmp / "config.toml").read_text())["hooks"]["state"]
     assert state == {f"{tmp}/hooks.json:stop:0:0": {"trusted_hash": "sha256:mine"}}
     remove_tmp(plan)
+
+def test_a_planted_package_in_the_session_cwd_never_runs_as_a_hook(tmp_path):
+    import subprocess
+    home, plan = _compose(tmp_path, hooks={"UserPromptSubmit": "ccloadout.prompt_hook"},
+                          hook_env={})
+    tmp, = plan.tmp_dirs
+    command = tomllib.loads((tmp / "config.toml").read_text())[
+        "hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"]
+    remove_tmp(plan)
+    project = tmp_path / "project"; (project / "ccloadout").mkdir(parents=True)
+    marker = tmp_path / "planted-ran"
+    (project / "ccloadout" / "__init__.py").write_text(
+        f"open({str(marker)!r}, 'w').write('x')\n")
+    out = subprocess.run(command, shell=True, cwd=project, input="{}", text=True,
+                         capture_output=True, timeout=30)
+    assert out.returncode == 0 and not marker.exists()
+
+def test_a_case_variant_config_in_the_real_home_is_never_linked_or_written(tmp_path):
+    home = _home(tmp_path, _SAMPLE)
+    (home / "config.toml").unlink()
+    (home / "Config.toml").write_text(_SAMPLE)
+    if not (home / "config.toml").exists():
+        pytest.skip("case-sensitive file system: Config.toml is a different file")
+    plan = CodexHarness().compose([], [], home, [], environ={}, cwd=tmp_path)
+    tmp, = plan.tmp_dirs
+    assert not any(p.is_symlink() and p.name.casefold() == "config.toml" for p in tmp.iterdir())
+    remove_tmp(plan)
+    assert (home / "Config.toml").read_text() == _SAMPLE
+
+def test_a_config_toml_symlink_in_the_temp_home_is_refused(tmp_path):
+    target = tmp_path / "victim"; target.write_text("keep")
+    link = tmp_path / "config.toml"; link.symlink_to(target)
+    with pytest.raises(OSError):
+        codex._write_new(link, "overwrite")
+    assert target.read_text() == "keep"
+
+def test_the_temp_home_lives_in_the_real_home_not_in_tmpdir(tmp_path, monkeypatch):
+    import tempfile
+    monkeypatch.setenv("TMPDIR", str(tmp_path / "tmpdir"))
+    (tmp_path / "tmpdir").mkdir()
+    tempfile.tempdir = None
+    try:
+        home, plan = _compose(tmp_path)
+        tmp, = plan.tmp_dirs
+        assert not tmp.is_relative_to(Path(tempfile.gettempdir()).resolve())
+        assert tmp.parent == (home / "loadout" / "run").resolve()
+        assert not (tmp / "loadout").exists()
+        assert ((home / "loadout" / "run").stat().st_mode & 0o777) == 0o700
+        remove_tmp(plan)
+        assert not tmp.exists() and (home / "auth.json").exists()
+    finally:
+        tempfile.tempdir = None
+
+def test_rekey_moves_only_entries_of_the_real_home_itself(tmp_path):
+    real, new = tmp_path / "home", tmp_path / "home" / "loadout" / "run" / "codex-x"
+    state = {f"{real}/config.toml:stop:0:0": 1, f"{real}/hooks.json:stop:0:0": 2,
+             f"{real}/loadout/run/codex-old/config.toml:stop:0:0": 3,
+             "/other/config.toml:stop:0:0": 4}
+    assert codex._rekey(state, (real,), new) == {
+        f"{new}/config.toml:stop:0:0": 1, f"{new}/hooks.json:stop:0:0": 2,
+        f"{real}/loadout/run/codex-old/config.toml:stop:0:0": 3, "/other/config.toml:stop:0:0": 4}
+
+def test_a_project_server_forced_on_warns_that_it_cannot_be_dropped(tmp_path, capsys):
+    repo = tmp_path / "repo"; (repo / ".git").mkdir(parents=True); (repo / ".codex").mkdir()
+    (repo / ".codex" / "config.toml").write_text(
+        '[mcp_servers.db]\ncommand = "db-mcp"\nenabled = true\n')
+    home = _home(tmp_path, _SAMPLE + f'\n[projects."{repo}"]\ntrust_level = "trusted"\n')
+    plan = CodexHarness().compose([], [Item("db", "mcp", "db", "")], home, [], environ={},
+                                  cwd=repo)
+    remove_tmp(plan)
+    assert "can't drop MCP server db" in capsys.readouterr().err
+
+def test_project_trust_matches_through_a_symlinked_path(tmp_path):
+    real = tmp_path / "real-repo"; (real / ".codex").mkdir(parents=True)
+    (real / ".codex" / "config.toml").write_text('[mcp_servers.db]\ncommand = "db-mcp"\n')
+    alias = tmp_path / "alias"; alias.symlink_to(real, target_is_directory=True)
+    config = {"projects": {str(real): {"trust_level": "trusted"}}}
+    assert "db" in codex.project_servers(alias, config)
+
+def test_a_failed_config_write_removes_the_temp_home(tmp_path, monkeypatch):
+    home = _home(tmp_path, _SAMPLE)
+    monkeypatch.setattr(codex, "_write_new", lambda *a: (_ for _ in ()).throw(OSError("full")))
+    with pytest.raises(OSError):
+        CodexHarness().compose([], [], home, [], environ={}, cwd=tmp_path)
+    assert list((home / "loadout" / "run").iterdir()) == []

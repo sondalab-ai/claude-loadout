@@ -1,11 +1,13 @@
 from __future__ import annotations
-import copy, hashlib, json, os, shlex, sys, tempfile, tomllib
+import copy, hashlib, json, os, shlex, shutil, sys, tempfile, tomllib
 from pathlib import Path
 from typing import Mapping, Sequence
 from ccloadout.inventory import Item, _frontmatter
 from ccloadout import tomlw
 
 CONFIG_FILE = "config.toml"
+LOADOUT_DIR = "loadout"
+GENERATED = frozenset({CONFIG_FILE.casefold(), LOADOUT_DIR.casefold()})   # never linked in
 STATE_DIRS = ("sessions", "log")
 HOOK_TIMEOUT_S = 5
 EVENT_LABELS = {"UserPromptSubmit": "user_prompt_submit", "PostToolUse": "post_tool_use"}
@@ -37,8 +39,9 @@ def _project_dirs(cwd: Path, config: dict) -> list[Path]:
     return chain[:chain.index(root) + 1] if root in chain else [cwd]
 
 def _trusted(cwd: Path, config: dict) -> bool:
-    projects = config.get("projects") or {}
-    for d in (cwd, *cwd.parents):
+    projects = {str(Path(k).resolve()): v for k, v in (config.get("projects") or {}).items()}
+    real = cwd.resolve()
+    for d in (real, *real.parents):
         level = (projects.get(str(d)) or {}).get("trust_level")
         if level:
             return level == "trusted"
@@ -111,7 +114,8 @@ def _rekey(state: dict, homes: Sequence[Path], new_home: Path) -> dict:
     prefixes = {f"{h}{os.sep}" for h in homes}
     out = {}
     for key, value in state.items():
-        old = next((p for p in prefixes if key.startswith(p)), None)
+        old = next((p for p in prefixes if key.startswith(p)
+                    and os.sep not in key[len(p):].partition(":")[0]), None)
         out[f"{new_home}{os.sep}{key[len(old):]}" if old else key] = value
     return out
 
@@ -119,7 +123,7 @@ def _add_hooks(config: dict, hooks: dict[str, str], tmp_home: Path) -> None:
     table = config.setdefault("hooks", {})
     state = table.get("state") or {}
     for event, module in hooks.items():
-        command = f"{shlex.quote(sys.executable)} -m {module}"
+        command = f"{shlex.quote(sys.executable)} -P -m {module}"   # -P: cwd never on sys.path
         groups = table.setdefault(event, [])
         key = f"{tmp_home / CONFIG_FILE}:{EVENT_LABELS[event]}:{len(groups)}:0"
         groups.append({"hooks": [{"type": "command", "command": command,
@@ -158,21 +162,41 @@ def scoped_config(config: dict, kept_ids: set[str], all_items: Sequence[Item],
         _add_hooks(out, hooks, tmp_home)
     return out
 
-def build_home(real_home: Path) -> Path:
-    """A fresh temp CODEX_HOME holding a symlink to every real entry except config.toml.
+def _write_new(path: Path, text: str) -> None:
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, "w") as fh:
+        fh.write(text)
 
-    sessions/ and log/ are created in the real home first, so a run's transcripts and logs land
-    there and outlive the temp dir. Returned resolved, as Codex canonicalises CODEX_HOME and
-    keys hook trust by that path.
+def build_home(real_home: Path) -> Path:
+    """A fresh run home under <real home>/loadout/run, linking every real entry but ours.
+
+    It sits outside $TMPDIR, which Codex's workspace-write sandbox can write. config.toml and
+    loadout/ are never linked, compared case-insensitively for case-insensitive file systems.
+    sessions/ and log/ are created in the real home first so they outlive the run. Returned
+    resolved, as Codex canonicalises CODEX_HOME and keys hook trust by that path.
     """
     real_home.mkdir(parents=True, exist_ok=True)
     for name in STATE_DIRS:
         (real_home / name).mkdir(exist_ok=True)
-    tmp = Path(tempfile.mkdtemp(prefix="loadout-codex-")).resolve()
-    for entry in sorted(real_home.iterdir()):
-        if entry.name != CONFIG_FILE:
-            (tmp / entry.name).symlink_to(entry, target_is_directory=entry.is_dir())
+    runs = real_home / LOADOUT_DIR / "run"
+    for d in (runs.parent, runs):
+        d.mkdir(mode=0o700, exist_ok=True)
+    tmp = Path(tempfile.mkdtemp(prefix="codex-", dir=runs)).resolve()
+    try:
+        for entry in sorted(real_home.iterdir()):
+            if entry.name.casefold() not in GENERATED:
+                (tmp / entry.name).symlink_to(entry, target_is_directory=entry.is_dir())
+    except BaseException:
+        shutil.rmtree(tmp, ignore_errors=True)
+        raise
     return tmp
+
+def _warn_undroppable(project: dict[str, dict], kept_ids: set[str]) -> None:
+    from ccloadout.config import _warn
+    for name, spec in project.items():
+        if name not in kept_ids and isinstance(spec, dict) and spec.get("enabled") is True:
+            _warn(f"claude-loadout can't drop MCP server {name} for this project: its "
+                  ".codex/config.toml sets enabled = true, which wins over the user config")
 
 def compose(binary: str, config_env: str, kept: Sequence[Item], all_items: Sequence[Item],
             codex_home: Path, passthrough: list[str], environ: Mapping[str, str],
@@ -186,10 +210,15 @@ def compose(binary: str, config_env: str, kept: Sequence[Item], all_items: Seque
     kept_ids = {i.id for i in kept}
     config = read_toml(config_file or codex_home / CONFIG_FILE)
     project = project_servers(cwd, config)
+    _warn_undroppable(project, kept_ids)
     home = build_home(codex_home)
-    scoped = scoped_config(config, kept_ids, all_items, project, memory_payload, hooks,
-                           codex_home, home)
-    (home / CONFIG_FILE).write_text(tomlw.dumps(scoped))
+    try:
+        scoped = scoped_config(config, kept_ids, all_items, project, memory_payload, hooks,
+                               codex_home, home)
+        _write_new(home / CONFIG_FILE, tomlw.dumps(scoped))
+    except BaseException:                           # never leave a copied config (API keys) behind
+        shutil.rmtree(home, ignore_errors=True)
+        raise
     env = dict(environ)
     if hook_env:
         env.update({k: str(v) for k, v in hook_env.items()})

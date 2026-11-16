@@ -750,7 +750,8 @@ holds for that one run. `--explain` and `rules` take it too, and nothing stores 
 - **What it scopes.** MCP servers from `$CODEX_HOME/config.toml` (default `~/.codex`) and from a
   trusted project's `.codex/config.toml`, and skills in `.agents/skills` (cwd up to the project
   root), `~/.agents/skills` and `/etc/codex/skills`. Codex plugins are not scoped.
-- **How.** Each run gets a temporary `CODEX_HOME`. Its `config.toml` is your own, with only the
+- **How.** Each run gets a temporary `CODEX_HOME` under `$CODEX_HOME/loadout/run/` (not
+  `$TMPDIR`, which Codex's sandbox can write). Its `config.toml` is your own, with only the
   kept servers, dropped skills turned off through `[[skills.config]]`, and the memory text appended
   to `developer_instructions`. Every other entry (`auth.json`, `sessions/`, `log/`, ...) is a
   symlink to your real `CODEX_HOME`, and the directory is removed after the run. Changes Codex
