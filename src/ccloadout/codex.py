@@ -115,9 +115,9 @@ def _rekey(state: dict, homes: Sequence[Path], new_home: Path) -> dict:
         out[f"{new_home}{os.sep}{key[len(old):]}" if old else key] = value
     return out
 
-def _add_hooks(config: dict, hooks: dict[str, str], real_home: Path, tmp_home: Path) -> None:
+def _add_hooks(config: dict, hooks: dict[str, str], tmp_home: Path) -> None:
     table = config.setdefault("hooks", {})
-    state = _rekey(table.get("state") or {}, (real_home, real_home.resolve()), tmp_home)
+    state = table.get("state") or {}
     for event, module in hooks.items():
         command = f"{shlex.quote(sys.executable)} -m {module}"
         groups = table.setdefault(event, [])
@@ -136,7 +136,7 @@ def scoped_config(config: dict, kept_ids: set[str], all_items: Sequence[Item],
     User servers are cut to the kept ones; a dropped project server is turned off with its own
     definition plus enabled = false, since the project layer still loads it. Dropped skills go
     off by name, after the user's own entries so they win. The memory text is appended to
-    developer_instructions.
+    developer_instructions. The user's hook trust entries are re-keyed to the temp home.
     """
     out = copy.deepcopy(config)
     user = {k: v for k, v in (config.get("mcp_servers") or {}).items() if k in kept_ids}
@@ -151,8 +151,11 @@ def scoped_config(config: dict, kept_ids: set[str], all_items: Sequence[Item],
     if memory_payload:
         prior = out.get("developer_instructions")
         out["developer_instructions"] = f"{prior}\n\n{memory_payload}" if prior else memory_payload
+    state = (out.get("hooks") or {}).get("state")
+    if isinstance(state, dict):                     # the user's trust follows the moved config
+        out["hooks"]["state"] = _rekey(state, (real_home, real_home.resolve()), tmp_home)
     if hooks:
-        _add_hooks(out, hooks, real_home, tmp_home)
+        _add_hooks(out, hooks, tmp_home)
     return out
 
 def build_home(real_home: Path) -> Path:

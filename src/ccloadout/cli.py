@@ -2043,7 +2043,7 @@ _HELP = (
     ("cld doctor", "Report profiles, config and model state"),
     ("cld measure", "Measure the real tool-token cost of MCP servers (opt-in; connects to each)"),
     ("cld --harness codex", ("Launch OpenAI Codex CLI instead of claude (experimental; also "
-                             "takes --explain and rules)")),
+                             "takes --explain, rules and measure)")),
     ("cld --no-gate", "Launch without the pre-launch review pause (or set LOADOUT_NO_GATE)"),
     ("cld --no-scope-skills", ("Keep every user skill loaded, with no skill scoping (or set "
                               "LOADOUT_NO_SCOPE_SKILLS)")),

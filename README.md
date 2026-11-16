@@ -759,6 +759,8 @@ holds for that one run. `--explain` and `rules` take it too, and nothing stores 
   `[hooks.state]` hash entry that `/hooks` writes, so no trust-bypass flag is used. The
   end-of-session reminder stays Claude-only. `cld measure`, `cld memory link` and the profile
   prompt are Claude-only.
+- **Settings.** claude-loadout's own files for Codex runs (`config.toml`, rules) live in
+  `$CODEX_HOME/loadout/`. Settings in a Claude profile's `loadout/` folder do not carry over.
 
 ## Design guarantees
 

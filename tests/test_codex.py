@@ -242,3 +242,14 @@ def test_a_codex_launch_runs_codex_and_removes_the_temp_home(tmp_path, monkeypat
     assert seen["home"] != home and not seen["home"].exists()
     assert seen["config"]["model"] == "gpt-5"
     assert (home / "auth.json").exists() and (home / "sessions" / "rollout.jsonl").exists()
+
+@pytest.mark.parametrize("hooks", [None, {"Stop": "ccloadout.stop_hook"}])
+def test_the_users_hook_trust_moves_even_without_loadout_hooks(tmp_path, hooks):
+    real = (tmp_path / "codex-home").resolve()
+    user = (_SAMPLE + '\n[hooks.state]\n'
+            f'"{real}/hooks.json:stop:0:0" = {{ trusted_hash = "sha256:mine" }}\n')
+    home, plan = _compose(tmp_path, user, hooks=hooks, hook_env={})
+    tmp, = plan.tmp_dirs
+    state = tomllib.loads((tmp / "config.toml").read_text())["hooks"]["state"]
+    assert state == {f"{tmp}/hooks.json:stop:0:0": {"trusted_hash": "sha256:mine"}}
+    remove_tmp(plan)
