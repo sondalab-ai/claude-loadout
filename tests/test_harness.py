@@ -33,7 +33,7 @@ def test_claude_compose_pins_the_exact_argv_and_overlays(tmp_path: Path):
                          "--append-system-prompt-file", str(memory_path),
                          "-c", "--model", "x"]
     assert mcp == '{"mcpServers": {"Gmail": {"command": "g"}}}'
-    hook = f"{shlex.quote(sys.executable)} -m ccloadout.stop_hook"
+    hook = f"{shlex.quote(sys.executable)} -P -m ccloadout.stop_hook"
     assert settings == json.dumps(
         {"enabledPlugins": {"figma@x": False},
          "hooks": {"Stop": [{"hooks": [{"type": "command", "command": hook, "timeout": 5}]}]},
