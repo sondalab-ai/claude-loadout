@@ -191,6 +191,7 @@ def test_hook_command_ignores_a_package_planted_in_the_project(tmp_path: Path):
                    global_config_path=tmp_path / ".claude.json",
                    hooks={"PostToolUse": "ccloadout.debt_hook"}, hook_env={})
     command = _settings_of(plan)["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
-    subprocess.run(shlex.split(command), cwd=project, input="{}", text=True,
-                   capture_output=True, timeout=30)
+    done = subprocess.run(shlex.split(command), cwd=project, input="{}", text=True,
+                          capture_output=True, timeout=30)
+    assert done.returncode == 0, done.stderr
     assert not marker.exists()
