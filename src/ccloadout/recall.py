@@ -244,7 +244,7 @@ def recall_command() -> str:
     exe = Path(sys.argv[0])
     if exe.name and exe.exists():
         return str(exe.resolve())
-    return f"{sys.executable} -m ccloadout"
+    return f"{sys.executable} -P -m ccloadout"
 
 def strip_frontmatter(text: str) -> str:
     if not text.startswith("---"):
