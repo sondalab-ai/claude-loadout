@@ -744,24 +744,70 @@ claude-loadout update ~/src      # refresh every seeded project under a root (bu
 
 ## OpenAI Codex CLI (experimental)
 
-`cld --harness codex [codex-args...]` scopes and launches `codex` instead of `claude`. The choice
-holds for that one run. `--explain` and `rules` take it too, and nothing stores it.
+**Untested against a real Codex.** The Codex harness was written from Codex's documentation and
+source. It was never run against an installed `codex`. Treat it as a preview.
 
-- **What it scopes.** MCP servers from `$CODEX_HOME/config.toml` (default `~/.codex`) and from a
-  trusted project's `.codex/config.toml`, and skills in `.agents/skills` (cwd up to the project
-  root), `~/.agents/skills` and `/etc/codex/skills`. Codex plugins are not scoped.
-- **How.** Each run gets a temporary `CODEX_HOME` under `$CODEX_HOME/loadout/run/` (not
-  `$TMPDIR`, which Codex's sandbox can write). Its `config.toml` is your own, with only the
-  kept servers, dropped skills turned off through `[[skills.config]]`, and the memory text appended
-  to `developer_instructions`. Every other entry (`auth.json`, `sessions/`, `log/`, ...) is a
-  symlink to your real `CODEX_HOME`, and the directory is removed after the run. Changes Codex
-  saves to `config.toml` during that run are not kept.
-- **Hooks.** The prompt-recall and debt hooks are added and marked trusted with the same
-  `[hooks.state]` hash entry that `/hooks` writes, so no trust-bypass flag is used. The
-  end-of-session reminder stays Claude-only. `cld measure`, `cld memory link` and the profile
-  prompt are Claude-only.
+`cld --harness codex [codex-args...]` scopes and launches `codex` instead of `claude`. The choice
+holds for that one run and nothing stores it. Besides a launch, only `--explain`, `rules` and
+`measure` take `--harness`. Any other subcommand, or an unknown name, exits with code 2 and
+launches nothing. Plain `cld` is unchanged and still launches `claude`.
+
+- **What it scopes.** MCP servers from `$CODEX_HOME/config.toml` (default `~/.codex`; servers with
+  `enabled = false` are skipped) and from the `.codex/config.toml` files of a project marked
+  `trust_level = "trusted"`, and skills in `.agents/skills` (cwd up to the project root),
+  `~/.agents/skills` and `/etc/codex/skills`. Codex plugins are not scoped.
+- **The temporary `CODEX_HOME`.** Each run gets a fresh directory under
+  `<real CODEX_HOME>/loadout/run/` (mode 0700), not under `$TMPDIR`, which Codex's sandbox can
+  write. It holds a generated `config.toml` and a symlink for every other entry of your real
+  `CODEX_HOME` (`auth.json`, `sessions/`, `log/`, `hooks.json`, ...) except `loadout/`. `sessions/`
+  and `log/` are created in the real home first, so they outlive the run. The directory is removed
+  after the run.
+- **The generated `config.toml`.** It is your own, rewritten by claude-loadout, so its comments and
+  layout are not kept. It differs in four ways:
+  - **MCP servers.** Only the kept servers stay under `[mcp_servers]`. Codex merges a trusted
+    project's servers over yours, so a dropped project server is written into the user layer with
+    its own definition plus `enabled = false`. If that project's file sets `enabled = true` on a
+    server cld drops, the project wins. cld warns that it can't drop that server.
+  - **Skills.** Dropped skills are turned off with `[[skills.config]]` entries (`name`,
+    `enabled = false`), added after your own entries.
+  - **Memory.** The recalled memory text is appended to `developer_instructions`.
+  - **Hooks.** See below.
+- **Hooks.** The prompt-recall and debt hooks are added as inline `[[hooks.<Event>]]` entries
+  (`UserPromptSubmit`, `PostToolUse`). claude-loadout trusts them itself with the same
+  `[hooks.state]` `trusted_hash` entry that `/hooks` writes, so no trust-bypass flag is used. If the
+  hash ever mismatches, Codex leaves the hook untrusted and skips it. Your own hook trust entries
+  that point at the real home are re-keyed to the temporary one, so they stay trusted. The
+  end-of-session reminder (`Stop`) stays Claude-only. The debt hook reads Codex `apply_patch`
+  edits.
+- **`measure`.** Skipped for Codex with a message. `codex mcp list` has no documented output format.
+  `cld memory link` and the profile prompt are Claude-only.
 - **Settings.** claude-loadout's own files for Codex runs (`config.toml`, rules) live in
   `$CODEX_HOME/loadout/`. Settings in a Claude profile's `loadout/` folder do not carry over.
+
+**Known limits.**
+
+- Anything Codex writes to `config.toml` during a run is lost with the temporary copy: project-trust
+  answers, `/hooks` approvals, `/model`, `codex mcp add`. The trust prompt may come back every run.
+- A file Codex creates in its home for the first time during a run (first login, first
+  `history.jsonl`, a new state database) is lost with the directory. Only `sessions/` and `log/`
+  are created beforehand.
+- A trusted project's own `developer_instructions` overrides the user layer, so the memory text
+  may not reach that session.
+- Symlinked entries may behave differently under the macOS sandbox or for SQLite WAL files.
+- A run killed hard (SIGKILL) can leave a directory under `loadout/run/`.
+
+**Plugins, skills and stacking.** On Claude Code, plugin and per-run skill switches work as
+before. Stacking with MxM is unchanged on Claude Code. It is not supported on Codex yet.
+
+### Security
+
+Hook commands run as `<python> -P -m ccloadout.<hook>`. `-P` keeps the working directory off
+`sys.path`, so a `ccloadout/` package planted in the project folder is never imported. This holds
+for Claude Code and Codex. The Codex trust hash covers the `-P` form of the command. `-P` needs
+Python 3.11 or newer, which is the minimum for claude-loadout.
+
+The generated Codex `config.toml` is created with mode 0600 and never through a symlink. It can hold
+MCP API keys, so it is removed if composing fails.
 
 ## Design guarantees
 
