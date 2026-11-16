@@ -85,7 +85,7 @@ use is recorded and the next launch restores it to `on`. Only an explicit rule p
 ### 4.2 Where it plugs in
 
 - `compose` emits `skillOverrides: {<name>: <value>}` from an id → value map instead of a kept set
-  (`compose.py` today hard-codes `"off"`).
+  (`ClaudeHarness.compose` in `harness.py` today hard-codes `"off"`).
 - The keep/drop result (`Selection`, `kept`/`dropped`, the dropped reason) becomes a value per
   item. Every two-state point found during exploration has to follow: `_scoped_plan`,
   `_decide_keep` (init/update), `_materialize_rules`, `_reconcile_rules`, the launch-gate checkbox

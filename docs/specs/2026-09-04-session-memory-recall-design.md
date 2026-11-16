@@ -392,7 +392,8 @@ debt ledger, and absorption of `debug-decisions` + `memory-org` into the CLI.
 - **Claude Code only.** Portability to other harnesses is deliberately out of scope. A `Harness`
   Protocol does exist (`src/ccloadout/harness.py`, recorded in `2026-08-18 §4.6`) but nothing
   imports it; this subsystem uses the §4 levers directly rather than routing through it, which
-  leaves that seam exactly as dormant as it already was.
+  leaves that seam exactly as dormant as it already was. (Since 2026-11 the launch flow does route
+  through it: `ClaudeHarness` in `harness.py` now owns these levers, unchanged.)
 - **No installation prerequisites.** The subsystem requires no skill, plugin or MCP server to be
   installed — only the `ccloadout` package itself (§5.2.1).
 - **No model call in any hook.**
