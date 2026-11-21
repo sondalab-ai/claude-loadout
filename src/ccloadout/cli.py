@@ -619,6 +619,7 @@ def _session_hooks(cfg, cwd: Path, mem) -> tuple[dict | None, dict | None]:
     if cfg.memory.stop_prompt:
         hooks["Stop"] = "ccloadout.stop_hook"
         env["LOADOUT_EXE"] = recall_command()
+        env["LOADOUT_NOTES_IN_GIT"] = "1" if cfg.memory.git_tracked else "0"   # read when MxM runs too
         if cfg.memory.decision_keywords:
             env["LOADOUT_DECISION_KEYWORDS"] = _LIST_SEP.join(cfg.memory.decision_keywords)
     return (hooks or None), (env if hooks else None)

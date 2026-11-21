@@ -224,3 +224,34 @@ def test_a_stem_with_a_diacritic_matches_either_unicode_form():
                                             + [_said(said)]))
         assert signals(parsed, "-Users-x-repo", keywords=("wähl",)) == ["keyword"], form
         assert signals(parsed, "-Users-x-repo") == ["keyword"], form   # and via the default
+
+def _designing_session(tmp_path, env):
+    transcript = _transcript(tmp_path, _long_session([_used("EnterPlanMode")]))
+    base = {k: v for k, v in os.environ.items() if k != "MXM_SESSION"}
+    out = subprocess.run(HOOK, input=json.dumps({"session_id": "s1", "cwd": _REPO,
+                                                 "transcript_path": str(transcript)}),
+                         capture_output=True, text=True, timeout=20,
+                         env={**base, "LOADOUT_CONFIG_ROOT": str(tmp_path / "root"),
+                              "LOADOUT_EXE": "cld", **env})
+    assert out.returncode == 0
+    return json.loads(out.stdout)["hookSpecificOutput"]["additionalContext"] if out.stdout else ""
+
+def test_with_mxm_the_reminder_asks_only_for_team_notes(tmp_path):
+    # MxM saves the session's decisions on this machine; a cld note is worth it only for the team.
+    context = _designing_session(tmp_path, {"MXM_SESSION": "1", "LOADOUT_NOTES_IN_GIT": "1"})
+    assert "MxM" in context and "team" in context
+    assert "cld decision new" in context and "cld memory add" in context
+
+def test_with_mxm_and_notes_outside_git_the_reminder_stays_silent(tmp_path):
+    # A note that cannot reach the team only repeats what MxM already keeps.
+    assert _designing_session(tmp_path, {"MXM_SESSION": "1", "LOADOUT_NOTES_IN_GIT": "0"}) == ""
+
+def test_without_mxm_the_reminder_is_unchanged(tmp_path):
+    context = _designing_session(tmp_path, {"LOADOUT_NOTES_IN_GIT": "0"})
+    assert context == build_reminder("cld")
+
+def test_the_hook_is_told_whether_notes_go_to_git(tmp_path):
+    _, env = _hooks_for(tmp_path, "[memory]\nstop_prompt = true\ngit_tracked = false\n")
+    assert env["LOADOUT_NOTES_IN_GIT"] == "0"
+    _, env = _hooks_for(tmp_path / "b", "[memory]\nstop_prompt = true\n")
+    assert env["LOADOUT_NOTES_IN_GIT"] == "1"
