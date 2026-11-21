@@ -553,6 +553,19 @@ made. It is read independently of `enabled` — the reminder asks you to write, 
 where a first note is worth most. Every injected hook has five seconds, and reading the whole
 transcript fits: the largest one measured, 52 MB, costs 0.29 s.
 
+**With MxM.** [MxM](https://github.com/sondalab-ai/MxM) also saves each session's decisions: it
+digests the exchanges into facts, stored on this machine. A session that `mxm claude` starts
+carries `MXM_SESSION=1` (MxM sets it for every hook). With that marker, the reminder changes:
+
+- When notes go to git (`git_tracked = true`), it asks only for the decisions the team needs from
+  the repository. MxM keeps the rest.
+- When notes stay out of git (`git_tracked = false`), it says nothing: a note there would only
+  repeat what MxM keeps.
+
+A `cld` note and an MxM fact about the same decision can still both reach a session. MxM's
+note–fact duplicate check is off after its calibration, and MxM's docs explain why. Without
+`MXM_SESSION`, the reminder works as described above.
+
 > **One caution.** Injected notes sit in the highest-trust position a session has. The block says so
 > — it is labelled untrusted reference data — because with `git_tracked = true` a note can reach you
 > through a merged pull request. Set it to `false`, or leave `[memory]` off, in repositories whose

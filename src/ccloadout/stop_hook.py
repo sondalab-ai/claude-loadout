@@ -3,6 +3,8 @@
 Ported from the `debug-decisions` skill's own Stop hook, whose job this tool absorbed. It never
 writes anything the store carries — it emits one line of context and lets the session decide.
 Deterministic: signals are counted from the transcript, no model call and no ranking.
+In a session `mxm claude` started (`MXM_SESSION=1`), MxM saves the decisions too, so the reminder
+asks only for team notes, and says nothing when notes stay out of git.
 
 Reading the transcript is the whole cost, and `compose` gives every injected hook a 5 s ceiling,
 so only the tail is parsed. A file long enough to be truncated is a long session by definition,
@@ -142,6 +144,20 @@ def signals(parsed: dict, slug: str, truncated: bool = False,
         found.append("keyword")
     return found
 
+def build_team_reminder(exe: str) -> str:
+    """The reminder when MxM saves the session (`MXM_SESSION=1`): ask only for team notes.
+
+    MxM digests the session's decisions into facts on this machine, so a cld note earns its place
+    only when the team needs it in git. Asking for everything would store each decision twice.
+    """
+    return ("MxM saves this session's decisions on this machine. If this session made a decision "
+            "the team needs from the repository (a convention, a constraint, a choice others must "
+            "follow), record only that now, briefly and factually, and only what is not already "
+            "obvious from the code or git history:\n"
+            f"  {exe} decision new \"<what was decided, and why>\"\n"
+            f"  {exe} memory add \"<one line>\"\n"
+            "If the team needs nothing from this session, say nothing and do not reply to this.")
+
 def build_reminder(exe: str) -> str:
     return ("This session shows signs of architectural decisions or facts a later session would "
             "have to rediscover. If any were made, record them now — briefly, factually, and only "
@@ -158,6 +174,9 @@ def main() -> int:
         session_id = str(payload.get("session_id") or "")
         if _already_prompted(config_root, session_id):
             return 0                                # one reminder per session, whatever else runs
+        mxm = os.environ.get("MXM_SESSION") == "1"  # set by `mxm claude`, which saves decisions too
+        if mxm and os.environ.get("LOADOUT_NOTES_IN_GIT") == "0":
+            return 0                                # a note outside git only repeats MxM's facts
         cwd = str(payload.get("cwd") or os.environ.get("LOADOUT_REPO") or "")
         transcript = payload.get("transcript_path")
         text, truncated = read_transcript(Path(transcript)) if transcript else ("", False)
@@ -168,7 +187,8 @@ def main() -> int:
             return 0
         exe = os.environ.get("LOADOUT_EXE") or "claude-loadout"
         print(json.dumps({"hookSpecificOutput": {
-            "hookEventName": "Stop", "additionalContext": build_reminder(exe)}}))
+            "hookEventName": "Stop",
+            "additionalContext": (build_team_reminder if mxm else build_reminder)(exe)}}))
         _mark_prompted(config_root, session_id)
     except BaseException:                           # a reminder that fails is worth nothing at all
         return 0
