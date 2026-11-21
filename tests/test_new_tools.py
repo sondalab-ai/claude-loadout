@@ -111,6 +111,7 @@ def _update_with_new_tool(tmp_path, monkeypatch, scope, picked_new):
         reviews.append(({i.id for i in prunable}, set(kept)))
         return set(picked_new) if len(reviews) == 1 else set(kept)
     monkeypatch.setattr(cli, "_review_keep_drop", _stub)
+    monkeypatch.setattr(cli, "_review_renders", lambda prunable: True)
     monkeypatch.setattr(cli, "_ask_new_tool_scope", lambda: scope)
     assert cli.main(["update"]) == 0
     return root, r1, reviews
@@ -140,8 +141,28 @@ def test_update_quit_on_new_tools_skips_the_repo(tmp_path, monkeypatch):
     monkeypatch.setattr(cli, "_discover_profiles", lambda active: [active])
     monkeypatch.setattr("builtins.input", lambda *a, **k: "")
     monkeypatch.setattr(cli, "_review_keep_drop", lambda repo, prunable, kept, label="": None)
+    monkeypatch.setattr(cli, "_review_renders", lambda prunable: True)
     assert cli.main(["update"]) == 0
     assert (r1 / ".loadout" / "rules.toml").read_text() == before
+
+
+def test_update_never_asks_scope_when_the_review_cannot_render(tmp_path, monkeypatch):
+    # Regression: the picker fell back to the ranking silently, then still asked where to apply it,
+    # so `p` turned unseen guesses into profile-wide rules.
+    root, r1 = _seeded_repo(tmp_path, monkeypatch)
+    _add_plugin(root, "newbie@x")
+    monkeypatch.chdir(r1)
+    _fake_stdin(monkeypatch, tty=True)
+    monkeypatch.setattr(cli, "_discover_profiles", lambda active: [active])
+    monkeypatch.setattr("builtins.input", lambda *a, **k: "")
+    monkeypatch.setattr(cli, "_can_raw", lambda: False)
+    monkeypatch.setattr(cli._t, "accessible", lambda: False)
+    def _boom():
+        raise AssertionError("asked where to apply choices the user never saw")
+    monkeypatch.setattr(cli, "_ask_new_tool_scope", _boom)
+    assert cli.main(["update"]) == 0
+    assert "newbie@x" not in _actions(root / "loadout" / "rules.toml")
+    assert "newbie@x" in _actions(r1 / ".loadout" / "rules.toml")   # ranking frozen for this repo only
 
 
 def test_update_yes_skips_the_new_tool_step(tmp_path, monkeypatch):

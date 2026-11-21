@@ -1488,6 +1488,18 @@ def _short_desc(text: str, width: int, ellipsis: str | None = None) -> str:
     mark = _t.ellipsis() if ellipsis is None else ellipsis
     return s if len(s) <= width else s[: max(width - len(mark), 0)].rstrip() + mark
 
+def _review_renders(prunable: list[Item]) -> bool:
+    """Whether _review_keep_drop draws its picker for `prunable` or falls back to the auto set.
+
+    The picker needs a raw tty and a window tall enough for every row and kind header;
+    accessible mode always draws, as a numbered list.
+    """
+    import shutil
+    if not prunable:
+        return False
+    frame = len(prunable) + len({i.kind for i in prunable}) + 5   # title, legend, rows, headers, hint
+    return _t.accessible() or (_can_raw() and frame <= shutil.get_terminal_size((80, 24)).lines)
+
 def _review_keep_drop(repo: Path, prunable: list[Item], kept_ids: set[str],
                       label: str = "claude-loadout init"):
     # Let the user adjust the auto keep/drop before it is frozen. Rows are grouped by kind with a
@@ -1495,17 +1507,14 @@ def _review_keep_drop(repo: Path, prunable: list[Item], kept_ids: set[str],
     # kept-id set, or None to skip the repo. Falls back to the auto decision when a raw tty isn't
     # available or the frame is taller than the window.
     import shutil
-    if not prunable:
-        return set(kept_ids)
+    if not _review_renders(prunable):
+        return set(kept_ids)                        # nothing to show, or can't draw: accept auto silently
     size = shutil.get_terminal_size((80, 24))
     ordered = sorted(prunable, key=lambda i: (_KIND_ORDER.get(i.kind, 9), _display_name(i).lower()))
     headers, seen = {}, set()
     for idx, i in enumerate(ordered):
         if i.kind not in seen:
             headers[idx] = _KIND_HEADER.get(i.kind, i.kind); seen.add(i.kind)
-    frame = len(ordered) + len(headers) + 5         # title + legend + blank + rows + headers + blank + hint
-    if not _t.accessible() and (not _can_raw() or frame > size.lines):
-        return set(kept_ids)                        # can't draw the picker; accept auto silently
     id_w = min(max(len(_display_name(i)) for i in ordered), 30)
     desc_w = min(size.columns, _t.width()) - id_w - 12   # room after the box, name column and gaps
     labels = []
@@ -1765,7 +1774,7 @@ def _update_repo(repo: Path, profile: Path, goal: str, yes: bool):
     prunable = _prunable(items)
     locked = _pinned_ids(prunable, cfg)               # config always_keep wins at launch — not reviewable
     new = _new_tools(prunable, locked, load_rules(cfg.config_root, repo))
-    if new and not yes:
+    if new and not yes and _review_renders(new):     # never ask "where" about choices never shown
         baseline = _decide_new_tools(repo, cfg, new, baseline)
         if baseline is None:
             return None
