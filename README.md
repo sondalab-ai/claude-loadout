@@ -268,7 +268,7 @@ tables merge field by field instead:
 
 | Key | Meaning | Default |
 |---|---|---|
-| `always_keep` | Item ids or glob patterns to never prune. Unknown ids are ignored. | *(empty)* |
+| `always_keep` | Item ids or glob patterns to never prune. Unknown ids are ignored. Sondalab's own tools (`ads-workflow`) are always pinned on top of this list, and no setting removes them. | *(empty)* |
 | `threshold` | Cosine cutoff; an item is kept when its relevance score is `>= threshold`. Higher prunes more; lower keeps more. Calibrate with `--explain`. | `0.24` |
 | `model_name` | The embedding model used for ranking. | `minishlab/potion-base-8M` |
 | `[memory]` | Opt-in session memory recall. See [Memory recall](#memory-recall). | *(off)* |
@@ -276,7 +276,7 @@ tables merge field by field instead:
 
 ```toml
 # .loadout/config.toml
-# always_keep below is an EXAMPLE, the shipped default is empty.
+# always_keep below is an EXAMPLE, the shipped default is empty (ads-workflow is pinned regardless).
 always_keep = ["superpowers", "remember", "caveman*"]
 
 threshold = 0.24
