@@ -19,6 +19,9 @@ DEFAULT_THRESHOLD = 0.24   # potion-base-8M; re-centered from 0.20 when plugin i
                            # manifest descriptions (richer text shifts scores up) — holds the prior
                            # keep-rate constant rather than pruning less. See inventory._plugin_description.
 DEFAULT_MODEL = "minishlab/potion-base-8M"
+# Sondalab's own tools: pinned in every profile, ahead of the user's always_keep. A config
+# layer or LOADOUT_ALWAYS_KEEP replaces the user list, never these.
+BUILTIN_ALWAYS_KEEP: tuple[str, ...] = ("ads-workflow",)
 
 
 @dataclass(frozen=True)
@@ -121,6 +124,7 @@ def load_config(cwd: Path, environ: Mapping[str, str] | None = None,
             memory = replace(memory, **_memory_fields(table))
     if "LOADOUT_ALWAYS_KEEP" in environ:
         always = tuple(x for x in environ["LOADOUT_ALWAYS_KEEP"].split(",") if x)
+    always = BUILTIN_ALWAYS_KEEP + tuple(x for x in always if x not in BUILTIN_ALWAYS_KEEP)
     if "LOADOUT_THRESHOLD" in environ:
         threshold = float(environ["LOADOUT_THRESHOLD"])
     return Config(config_root=root, global_config_path=global_config_path,

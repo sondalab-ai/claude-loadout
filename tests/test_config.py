@@ -1,5 +1,5 @@
 from pathlib import Path
-from ccloadout.config import load_config
+from ccloadout.config import BUILTIN_ALWAYS_KEEP, load_config
 
 def test_env_overrides_repo_and_defaults(tmp_path: Path):
     root = tmp_path / "cfgroot"; root.mkdir()
@@ -13,12 +13,12 @@ def test_env_overrides_repo_and_defaults(tmp_path: Path):
            "LOADOUT_THRESHOLD": "0.9"}
     cfg = load_config(cwd=repo, environ=env)
     assert cfg.config_root == root
-    assert cfg.always_keep == ("c", "d")   # env wins
+    assert cfg.always_keep == (*BUILTIN_ALWAYS_KEEP, "c", "d")   # env wins
     assert cfg.threshold == 0.9            # env wins
 
 def test_defaults_when_nothing_set(tmp_path: Path):
     cfg = load_config(cwd=tmp_path, environ={"CLAUDE_CONFIG_DIR": str(tmp_path)})
-    assert cfg.always_keep == ()
+    assert cfg.always_keep == BUILTIN_ALWAYS_KEEP
     assert cfg.threshold == 0.24
     assert cfg.model_name == "minishlab/potion-base-8M"
 
@@ -29,7 +29,7 @@ def test_config_root_override_wins_over_env(tmp_path: Path):
     env = {"CLAUDE_CONFIG_DIR": str(tmp_path / "other")}   # env points elsewhere
     cfg = load_config(cwd=tmp_path, environ=env, config_root_override=picked)
     assert cfg.config_root == picked
-    assert cfg.always_keep == ("p",)                       # config read from override root
+    assert cfg.always_keep == (*BUILTIN_ALWAYS_KEEP, "p")                     # config read from override root
     assert cfg.global_config_path == picked / ".claude.json"
 
 def test_config_root_override_default_profile_uses_home_json(tmp_path: Path, monkeypatch):
@@ -93,3 +93,13 @@ def test_enabling_when_memory_section_is_not_last(tmp_path: Path):
     cfg = load_config(tmp_path, environ={"CLAUDE_CONFIG_DIR": str(tmp_path / "r")})
     assert cfg.memory.enabled and cfg.memory.budget_tokens == 400
     assert cfg.token_costs["mcp"] == 900                   # the key landed in the right section
+
+def test_builtin_pins_survive_every_layer(tmp_path: Path):
+    # Sondalab tools stay pinned even when a config layer or the env replaces always_keep.
+    assert "ads-workflow" in BUILTIN_ALWAYS_KEEP
+    (tmp_path / "loadout").mkdir()
+    (tmp_path / "loadout" / "config.toml").write_text('always_keep = ["x", "ads-workflow"]\n')
+    cfg = load_config(cwd=tmp_path, environ={"CLAUDE_CONFIG_DIR": str(tmp_path)})
+    assert cfg.always_keep == (*BUILTIN_ALWAYS_KEEP, "x")   # no duplicate
+    env = {"CLAUDE_CONFIG_DIR": str(tmp_path), "LOADOUT_ALWAYS_KEEP": ""}
+    assert load_config(cwd=tmp_path, environ=env).always_keep == BUILTIN_ALWAYS_KEEP

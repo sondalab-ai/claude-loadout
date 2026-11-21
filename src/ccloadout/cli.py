@@ -246,6 +246,7 @@ class _Scope(NamedTuple):
     connectors: list                                # (id, tokens) claude.ai connectors strict-mode drops
     measured: bool                                  # whether a costs.json cache was found
     memory: _Memory | None = None                   # None when [memory] is off
+    new_tools: tuple = ()                           # (id, kept) for tools no rule names, seeded repos only
 
 class _EditGate(NamedTuple):
     # Everything the pre-launch review needs to redraw and re-compose a plan.
@@ -1055,12 +1056,15 @@ def _scoped_plan(passthrough: list[str], cwd: Path, config_root_override: Path |
                                           injected=mem.injected if mem else 0)
         mcp_ids = {i.id for i in items if i.kind == "mcp"}
         connectors = sorted(_measure.connector_costs(measured, mcp_ids).items(), key=lambda kv: -kv[1])
+        kept_ids = {i.id for i in kept}
         scope = _Scope(context, gsource, gconf, cfg.threshold, kept, dropped,
-                       saved, connectors, bool(measured), mem)
+                       saved, connectors, bool(measured), mem,
+                       tuple((i.id, i.id in kept_ids) for i in new))
         return scope, plan
     _is_prunable = lambda i: i.kind in _savings.PRUNABLE and (scope_skills or i.kind != "skill")
     prunable = [i for i in items if _is_prunable(i)]
     editable = [i for i in prunable if i.id not in pinned_ids]     # pinned always stay; not offered
+    new = _new_tools(prunable, pinned_ids, rules) if _is_seeded(cwd) else []
     def _replan(selected_ids: set[str]):           # rebuild the plan from an edited prunable keep-set
         final = pinned_ids | selected_ids
         nkept = [i for i in items if not _is_prunable(i) or i.id in final]
@@ -1403,6 +1407,7 @@ def _decide_keep(items, cfg, context: str, rules: list[Rule]) -> set[str]:
 # authored (via `claude-loadout rules` or by hand) and regenerate only the machine ones.
 _SEED_NL_PREFIX = "seeded by loadout"   # on-disk marker in rules.toml (read back by is_seed_rule); keep stable for compat
 _LEGACY_SEED_NL_PREFIX = "seeded by smartctx"   # seeds written before the rename are machine-owned too
+_NEW_TOOL_NL = "chosen in update for a tool installed after seeding"   # a human rule: update keeps it
 
 def _is_seeded_rule(rule: Rule) -> bool:
     return rule.nl.startswith((_SEED_NL_PREFIX, _LEGACY_SEED_NL_PREFIX))
@@ -1420,6 +1425,38 @@ def _materialize_rules(items, kept_ids: set[str], goal: str, verb: str = "init")
 
 def _prunable(items) -> list[Item]:
     return [i for i in items if i.kind in _savings.PRUNABLE]
+
+def _new_tools(prunable, pinned_ids: set[str], rules: list[Rule]) -> list[Item]:
+    """Prunable tools that no rule names and no config pin covers.
+
+    In a seeded repo these were installed after init or update: ranking decides them on every
+    launch and nobody chose. `rules` is the merged profile + repo set, machine rules included.
+    """
+    return [i for i in prunable if i.id not in pinned_ids and not rules_for(i, rules)]
+
+def _ask_new_tool_scope() -> str:
+    """Where the answers about new tools apply: "repo" (this repo only) or "profile" (every repo)."""
+    dot = _t.sep(err=True)
+    return _menu("Apply these choices where?",
+                 _t.question(f"Apply these choices where? [enter] this repo{dot}"
+                             f"[p] every repo in this profile "),
+                 {"repo": ("", "r", "repo"), "profile": ("p", "profile")})
+
+def _decide_new_tools(repo: Path, cfg, new: list[Item], baseline: set[str]):
+    """Ask keep/drop for the tools installed since the last seed, then where the answer applies.
+
+    A profile answer is written to the profile rules.toml at once. Returns the kept-id set with
+    the answers folded in, or None when the user quits (the repo is skipped).
+    """
+    picked = _review_keep_drop(repo, new, baseline, label=f"{_UPDATE_LABEL}{_t.sep_plain()}new tools")
+    if picked is None:
+        return None
+    if _ask_new_tool_scope() == "profile":
+        for i in new:
+            action = "always_keep" if i.id in picked else "always_drop"
+            save_rule(cfg.config_root, Rule(target=i.id, nl=_NEW_TOOL_NL,
+                                            predicate=Predicate(action, (), "any")))
+    return (baseline - {i.id for i in new}) | picked
 
 def _pinned_ids(items, cfg) -> set[str]:
     # Tools the config's always_keep pins: they win over rules at launch (spec §12), so the
@@ -1451,6 +1488,18 @@ def _short_desc(text: str, width: int, ellipsis: str | None = None) -> str:
     mark = _t.ellipsis() if ellipsis is None else ellipsis
     return s if len(s) <= width else s[: max(width - len(mark), 0)].rstrip() + mark
 
+def _review_renders(prunable: list[Item]) -> bool:
+    """Whether _review_keep_drop draws its picker for `prunable` or falls back to the auto set.
+
+    The picker needs a raw tty and a window tall enough for every row and kind header;
+    accessible mode always draws, as a numbered list.
+    """
+    import shutil
+    if not prunable:
+        return False
+    frame = len(prunable) + len({i.kind for i in prunable}) + 5   # title, legend, rows, headers, hint
+    return _t.accessible() or (_can_raw() and frame <= shutil.get_terminal_size((80, 24)).lines)
+
 def _review_keep_drop(repo: Path, prunable: list[Item], kept_ids: set[str],
                       label: str = "claude-loadout init"):
     # Let the user adjust the auto keep/drop before it is frozen. Rows are grouped by kind with a
@@ -1458,17 +1507,14 @@ def _review_keep_drop(repo: Path, prunable: list[Item], kept_ids: set[str],
     # kept-id set, or None to skip the repo. Falls back to the auto decision when a raw tty isn't
     # available or the frame is taller than the window.
     import shutil
-    if not prunable:
-        return set(kept_ids)
+    if not _review_renders(prunable):
+        return set(kept_ids)                        # nothing to show, or can't draw: accept auto silently
     size = shutil.get_terminal_size((80, 24))
     ordered = sorted(prunable, key=lambda i: (_KIND_ORDER.get(i.kind, 9), _display_name(i).lower()))
     headers, seen = {}, set()
     for idx, i in enumerate(ordered):
         if i.kind not in seen:
             headers[idx] = _KIND_HEADER.get(i.kind, i.kind); seen.add(i.kind)
-    frame = len(ordered) + len(headers) + 5         # title + legend + blank + rows + headers + blank + hint
-    if not _t.accessible() and (not _can_raw() or frame > size.lines):
-        return set(kept_ids)                        # can't draw the picker; accept auto silently
     id_w = min(max(len(_display_name(i)) for i in ordered), 30)
     desc_w = min(size.columns, _t.width()) - id_w - 12   # room after the box, name column and gaps
     labels = []
@@ -1727,6 +1773,12 @@ def _update_repo(repo: Path, profile: Path, goal: str, yes: bool):
     baseline = _decide_keep(items, cfg, goal, decision)   # human rules honored, machine rules re-ranked
     prunable = _prunable(items)
     locked = _pinned_ids(prunable, cfg)               # config always_keep wins at launch — not reviewable
+    new = _new_tools(prunable, locked, load_rules(cfg.config_root, repo))
+    if new and not yes and _review_renders(new):     # never ask "where" about choices never shown
+        baseline = _decide_new_tools(repo, cfg, new, baseline)
+        if baseline is None:
+            return None
+        decision = _decision_rules(cfg, repo_human)   # re-read: a profile answer is a rule now
     if yes:
         final = baseline
     else:
@@ -2089,6 +2141,13 @@ def _print_explain(scope: _Scope, plan) -> None:
         print(f"  {_t.mark('skipped', 'dropped')} {item.id:<{width}}  {_paint(reason, 'dim')}")
     if not dropped:
         print(_t.cont(_paint("nothing", "dim")))
+    if scope.new_tools:
+        print()
+        print(_t.heading(f"New since seeding ({len(scope.new_tools)})"))
+        for tid, kept in scope.new_tools:
+            word = "kept" if kept else "dropped"
+            print(f"  {_t.mark('warn', word)} {tid}  {_paint('no rule; ranked ' + word, 'dim')}")
+        print(_t.cont(_paint("claude-loadout update asks about these", "dim")))
     conn_tok = sum(t for _, t in scope.connectors)
     if scope.connectors:
         print()
@@ -2156,6 +2215,23 @@ def _scoped(scope: _Scope) -> None:
     lines[0] = "  " + _t.glyph("done", err=True) + " " + lines[0][4:]
     print("\n".join(lines), file=sys.stderr)
 
+_NEW_TOOLS_SHOWN = 5   # names in the launch notice; the rest are counted
+
+def _new_tools_notice(scope: _Scope) -> None:
+    """One warn line naming the tools installed since this repo was seeded, then how to decide.
+
+    Each name carries what ranking chose for this launch. It never pauses or asks.
+    """
+    if not scope.new_tools:
+        return
+    named = [f"{tid.split('@', 1)[0]} ({'kept' if kept else 'dropped'})"
+             for tid, kept in scope.new_tools[:_NEW_TOOLS_SHOWN]]
+    rest = len(scope.new_tools) - len(named)
+    tail = f" and {rest} more" if rest else ""
+    _warn(f"{_plural(len(scope.new_tools), 'new tool')} since this repo was seeded: "
+          f"{', '.join(named)}{tail}")
+    _next("claude-loadout update", err=True)
+
 def _maybe_persist_edit(gate: _EditGate, selected_ids: set) -> None:
     # Offer to freeze the edited keep/drop as a repo seed so future launches respect it.
     if not _confirm("Save these choices to this repo?"):
@@ -2167,9 +2243,11 @@ def _maybe_persist_edit(gate: _EditGate, selected_ids: set) -> None:
 def _launch_gate(scope: _Scope, plan, gate: _EditGate, passthrough: list[str], no_gate: bool = False):
     # Interactive pre-launch review: read the summary, optionally edit keep/drop, then launch.
     # Returns the (possibly re-composed) (scope, plan) to run. Non-interactive -> pass through.
-    if gate is None or not (_interactive(passthrough) and (scope.savings.dropped or scope.connectors)):
+    if gate is None or not (_interactive(passthrough)
+                            and (scope.savings.dropped or scope.connectors or scope.new_tools)):
         return scope, plan
     _scoped(scope)
+    _new_tools_notice(scope)
     seeded = _is_seeded(gate.cwd)
     if not seeded:
         _warn("This repo isn't seeded, so this scoping is not kept")
