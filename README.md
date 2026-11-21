@@ -648,6 +648,11 @@ claude-loadout prints the one-line estimate, holds it on screen for a moment (~1
 then launches, long enough to read, without a keypress. Re-tune a seeded repo with `claude-loadout
 update`. Non-interactive launches (`-p`, pipelines) never pause.
 
+A tool you install after seeding has no rule in the repo, so ranking decides it on every launch.
+The launch names such tools in one line, with what ranking chose, and points to `claude-loadout
+update`. It does not pause or ask. A tool that a profile rule or `always_keep` already covers is not
+named. `--explain` lists the same tools under *New since seeding*.
+
 To launch instantly with no pause at all, pass `--no-gate` (or set `LOADOUT_NO_GATE=1`): claude-loadout
 still prints the estimate and the *not seeded* nudge, but hands straight to claude.
 
@@ -735,6 +740,12 @@ claude-loadout update ~/src      # refresh every seeded project under a root (bu
   goal, not the stale cache.
 - **Inventory reconcile.** Tools added to the profile since the last seed appear in the review; tools
   that vanished drop out of the regenerated rules.
+- **New tools first.** When tools were installed since the last seed, update first shows a review
+  of those tools only, pre-ticked to the ranking. Then it asks where your answer applies: this repo
+  (enter), or every repo in this profile (`p`). A profile answer is written to
+  `$CLAUDE_CONFIG_DIR/loadout/rules.toml` at once, like a `claude-loadout rules` answer. The full
+  review follows, pre-ticked with your answer. `q` in the first review skips the repo. `--yes`
+  skips this step and freezes the ranking.
 - **Your rules survive.** Rules you authored by hand (via `claude-loadout rules` or by editing the file)
   are shown in the keep/drop review pre-ticked to their current state and preserved verbatim, only
   the machine-written rules are regenerated. Flip a hand-authored decision in the review and update
