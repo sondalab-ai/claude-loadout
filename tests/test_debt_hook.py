@@ -98,3 +98,17 @@ def test_a_pattern_containing_a_comma_survives_the_env(tmp_path):
          _env(root, patterns="TODO(a,b)"))
     row, = load_candidates(root, repo, kind="debt-signal")
     assert row["pattern"] == "TODO(a,b)"
+
+def test_a_test_run_inside_a_cld_session_leaves_the_real_store_alone(tmp_path):
+    """Regression: the hook tests inherited the session's LOADOUT_CONFIG_ROOT and LOADOUT_REPO.
+
+    Run the junk-input test in a child pytest whose environment looks like a cld session, and
+    check that the session's store gets no candidate row.
+    """
+    root = tmp_path / "session-root"
+    env = {**os.environ, "LOADOUT_CONFIG_ROOT": str(root), "LOADOUT_REPO": str(tmp_path / "repo")}
+    out = subprocess.run([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
+                          f"{__file__}::test_exits_zero_on_junk_input_and_missing_config"],
+                         capture_output=True, text=True, env=env, timeout=60)
+    assert out.returncode == 0, out.stdout + out.stderr
+    assert load_candidates(root) == []
